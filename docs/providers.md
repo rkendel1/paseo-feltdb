@@ -139,6 +139,15 @@ Keep the protocol shape provider-agnostic. Do not add provider-specific renderer
 
 Kimi Code usage follows the CLI-managed credential file at `KIMI_CODE_HOME` or `~/.kimi-code/credentials/kimi-code.json`; do not probe the legacy `~/.kimi` path as the primary source for current Kimi Code installs.
 
+### Usage fetchers are read-only on credentials
+
+A fetcher reads the provider's credential file and never writes it. It must not redeem a refresh token and must not rewrite the file. On a 401 or 403 it returns `unavailable` and lets the provider's own CLI refresh. Two failures come from breaking this rule:
+
+- OAuth refresh tokens are single-use. Redeeming one in the fetcher invalidates the copy the CLI still holds, so the next CLI run has no valid token.
+- Rewriting the file through the fetcher's Zod schema drops every field the schema does not model. Claude's `.credentials.json` lost `expiresAt` and `scopes`; Codex's `auth.json` lost `id_token`, `OPENAI_API_KEY`, and `last_refresh`, which left the file unparseable by the CLI.
+
+Both outcomes force the user to log in again, so a fetcher writing credentials is worse than reporting no usage at all.
+
 ---
 
 ## ACP Provider Checklist

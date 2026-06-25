@@ -522,43 +522,27 @@ describe("real provider usage fetchers", () => {
     expect(fetchApi).not.toHaveBeenCalled();
   });
 
-  it("refreshes Claude access tokens on 401 and retries", async () => {
+  it("returns unavailable on 401 without refreshing or rewriting credentials", async () => {
     writeClaudeCredentials(claudeHome, "at_expired", "rt_valid");
+    const credPath = join(claudeHome, ".credentials.json");
+    const before = readFileSync(credPath, "utf8");
     let usageCalls = 0;
     fetchApi = vi.fn(async (url: RequestInfo | URL) => {
       const endpoint = url.toString();
       if (endpoint === "https://api.anthropic.com/api/oauth/usage") {
         usageCalls += 1;
-        if (usageCalls === 1) return new Response(null, { status: 401 });
-        return jsonResponse(makeClaudeResponse());
+        return new Response(null, { status: 401 });
       }
-      if (endpoint === "https://platform.claude.com/v1/oauth/token") {
-        return jsonResponse({ access_token: "at_refreshed", refresh_token: "rt_new" });
-      }
+      // The read-only fetcher must never hit the OAuth token endpoint.
       throw new Error(`Unmocked: ${endpoint}`);
     }) as never;
 
     const result = await service().listUsage();
 
-    expect(findProvider(result, "claude").status).toBe("available");
-    expect(usageCalls).toBe(2);
-  });
-
-  it("returns unavailable Claude usage when 401 persists after refresh", async () => {
-    writeClaudeCredentials(claudeHome, "at_bad", "rt_bad");
-    fetchApi = mockFetch(
-      new Map([
-        ["https://api.anthropic.com/api/oauth/usage", () => new Response(null, { status: 401 })],
-        [
-          "https://platform.claude.com/v1/oauth/token",
-          () => jsonResponse({ access_token: "at_still_bad", refresh_token: "rt_still_bad" }),
-        ],
-      ]),
-    );
-
-    const result = await service().listUsage();
-
     expect(findProvider(result, "claude").status).toBe("unavailable");
+    expect(usageCalls).toBe(1);
+    // The credentials file must be left untouched for the Claude CLI to own.
+    expect(readFileSync(credPath, "utf8")).toBe(before);
   });
 
   it("does not refresh Claude tokens read from the macOS Keychain", async () => {
@@ -624,7 +608,6 @@ describe("real provider usage fetchers", () => {
           "https://chatgpt.com/backend-api/wham/usage",
           () => new Response("<html>Login</html>", { status: 200 }),
         ],
-        ["https://auth.openai.com/oauth/token", () => new Response(null, { status: 401 })],
       ]),
     );
 
@@ -633,42 +616,42 @@ describe("real provider usage fetchers", () => {
     expect(findProvider(result, "codex").status).toBe("unavailable");
   });
 
-  it("persists refreshed Codex tokens to the auth file that was read", async () => {
-    const alternateCodexHome = mkdtempSync(join(tmpdir(), "usage-test-codex-alt-"));
-    process.env["CODEX_HOME"] = alternateCodexHome;
-    writeFileSync(join(alternateCodexHome, "auth.json"), JSON.stringify({ tokens: {} }));
-    writeCodexAuth(codexHome, "at_codex_stale", "rt_codex_valid");
-
-    let usageCalls = 0;
-    fetchApi = mockFetch(
-      new Map([
-        [
-          "https://chatgpt.com/backend-api/wham/usage",
-          () => {
-            usageCalls += 1;
-            if (usageCalls === 1) return new Response(null, { status: 401 });
-            return jsonResponse(makeCodexResponse());
-          },
-        ],
-        [
-          "https://auth.openai.com/oauth/token",
-          () => jsonResponse({ access_token: "at_codex_fresh", refresh_token: "rt_codex_fresh" }),
-        ],
-      ]),
+  it("returns unavailable on 401 without refreshing or rewriting auth.json", async () => {
+    // Regression: the fetcher used to refresh the token and rewrite auth.json
+    // through a schema that dropped id_token (and OPENAI_API_KEY/last_refresh),
+    // leaving the file unparseable by the Codex CLI and forcing a re-login.
+    const authPath = join(codexHome, "auth.json");
+    writeFileSync(
+      authPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          id_token: "id_codex",
+          access_token: "at_codex_stale",
+          refresh_token: "rt_codex_valid",
+          account_id: "acct_codex",
+        },
+        last_refresh: "2026-07-04T20:35:00Z",
+      }),
     );
+    const before = readFileSync(authPath, "utf8");
+    let usageCalls = 0;
+    fetchApi = vi.fn(async (url: RequestInfo | URL) => {
+      const endpoint = url.toString();
+      if (endpoint === "https://chatgpt.com/backend-api/wham/usage") {
+        usageCalls += 1;
+        return new Response(null, { status: 401 });
+      }
+      // The read-only fetcher must never hit the OAuth token endpoint.
+      throw new Error(`Unmocked: ${endpoint}`);
+    }) as never;
 
-    try {
-      const result = await service().listUsage();
+    const result = await service().listUsage();
 
-      const refreshedAuth = JSON.parse(readFileSync(join(codexHome, "auth.json"), "utf8"));
-      const untouchedAuth = JSON.parse(readFileSync(join(alternateCodexHome, "auth.json"), "utf8"));
-      expect(findProvider(result, "codex").status).toBe("available");
-      expect(refreshedAuth.tokens.access_token).toBe("at_codex_fresh");
-      expect(refreshedAuth.tokens.refresh_token).toBe("rt_codex_fresh");
-      expect(untouchedAuth.tokens.access_token).toBeUndefined();
-    } finally {
-      rmSync(alternateCodexHome, { recursive: true, force: true });
-    }
+    expect(findProvider(result, "codex").status).toBe("unavailable");
+    expect(usageCalls).toBe(1);
+    // The auth file must be left byte-for-byte untouched for the Codex CLI to own.
+    expect(readFileSync(authPath, "utf8")).toBe(before);
   });
 
   it("fetches Copilot usage from COPILOT_TOKEN", async () => {

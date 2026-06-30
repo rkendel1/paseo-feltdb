@@ -766,7 +766,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       .catch((error) => {
         console.error("[Session] authoritative revalidation failed", {
           serverId,
-          error,
+          error: toErrorMessage(error),
         });
       })
       .finally(() => {

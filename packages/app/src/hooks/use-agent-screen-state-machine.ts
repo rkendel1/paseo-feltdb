@@ -58,10 +58,14 @@ function hasOptimisticCreateContinuity(input: AgentScreenMachineInput): boolean 
   return input.continuity.kind === "optimistic-create";
 }
 
-function shouldBlockInitialAuthoritativeReadyState(input: AgentScreenMachineInput): boolean {
+function shouldBlockInitialAuthoritativeReadyState(
+  input: AgentScreenMachineInput,
+  hadInitialSyncFailure: boolean,
+): boolean {
   return (
     !hasOptimisticCreateContinuity(input) &&
     !input.hasHydratedHistoryBefore &&
+    !hadInitialSyncFailure &&
     (input.needsAuthoritativeSync || input.isHistorySyncing)
   );
 }
@@ -197,7 +201,10 @@ export function deriveAgentScreenViewState({
 
   const useOptimisticCreateFlowAgent = shouldUseOptimisticCreateFlowAgent(input);
   const candidateAgent = resolveCandidateAgent({ input, useOptimisticCreateFlowAgent });
-  const shouldBlockReadyState = shouldBlockInitialAuthoritativeReadyState(input);
+  const shouldBlockReadyState = shouldBlockInitialAuthoritativeReadyState(
+    input,
+    nextMemory.hadInitialSyncFailure,
+  );
 
   if (input.missingAgentState.kind === "not_found") {
     return {
@@ -209,7 +216,12 @@ export function deriveAgentScreenViewState({
     };
   }
 
-  if (input.missingAgentState.kind === "error" && !nextMemory.hasRenderedReady) {
+  // A history-sync failure must not hard-block the rendered timeline when we
+  // already have an agent to show: degrade to the non-blocking `sync_error`
+  // banner (see resolveAgentScreenSync) so daemon-persisted and live-pushed
+  // messages stay visible and a reconnect/focus can backfill. The full-screen
+  // error is reserved for when there is no candidate agent to render at all.
+  if (input.missingAgentState.kind === "error" && !nextMemory.hasRenderedReady && !candidateAgent) {
     return {
       state: {
         tag: "error",

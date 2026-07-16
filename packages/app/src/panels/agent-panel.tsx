@@ -788,7 +788,7 @@ function ChatAgentContent({
         console.warn("[AgentPanel] history sync failed", {
           origin,
           agentId,
-          error,
+          error: toErrorMessage(error),
         });
       }
       const message = toErrorMessage(error);

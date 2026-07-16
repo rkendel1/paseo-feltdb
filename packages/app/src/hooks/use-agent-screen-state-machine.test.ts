@@ -274,6 +274,32 @@ describe("deriveAgentScreenViewState", () => {
     expect(result.state.message).toContain("network timeout");
   });
 
+  it("keeps the timeline rendered with sync_error when first-load history sync fails but the agent is present", () => {
+    // Regression: a daemon-confirmed agent whose history sync fails on a fresh
+    // load (no prior hydration) must NOT be hard-blocked behind a full-screen
+    // error. Before the fix this returned tag:"error" and, because
+    // hasRenderedReady never flipped, stayed blocked on every reload -- hiding
+    // daemon-persisted and live-pushed messages permanently. It must degrade to
+    // a non-blocking sync_error banner so the timeline stays visible and a
+    // reconnect/focus can backfill.
+    const memory = createBaseMemory();
+    const input: AgentScreenMachineInput = {
+      ...createBaseInput(),
+      agent: createAgent("agent-1"),
+      needsAuthoritativeSync: true,
+      isHistorySyncing: false,
+      hasHydratedHistoryBefore: false,
+      missingAgentState: { kind: "error", message: "history sync failed" },
+    };
+
+    const result = deriveAgentScreenViewState({ input, memory });
+    const ready = expectReadyState(result.state);
+    expectSyncErrorSync(ready);
+
+    expect(ready.agent.id).toBe("agent-1");
+    expect(result.memory.hadInitialSyncFailure).toBe(true);
+  });
+
   it("returns not_found when resolver confirms missing agent", () => {
     const memory = createBaseMemory({
       hasRenderedReady: true,

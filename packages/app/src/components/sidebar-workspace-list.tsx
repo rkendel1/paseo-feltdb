@@ -2303,7 +2303,6 @@ function ProjectModeList({
           canCopyBranchName={workspace.projectKind === "git"}
           canPin={supportsPinningByServerId.get(workspace.serverId) === true}
           onToggleWorkspacePin={onToggleWorkspacePin}
-          reserveIdleStatusIndicatorSpace={false}
           isCreating={creatingWorkspaceIds.has(workspace.workspaceId)}
           selectionEnabled={selectionEnabled}
           activeWorkspaceSelection={activeWorkspaceSelection}
@@ -2399,7 +2398,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   listContent: {
     paddingHorizontal: theme.spacing[2],
-    paddingTop: theme.spacing[2],
+    // Optical inset: aligns the visible Pinned/Workspaces glyph edge with the
+    // Schedules icon across the divider; their layout boxes have different insets.
+    paddingTop: 2,
     paddingBottom: theme.spacing[4],
   },
   projectListContainer: {

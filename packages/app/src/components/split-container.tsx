@@ -1118,16 +1118,15 @@ function SplitPaneView({
   });
   const tabDescriptorMap = useStableTabDescriptorMap(paneTabs);
   const activeTabDescriptor = paneState.activeTab?.descriptor ?? null;
-  const mountablePaneTabIds = useMemo(
-    () =>
-      deriveMountableWorkspaceTabIds({
+  const retainInactiveTimelineTabs = isNative || shouldRetainInactiveAgentTimelines();
+  const mountablePaneTabIds = retainInactiveTimelineTabs
+    ? paneTabIds
+    : deriveMountableWorkspaceTabIds({
         activeTabId: activeTabDescriptor?.tabId ?? null,
         isWorkspaceFocused,
-        retainInactiveTimelineTabs: isNative || shouldRetainInactiveAgentTimelines(),
+        retainInactiveTimelineTabs,
         tabs: paneTabs,
-      }),
-    [activeTabDescriptor?.tabId, isWorkspaceFocused, paneTabs],
-  );
+      });
   const { mountedTabIds } = useMountedTabSet({
     activeTabId: activeTabDescriptor?.tabId ?? null,
     allTabIds: mountablePaneTabIds,

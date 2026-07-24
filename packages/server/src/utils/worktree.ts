@@ -124,6 +124,10 @@ export interface ServiceScriptConfig {
 
 export type ScriptConfig = PlainScriptConfig | ServiceScriptConfig;
 
+export interface WorkspaceLinkConfig {
+  url: string;
+}
+
 export function isServiceScript(config: ScriptConfig): config is ServiceScriptConfig {
   return "type" in config && config.type === "service";
 }
@@ -330,6 +334,9 @@ export function getScriptConfigs(config: PaseoConfig | null): Map<string, Script
     if (!entry || typeof entry !== "object") {
       continue;
     }
+    if (entry.type === "link") {
+      continue;
+    }
 
     const rawCommand = entry.command;
     if (typeof rawCommand !== "string") {
@@ -360,6 +367,27 @@ export function getScriptConfigs(config: PaseoConfig | null): Map<string, Script
   }
 
   return result;
+}
+
+export function getWorkspaceLinkConfigs(
+  config: PaseoConfig | null,
+): Map<string, WorkspaceLinkConfig> {
+  const scripts = config?.scripts;
+  if (!scripts || typeof scripts !== "object") {
+    return new Map();
+  }
+
+  const links = new Map<string, WorkspaceLinkConfig>();
+  for (const [name, entry] of Object.entries(scripts)) {
+    if (!entry || typeof entry !== "object" || entry.type !== "link") {
+      continue;
+    }
+    const url = typeof entry.url === "string" ? entry.url.trim() : "";
+    if (url.length > 0) {
+      links.set(name, { url });
+    }
+  }
+  return links;
 }
 
 export function processCarriageReturns(text: string): string {

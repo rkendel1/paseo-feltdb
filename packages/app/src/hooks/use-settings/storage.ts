@@ -1,6 +1,12 @@
 import { isSyntaxThemeId, type SyntaxThemeId } from "@getpaseo/highlight";
 import type { ActiveTurnBehavior } from "@getpaseo/protocol/messages";
 import type { QueryClient } from "@tanstack/react-query";
+import {
+  DEFAULT_COMMAND_SIGIL,
+  DEFAULT_SKILL_SIGIL,
+  resolveComposerSigils,
+  type ComposerSigil,
+} from "@/composer/tokens/sigils";
 import type { DesktopSettings } from "@/desktop/settings/desktop-settings";
 import { parseAppLanguage, type AppLanguage } from "@/i18n/locales";
 import {
@@ -77,6 +83,10 @@ export interface AppSettings {
   toolCallDetailLevel: ToolCallDetailLevel;
   chatOutlineEnabled: boolean;
   vimKeybindings: boolean;
+  /** Character that opens the full command menu at the start of a prompt. */
+  commandTriggerSigil: ComposerSigil;
+  /** Character that opens the skills-only menu anywhere in a message. */
+  skillTriggerSigil: ComposerSigil;
 }
 
 export interface Settings extends AppSettings {
@@ -124,6 +134,8 @@ const StoredAppSettingsSchema = z.strictObject({
   compactToolCalls: z.boolean().optional(),
   chatOutlineEnabled: z.boolean().optional(),
   vimKeybindings: z.boolean().optional(),
+  commandTriggerSigil: z.string().optional(),
+  skillTriggerSigil: z.string().optional(),
   // COMPAT(rendererDesktopSettings): these fields used to share this renderer-owned key.
   manageBuiltInDaemon: z.boolean().optional(),
   releaseChannel: z.enum(["stable", "beta"]).optional(),
@@ -153,6 +165,8 @@ export const DEFAULT_CLIENT_SETTINGS: AppSettings = {
   toolCallDetailLevel: "detailed",
   chatOutlineEnabled: true,
   vimKeybindings: false,
+  commandTriggerSigil: DEFAULT_COMMAND_SIGIL,
+  skillTriggerSigil: DEFAULT_SKILL_SIGIL,
 };
 
 export const DEFAULT_APP_SETTINGS: Settings = {
@@ -190,7 +204,7 @@ export async function saveAppSettings(input: {
     input.queryClient.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY) ??
     (await loadAppSettingsFromStorage(input.deps));
   const current = normalizeAppSettings(storedCurrent);
-  const next = { ...current, ...input.updates };
+  const next = normalizeAppSettings({ ...current, ...input.updates });
   input.queryClient.setQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY, next);
   await input.deps.storage.setItem(APP_SETTINGS_KEY, JSON.stringify(next));
 }
@@ -415,7 +429,21 @@ function pickAppSettings(stored: StoredAppSettings): Partial<AppSettings> {
   if (toolCallDetailLevel !== null) {
     result.toolCallDetailLevel = toolCallDetailLevel;
   }
+  Object.assign(result, pickComposerSigils(stored));
   return result;
+}
+
+function pickComposerSigils(
+  stored: StoredAppSettings,
+): Pick<AppSettings, "commandTriggerSigil" | "skillTriggerSigil"> {
+  const sigils = resolveComposerSigils({
+    command: stored.commandTriggerSigil,
+    skill: stored.skillTriggerSigil,
+  });
+  return {
+    commandTriggerSigil: sigils.command,
+    skillTriggerSigil: sigils.skill,
+  };
 }
 
 function pickAppSettingsFromLegacy(

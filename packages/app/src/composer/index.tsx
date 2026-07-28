@@ -1577,7 +1577,11 @@ function ComposerContentImpl({
   const handleSubmit = useCallback(
     (payload: MessagePayload) => {
       const outgoingAttachments = buildOutgoingAttachments(attachments);
-      const submissionText = normalizeComposerTokensForSubmission(payload.text, composerSigils);
+      const submissionText = normalizeComposerTokensForSubmission(
+        payload.text,
+        composerSigils,
+        autocomplete.tokenCatalog,
+      );
       const clientSlashCommand = resolveClientSlashCommand({
         text: submissionText,
         hasAttachments: outgoingAttachments.length > 0,
@@ -1596,6 +1600,7 @@ function ComposerContentImpl({
       blurOnSubmit,
       buildOutgoingAttachments,
       composerSigils,
+      autocomplete.tokenCatalog,
       runClientSlashCommand,
       sendMessageWithContent,
     ],
@@ -1844,7 +1849,11 @@ function ComposerContentImpl({
   const handleQueue = useCallback(
     (payload: MessagePayload) => {
       const outgoingAttachments = buildOutgoingAttachments(attachments);
-      const submissionText = normalizeComposerTokensForSubmission(payload.text, composerSigils);
+      const submissionText = normalizeComposerTokensForSubmission(
+        payload.text,
+        composerSigils,
+        autocomplete.tokenCatalog,
+      );
       const clientSlashCommand = resolveClientSlashCommand({
         text: submissionText,
         hasAttachments: outgoingAttachments.length > 0,
@@ -1854,7 +1863,14 @@ function ComposerContentImpl({
       }
       queueMessage(submissionText, outgoingAttachments);
     },
-    [attachments, buildOutgoingAttachments, composerSigils, queueMessage, runClientSlashCommand],
+    [
+      attachments,
+      autocomplete.tokenCatalog,
+      buildOutgoingAttachments,
+      composerSigils,
+      queueMessage,
+      runClientSlashCommand,
+    ],
   );
 
   const hasSendableContent = userInput.trim().length > 0 || selectedAttachments.length > 0;
@@ -2280,6 +2296,7 @@ function ComposerContentImpl({
                 <StableMessageInput
                   ref={messageInputRef}
                   value={userInput}
+                  tokenCatalog={autocomplete.tokenCatalog}
                   onChangeText={setUserInput}
                   onSubmit={handleSubmit}
                   hasExternalContent={hasExternalContent}

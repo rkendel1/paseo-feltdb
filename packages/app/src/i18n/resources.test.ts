@@ -502,6 +502,7 @@ describe("translation resources", () => {
       "Toggle Explorer pane maximization",
     );
     expect(en.branchSwitcher.triggerTooltip).toBe("Switch workspace branch");
+    expect(en.workspace.setup.waitingForWorkspace).toBe("Waiting for workspace setup");
     expect(en.branchSwitcher.uncommittedTitle).toBe("Uncommitted changes");
     expect(en.branchSwitcher.uncommittedMessage).toBe(
       "You have uncommitted changes. Stash them before switching branches?",

@@ -102,6 +102,7 @@ function createFinishNotificationScenario(
     steerAttemptCount += 1;
     return { status: "inactive" };
   });
+  Reflect.set(agentManager, "isAgentWaitingForWorkspaceSetup", () => false);
   Reflect.set(agentManager, "streamAgent", (_agentId: string, prompt: string) => {
     parentPrompted = true;
     parentPrompts.push(prompt);

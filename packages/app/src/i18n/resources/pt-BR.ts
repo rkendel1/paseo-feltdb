@@ -2103,6 +2103,7 @@ export const ptBR: TranslationResources = {
         queueMessage: "Enfileirar mensagem",
         muteUnmuteVoiceMode: "Silenciar/ativar modo de voz",
         switchProject: "Trocar projeto",
+        selectHost: "Selecionar host",
       },
       helpNotes: {
         showKeyboardShortcuts:

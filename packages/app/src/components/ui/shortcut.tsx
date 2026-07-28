@@ -3,17 +3,19 @@ import { Text, View, type StyleProp, type TextStyle, type ViewStyle } from "reac
 import { StyleSheet } from "react-native-unistyles";
 import { useKeyboardShortcutsAvailable } from "@/keyboard/availability";
 import { normalizeDisplayChord } from "@/components/ui/normalize-display-chord";
-import { formatShortcut, type ShortcutKey } from "@/utils/format-shortcut";
+import { formatCompactShortcut, formatShortcut, type ShortcutKey } from "@/utils/format-shortcut";
 import { getShortcutOs } from "@/utils/shortcut-platform";
 
 export function Shortcut({
   keys,
   chord,
+  compactModifiers = false,
   style,
   textStyle,
 }: {
   keys?: ShortcutKey[];
   chord?: ShortcutKey[][];
+  compactModifiers?: boolean;
   style?: StyleProp<ViewStyle>;
   textStyle?: StyleProp<TextStyle>;
 }): ReactElement | null {
@@ -39,7 +41,11 @@ export function Shortcut({
   if (displayChord.length === 1) {
     return (
       <View style={badgeStyle}>
-        <Text style={textCombinedStyle}>{formatShortcut(singleCombo, shortcutOs)}</Text>
+        <Text style={textCombinedStyle}>
+          {compactModifiers
+            ? formatCompactShortcut(singleCombo, shortcutOs)
+            : formatShortcut(singleCombo, shortcutOs)}
+        </Text>
       </View>
     );
   }
@@ -49,7 +55,11 @@ export function Shortcut({
       {displayChord.map(function (combo) {
         return (
           <View key={combo.join("+")} style={styles.badge}>
-            <Text style={textCombinedStyle}>{formatShortcut(combo, shortcutOs)}</Text>
+            <Text style={textCombinedStyle}>
+              {compactModifiers
+                ? formatCompactShortcut(combo, shortcutOs)
+                : formatShortcut(combo, shortcutOs)}
+            </Text>
           </View>
         );
       })}

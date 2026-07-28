@@ -60,13 +60,16 @@ describe("routeKeyboardShortcut — dispatch passthroughs", () => {
       { id: "workspace.explorer.maximize.toggle", scope: "workspace" },
     ],
     ["view.toggle.focus", { id: "workspace.focus.toggle", scope: "workspace" }],
-    ["message-input.provider.pick", { id: "message-input.provider.pick", scope: "message-input" }],
     ["message-input.model.pick", { id: "message-input.model.pick", scope: "message-input" }],
     ["message-input.thinking.pick", { id: "message-input.thinking.pick", scope: "message-input" }],
     ["message-input.mode.pick", { id: "message-input.mode.pick", scope: "message-input" }],
     [
       "message-input.fast-mode.toggle",
       { id: "message-input.fast-mode.toggle", scope: "message-input" },
+    ],
+    [
+      "message-input.plan-mode.toggle",
+      { id: "message-input.plan-mode.toggle", scope: "message-input" },
     ],
   ])("%s → dispatch %j", (action, expected) => {
     expect(routeKeyboardShortcut({ action, payload: null }, makeCtx())).toEqual({

@@ -1303,6 +1303,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
           serverId={serverId}
           agentId={agentId}
           agent={effectiveAgent}
+          isPaneFocused={isPaneFocused}
           routeBottomAnchorRequest={routeBottomAnchorRequest}
           hasAppliedAuthoritativeHistory={hasAppliedAuthoritativeHistory}
           bottomOverlayTailClearance={showAgentTracks ? composerTrackTailClearance : 0}
@@ -1368,6 +1369,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
   serverId,
   agentId,
   agent,
+  isPaneFocused,
   routeBottomAnchorRequest,
   hasAppliedAuthoritativeHistory,
   bottomOverlayTailClearance,
@@ -1378,6 +1380,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
   serverId: string;
   agentId?: string;
   agent: AgentScreenAgent;
+  isPaneFocused: boolean;
   routeBottomAnchorRequest: RouteBottomAnchorRequest;
   hasAppliedAuthoritativeHistory: boolean;
   bottomOverlayTailClearance: number;
@@ -1444,6 +1447,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
       pendingMessageSubmissions={pendingMessageSubmissions}
       turnPresentation={turnPresentation}
       onOpenWorkspaceFile={onOpenWorkspaceFile}
+      isPaneFocused={isPaneFocused}
     />
   );
 });

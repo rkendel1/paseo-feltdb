@@ -202,6 +202,13 @@ export const fr: TranslationResources = {
     empty: "Commencez à discuter avec cet agent...",
     scrollToBottom: "Faire défiler vers le bas",
     historyLoadFailed: "Impossible de charger l’historique de l’agent",
+    find: {
+      placeholder: "Rechercher dans la conversation",
+      matchCount: "{{current}}/{{total}}",
+      previous: "Correspondance précédente",
+      next: "Correspondance suivante",
+      close: "Fermer la recherche",
+    },
     permission: {
       plan: "Plan",
       required: "Autorisation requise",
@@ -2124,6 +2131,7 @@ export const fr: TranslationResources = {
         queueMessage: "Message de file d'attente",
         muteUnmuteVoiceMode: "Mode vocal/unmutemuet",
         switchProject: "Changer de projet",
+        findInConversation: "Rechercher dans la conversation",
       },
       helpNotes: {
         showKeyboardShortcuts:

@@ -84,6 +84,8 @@ export function parseStoredAgentRecord(value: unknown): StoredAgentRecord {
   return STORED_AGENT_SCHEMA.parse(value);
 }
 
+type AgentHardDeletedCallback = (agentId: string) => Promise<void> | void;
+
 export class AgentStorage {
   private cache: Map<string, StoredAgentRecord> = new Map();
   private pathById: Map<string, string> = new Map();
@@ -92,6 +94,7 @@ export class AgentStorage {
   private deleting: Set<string> = new Set();
   private daemonAgentIdsByExecution: Map<string, string> = new Map();
   private daemonExecutionKeysByAgentId: Map<string, string> = new Map();
+  private hardDeletedCallbacks = new Set<AgentHardDeletedCallback>();
   private loaded = false;
   private baseDir: string;
   private loadPromise: Promise<StoredAgentRecord[]> | null = null;
@@ -175,6 +178,13 @@ export class AgentStorage {
     this.deleting.add(agentId);
   }
 
+  addAgentHardDeletedCallback(callback: AgentHardDeletedCallback): () => void {
+    this.hardDeletedCallbacks.add(callback);
+    return () => {
+      this.hardDeletedCallbacks.delete(callback);
+    };
+  }
+
   async remove(agentId: string): Promise<void> {
     await this.load();
     this.beginDelete(agentId);
@@ -200,6 +210,14 @@ export class AgentStorage {
     this.removeOwnerIndex(agentId);
     this.pathById.delete(agentId);
     this.pathsById.delete(agentId);
+
+    for (const callback of this.hardDeletedCallbacks) {
+      try {
+        await callback(agentId);
+      } catch (error) {
+        this.logger.warn({ err: error, agentId }, "onAgentHardDeleted callback failed");
+      }
+    }
   }
 
   async applySnapshot(

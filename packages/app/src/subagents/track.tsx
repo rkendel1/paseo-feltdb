@@ -12,6 +12,10 @@ import {
   WorkspaceTabIcon,
   type WorkspaceTabPresentation,
 } from "@/screens/workspace/workspace-tab-presentation";
+import {
+  useAgentModelDisplayResolver,
+  type AgentModelDisplayResolver,
+} from "@/hooks/use-agent-model-display";
 import type { Theme } from "@/styles/theme";
 import type { SubagentRow } from "./select";
 import type { ArchiveFinishedStatus } from "./use-archive-finished";
@@ -31,6 +35,9 @@ const foregroundMutedColorMapping = (theme: Theme) => ({
 
 export interface SubagentsTrackProps {
   rows: SubagentRow[];
+  /** Host and directory the model labels are resolved against. */
+  serverId: string;
+  cwd: string | null;
   onOpenSubagent: (id: string) => void;
   onOpenProviderSubagent: (parentAgentId: string, subagentId: string) => void;
   onArchiveSubagent: (id: string) => void;
@@ -44,18 +51,40 @@ const IDLE_ARCHIVE_FINISHED_STATUS: ArchiveFinishedStatus = { kind: "idle" };
 /** Leading and action glyphs share one size so rows keep a single icon column. */
 const ROW_ICON_SIZE = 14;
 
-function buildRowPresentation(row: SubagentRow): WorkspaceTabPresentation {
-  const data = buildSubagentRowPresentationData(row);
+interface SubagentRowView {
+  presentation: WorkspaceTabPresentation;
+  /** Trailing muted "Model · Thinking", or null when the row reports neither. */
+  meta: string | null;
+}
+
+function buildRowView(
+  row: SubagentRow,
+  resolveModelDisplay: AgentModelDisplayResolver,
+): SubagentRowView {
+  const data = buildSubagentRowPresentationData(
+    row,
+    resolveModelDisplay({ provider: row.provider, source: row }),
+  );
   return {
-    ...data,
-    tooltip: data.label,
-    modified: false,
-    icon: getProviderIcon(row.provider),
+    meta: data.meta,
+    presentation: {
+      key: data.key,
+      kind: data.kind,
+      label: data.label,
+      subtitle: "",
+      tooltip: data.tooltip,
+      titleState: data.titleState,
+      statusBucket: data.statusBucket,
+      modified: false,
+      icon: getProviderIcon(row.provider),
+    },
   };
 }
 
 export function SubagentsTrack({
   rows,
+  serverId,
+  cwd,
   onOpenSubagent,
   onOpenProviderSubagent,
   onArchiveSubagent,
@@ -64,6 +93,7 @@ export function SubagentsTrack({
   onDetachSubagent,
 }: SubagentsTrackProps): ReactElement | null {
   const { t } = useTranslation();
+  const resolveModelDisplay = useAgentModelDisplayResolver(serverId, cwd);
 
   const isArchivingFinished = archiveFinishedStatus.kind === "archiving";
   const isArchiveFinishedFailed = archiveFinishedStatus.kind === "failed";
@@ -95,6 +125,7 @@ export function SubagentsTrack({
         <SubagentsTrackRow
           key={row.id}
           row={row}
+          resolveModelDisplay={resolveModelDisplay}
           onOpenSubagent={onOpenSubagent}
           onOpenProviderSubagent={onOpenProviderSubagent}
           onArchiveSubagent={onArchiveSubagent}
@@ -162,9 +193,9 @@ function ArchiveFinishedRow({
     </ComposerTrackRow>
   );
 }
-
 interface SubagentsTrackRowProps {
   row: SubagentRow;
+  resolveModelDisplay: AgentModelDisplayResolver;
   onOpenSubagent: (id: string) => void;
   onOpenProviderSubagent: (parentAgentId: string, subagentId: string) => void;
   onArchiveSubagent: (id: string) => void;
@@ -173,6 +204,7 @@ interface SubagentsTrackRowProps {
 
 function SubagentsTrackRow({
   row,
+  resolveModelDisplay,
   onOpenSubagent,
   onOpenProviderSubagent,
   onArchiveSubagent,
@@ -180,7 +212,10 @@ function SubagentsTrackRow({
 }: SubagentsTrackRowProps): ReactElement {
   const { t } = useTranslation();
   const isCompact = useIsCompactFormFactor();
-  const presentation = useMemo(() => buildRowPresentation(row), [row]);
+  const { presentation, meta } = useMemo(
+    () => buildRowView(row, resolveModelDisplay),
+    [resolveModelDisplay, row],
+  );
   const displayLabel =
     presentation.titleState === "loading" ? t("common.states.loading") : presentation.label;
   const handlePress = useCallback(() => {
@@ -205,9 +240,9 @@ function SubagentsTrackRow({
         <Text style={styles.rowLabel} numberOfLines={1}>
           {displayLabel}
         </Text>
-        {presentation.subtitle ? (
-          <Text style={styles.rowTrailing} numberOfLines={1}>
-            {presentation.subtitle}
+        {meta ? (
+          <Text style={styles.rowMeta} numberOfLines={1} testID={`subagents-track-row-meta-${row.id}`}>
+            {meta}
           </Text>
         ) : null}
         {row.kind === "paseo" ? (
@@ -227,6 +262,7 @@ function SubagentsTrackRow({
       handleArchivePress,
       handleDetachPress,
       onDetachSubagent,
+      meta,
       presentation,
       row.kind,
       row.id,
@@ -342,12 +378,10 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.base,
     color: theme.colors.foreground,
   },
-  // Trailing metadata — provider context on a subagent row, progress on the archive row. No width
-  // cap: the panel's own ceiling bounds it. It shrinks twice as fast as the label, so a wordy
-  // provider subtitle gives way first instead of squeezing the thing that names the row.
-  rowTrailing: {
-    flexShrink: 2,
+  rowMeta: {
+    flexShrink: 1,
     minWidth: 0,
+    maxWidth: "40%",
     fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
   },

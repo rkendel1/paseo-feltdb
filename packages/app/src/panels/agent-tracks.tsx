@@ -25,12 +25,14 @@ import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
  */
 export const AgentTracks = memo(function AgentTracks({
   serverId,
+  cwd,
   subagentRows,
   tasks,
   archiveFinishedStatus,
   onArchiveFinished,
 }: {
   serverId: string;
+  cwd: string | null;
   subagentRows: SubagentRow[];
   tasks: TodoEntry[] | undefined;
   archiveFinishedStatus: ArchiveFinishedStatus;
@@ -86,6 +88,8 @@ export const AgentTracks = memo(function AgentTracks({
     <ComposerTrackBar>
       <SubagentsTrack
         rows={subagentRows}
+        serverId={serverId}
+        cwd={cwd}
         onOpenSubagent={handleOpenSubagent}
         onOpenProviderSubagent={handleOpenProviderSubagent}
         onArchiveSubagent={archiveSubagent}

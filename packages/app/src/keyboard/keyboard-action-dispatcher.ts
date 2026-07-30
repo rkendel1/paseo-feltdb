@@ -40,7 +40,8 @@ export type KeyboardActionId =
   | "workspace.project.pick"
   | "worktree.new"
   | "workspace.archive"
-  | "workspace.pin";
+  | "workspace.pin"
+  | "live-voice.mute-toggle";
 
 export type KeyboardActionDefinition =
   | { id: "agent.interrupt"; scope: KeyboardActionScope }
@@ -82,7 +83,8 @@ export type KeyboardActionDefinition =
   | { id: "workspace.project.pick"; scope: KeyboardActionScope }
   | { id: "worktree.new"; scope: KeyboardActionScope }
   | { id: "workspace.archive"; scope: KeyboardActionScope }
-  | { id: "workspace.pin"; scope: KeyboardActionScope };
+  | { id: "workspace.pin"; scope: KeyboardActionScope }
+  | { id: "live-voice.mute-toggle"; scope: KeyboardActionScope };
 
 export interface KeyboardActionHandler {
   handlerId: string;

@@ -55,7 +55,11 @@ describe("AgentDirectoryReplica", () => {
     const serverId = "agent-replica";
     const store = useSessionStore.getState();
     store.initializeSession(serverId, null as unknown as DaemonClient);
-    const replica = new AgentDirectoryReplica(serverId, () => undefined);
+    const replica = new AgentDirectoryReplica(serverId, {
+      onStoppedRunning: () => undefined,
+      onAgentInactive: () => undefined,
+      onDirectoryCommitted: () => undefined,
+    });
     replica.commitSnapshot([entry(payload("directory"))], []);
     const directoryPlacement = useSessionStore
       .getState()

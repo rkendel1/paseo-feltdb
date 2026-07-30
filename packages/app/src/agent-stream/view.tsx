@@ -51,7 +51,10 @@ import type {
 } from "@getpaseo/protocol/agent-types";
 import type { AgentScreenAgent } from "@/hooks/use-agent-screen-state-machine";
 import { formatAgentModelDisplayMeta } from "@/composer/agent-controls/utils";
-import { useAgentModelDisplay } from "@/hooks/use-agent-model-display";
+import {
+  useAgentModelDisplay,
+  useAgentModelDisplayResolver,
+} from "@/hooks/use-agent-model-display";
 import { useSessionStore } from "@/stores/session-store";
 import { useFileExplorerActions } from "@/hooks/use-file-explorer-actions";
 import { useLoadOlderAgentHistory } from "@/hooks/use-load-older-agent-history";
@@ -84,6 +87,7 @@ import {
 } from "./turn-footer";
 import { resolveBottomOverlayTailInset } from "./bottom-overlay-inset";
 import { layoutStream, type StreamLayoutItem } from "./layout";
+import type { TurnAttribution } from "./turn-attribution";
 import {
   type BottomAnchorLocalRequest,
   type BottomAnchorRouteRequest,
@@ -158,6 +162,7 @@ function renderStreamItemWithTurnFooter(input: {
   strategy: TurnContentStrategy;
   supportsTimelineCursor: boolean;
   onForkAssistantTurn?: AssistantTurnForkHandler;
+  formatTurnMeta?: (attribution: TurnAttribution) => string | null;
 }): ReactNode {
   if (!input.content) {
     return null;
@@ -172,6 +177,7 @@ function renderStreamItemWithTurnFooter(input: {
       startIndex={footerHost.startIndex}
       supportsTimelineCursor={input.supportsTimelineCursor}
       onForkAssistantTurn={input.onForkAssistantTurn}
+      formatTurnMeta={input.formatTurnMeta}
     />
   ) : null;
   const content = (
@@ -844,6 +850,26 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       [renderUserMessageItem, renderAssistantMessageItem, renderThoughtItem, renderToolCallItem],
     );
 
+    // Completed turns carry their own recorded model, so they resolve labels per
+    // turn rather than reusing the agent's current selection.
+    const resolveModelDisplay = useAgentModelDisplayResolver(resolvedServerId, context.cwd);
+    const turnProvider = context.provider;
+    const formatTurnMeta = useCallback(
+      (attribution: TurnAttribution) =>
+        formatAgentModelDisplayMeta(
+          resolveModelDisplay({
+            provider: turnProvider,
+            source: {
+              runtimeModelId: attribution.model,
+              // The turn recorded exactly what ran; there is no configured value
+              // to fall back to and no daemon-computed effective value here.
+              effectiveThinkingOptionId: attribution.thinkingOptionId ?? null,
+            },
+          }),
+        ),
+      [resolveModelDisplay, turnProvider],
+    );
+
     const bottomTurnFooterHost = streamLayout.auxiliaryTurnFooter;
 
     const renderStreamItem = useCallback(
@@ -855,9 +881,11 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           strategy: streamRenderStrategy,
           supportsTimelineCursor: supportsAgentForkContextCursor,
           onForkAssistantTurn: readOnly ? undefined : handleForkAssistantTurn,
+          formatTurnMeta,
         });
       },
       [
+        formatTurnMeta,
         handleForkAssistantTurn,
         readOnly,
         renderStreamItemContent,
@@ -887,6 +915,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             isRunning={isTurnActive}
             inFlightTurnStartedAt={baseRenderModel.turnTiming.runningStartedAt}
             runningMeta={runningTurnMeta}
+            formatTurnMeta={formatTurnMeta}
             host={bottomTurnFooterHost}
             strategy={streamRenderStrategy}
             supportsTimelineCursor={supportsAgentForkContextCursor}
@@ -895,6 +924,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           />
         ) : null,
       [
+        formatTurnMeta,
         handleForkAssistantTurn,
         handleForkInFlightTurn,
         readOnly,

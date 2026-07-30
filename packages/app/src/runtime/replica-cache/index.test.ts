@@ -54,7 +54,12 @@ function workspace(
   };
 }
 
-function agent(id: string, workspaceId = "workspace-1", cwd = "/repo/paseo") {
+function agent(
+  id: string,
+  workspaceId = "workspace-1",
+  cwd = "/repo/paseo",
+  summary: string | null = null,
+) {
   return {
     ...normalizeAgentSnapshot(
       {
@@ -80,6 +85,7 @@ function agent(id: string, workspaceId = "workspace-1", cwd = "/repo/paseo") {
         pendingPermissions: [],
         persistence: null,
         title: `Agent ${id}`,
+        summary,
         labels: {},
       },
       SERVER_ID,
@@ -366,6 +372,34 @@ describe("ReplicaCache", () => {
       status: "painted",
       items: [message("message-1", "Cached")],
     });
+  });
+
+  it("preserves agent purpose summaries in the stale replica", async () => {
+    const storage = new MemoryStorage();
+    const writer = new ReplicaCache(storage);
+    writer.setHosts([SERVER_ID]);
+    seedSession();
+    useSessionStore
+      .getState()
+      .setAgents(
+        SERVER_ID,
+        new Map([
+          [
+            "agent-1",
+            agent("agent-1", "workspace-1", "/repo/paseo", "Reviewing state projections"),
+          ],
+        ]),
+      );
+    await writer.flush();
+
+    useSessionStore.getState().clearSession(SERVER_ID);
+    const reader = new ReplicaCache(storage);
+    reader.setHosts([SERVER_ID]);
+    await reader.restore();
+
+    expect(useSessionStore.getState().sessions[SERVER_ID]?.agents.get("agent-1")?.summary).toBe(
+      "Reviewing state projections",
+    );
   });
 
   it("persists the complete directory with only the focused timeline tail", async () => {

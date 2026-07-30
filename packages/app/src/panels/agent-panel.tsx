@@ -65,6 +65,7 @@ import { usePaneContext, usePaneFocus } from "@/panels/pane-context";
 import type { PanelDescriptor, PanelRegistration } from "@/panels/panel-registry";
 import { RenderProfile } from "@/utils/render-profiler";
 import { buildDraftPanelDescriptor } from "@/panels/draft-panel-descriptor";
+import { buildAgentPurposePresentation } from "@/panels/agent-purpose-presentation";
 import {
   type HostRuntimeConnectionStatus,
   getHostRuntimeConnectionStatusSince,
@@ -101,6 +102,7 @@ import { applyLegacyDaemonWorkspaceOwnership } from "@/workspace/legacy-daemon-w
 import type { WorkspaceFileOpenRequest } from "@/workspace/file-open";
 import { deriveSidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { buildDraftAgentSetup, type ClientSlashCommand } from "@/client-slash-commands";
+import { resolveAgentPurposeSummary } from "@/agents/purpose-summary";
 
 interface ChatAgentStateShape {
   serverId: string | null;
@@ -116,6 +118,7 @@ interface ChatAgentStateShape {
   runtimeInfo?: Agent["runtimeInfo"];
   features?: Agent["features"];
   lastError?: Agent["lastError"] | null;
+  summary: string | null;
 }
 
 const RECONNECT_TOAST_DELAY_MS = 1_000;
@@ -144,6 +147,7 @@ const EMPTY_CHAT_AGENT_STATE: ChatAgentSelectedState = {
   status: null,
   cwd: null,
   lastError: null,
+  summary: null,
   archivedAt: null,
   requiresAttention: false,
   attentionReason: null,
@@ -156,6 +160,7 @@ function selectChatAgentState(
 ): ChatAgentSelectedState {
   const agent = resolveChatAgentFromSession(state, serverId, agentId);
   if (!agent) return EMPTY_CHAT_AGENT_STATE;
+  const serverInfo = state.sessions[serverId]?.serverInfo;
   return {
     serverId: agent.serverId,
     id: agent.id,
@@ -170,6 +175,7 @@ function selectChatAgentState(
     runtimeInfo: agent.runtimeInfo,
     features: agent.features,
     lastError: agent.lastError ?? null,
+    summary: resolveAgentPurposeSummary({ summary: agent.summary, serverInfo }),
     archivedAt: agent.archivedAt ?? null,
     requiresAttention: agent.requiresAttention ?? false,
     attentionReason: agent.attentionReason ?? null,
@@ -278,6 +284,45 @@ function shouldStoreFetchedAgentInActiveDirectory(agent: Agent): boolean {
   return !agent.archivedAt && Boolean(agent.projectPlacement);
 }
 
+const EMPTY_AGENT_PANEL_DESCRIPTOR_STATE = {
+  provider: "codex" as const,
+  title: null,
+  summary: null,
+  status: null,
+  pendingPermissionCount: 0,
+  requiresAttention: false,
+  attentionReason: null,
+  isTurnActive: false,
+};
+
+function selectAgentPanelDescriptorState(
+  state: ReturnType<typeof useSessionStore.getState>,
+  serverId: string,
+  agentId: string,
+) {
+  const session = state.sessions[serverId];
+  if (!session) {
+    return EMPTY_AGENT_PANEL_DESCRIPTOR_STATE;
+  }
+  const agent = session.agents.get(agentId) ?? session.agentDetails.get(agentId);
+  if (!agent) {
+    return EMPTY_AGENT_PANEL_DESCRIPTOR_STATE;
+  }
+  return {
+    provider: agent.provider,
+    title: agent.title,
+    summary: resolveAgentPurposeSummary({
+      summary: agent.summary,
+      serverInfo: session.serverInfo,
+    }),
+    status: agent.status,
+    pendingPermissionCount: agent.pendingPermissions.length,
+    requiresAttention: agent.requiresAttention ?? false,
+    attentionReason: agent.attentionReason ?? null,
+    isTurnActive: selectAgentTurnPresentation(session, agentId).isActive,
+  };
+}
+
 type FetchAgentResult = Awaited<ReturnType<DaemonClient["fetchAgent"]>>;
 
 function storeFetchedAgentDetail(input: {
@@ -330,29 +375,22 @@ function useAgentPanelDescriptor(
   context: { serverId: string },
 ): PanelDescriptor {
   const descriptorState = useSessionStore(
-    useShallow((state) => {
-      const session = state.sessions[context.serverId];
-      const agent =
-        session?.agents?.get(target.agentId) ?? session?.agentDetails?.get(target.agentId) ?? null;
-      return {
-        provider: agent?.provider ?? "codex",
-        title: agent?.title ?? null,
-        status: agent?.status ?? null,
-        pendingPermissionCount: agent?.pendingPermissions.length ?? 0,
-        requiresAttention: agent?.requiresAttention ?? false,
-        attentionReason: agent?.attentionReason ?? null,
-        isTurnActive: selectAgentTurnPresentation(session, target.agentId).isActive,
-      };
-    }),
+    useShallow((state) => selectAgentPanelDescriptorState(state, context.serverId, target.agentId)),
   );
   const provider = descriptorState.provider;
   const label = resolveWorkspaceAgentTabLabel(descriptorState.title);
+  const providerLabel = formatProviderLabel(provider);
+  const purposePresentation = buildAgentPurposePresentation({
+    label,
+    summary: descriptorState.summary,
+    providerLabel,
+  });
   const icon = getProviderIcon(provider);
 
   return {
     label: label ?? "",
-    subtitle: `${formatProviderLabel(provider)} agent`,
-    tooltip: label ?? `${formatProviderLabel(provider)} agent`,
+    subtitle: purposePresentation.subtitle,
+    tooltip: purposePresentation.tooltip,
     titleState: label ? "ready" : "loading",
     icon,
     statusBucket: descriptorState.status
@@ -1357,6 +1395,13 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
     >
       <View style={styles.root}>
         <FileDropZone style={styles.container} disabled={isArchivingCurrentAgent}>
+          {agentState.summary ? (
+            <View style={styles.purposeSummaryHeader} testID="agent-purpose-summary">
+              <Text style={styles.purposeSummaryText} numberOfLines={1}>
+                {agentState.summary}
+              </Text>
+            </View>
+          ) : null}
           {contentContainer}
 
           {showHistorySyncError ? (
@@ -1803,6 +1848,19 @@ const styles = StyleSheet.create((theme) => ({
   timelineSyncCalloutText: {
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.base,
+  },
+  purposeSummaryHeader: {
+    flexShrink: 0,
+    paddingHorizontal: theme.spacing[4],
+    paddingVertical: theme.spacing[2],
+    backgroundColor: theme.colors.surface1,
+    borderBottomWidth: theme.borderWidth[1],
+    borderBottomColor: theme.colors.border,
+  },
+  purposeSummaryText: {
+    fontSize: theme.fontSize.xs,
+    color: theme.colors.foregroundMuted,
+    textAlign: "center",
   },
   historySyncOverlay: {
     position: "absolute",

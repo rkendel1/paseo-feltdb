@@ -22,6 +22,7 @@ import {
   dispatchComposerAgentMessage,
   editQueuedComposerMessage,
   findGithubItemByOption,
+  getQueuedComposerMessageEditDraft,
   isAttachmentSelectedForGithubItem,
   openComposerAttachment,
   pickAndPersistImages,
@@ -682,6 +683,36 @@ describe("queueComposerMessage", () => {
       { kind: "image", metadata: image },
       review,
     ]);
+  });
+});
+
+describe("getQueuedComposerMessageEditDraft", () => {
+  it("returns null when the message id is missing", () => {
+    const result = getQueuedComposerMessageEditDraft({
+      messages: [{ id: "other", text: "other", attachments: [] }],
+      messageId: "missing",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("returns the text and only user attachments from a readonly queue mirror", () => {
+    const review = reviewWorkspaceAttachment("Queued snapshot.");
+    const image = imageWithId("img-queued-server-edit");
+    const result = getQueuedComposerMessageEditDraft({
+      messages: [
+        {
+          id: "msg-1",
+          text: "server queued draft",
+          attachments: [{ kind: "image", metadata: image }, review],
+        },
+      ],
+      messageId: "msg-1",
+    });
+
+    expect(result).toEqual({
+      text: "server queued draft",
+      attachments: [{ kind: "image", metadata: image }],
+    });
   });
 });
 

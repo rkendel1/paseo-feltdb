@@ -9,7 +9,7 @@ import React, {
   useSyncExternalStore,
 } from "react";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { Image as RNImage, ScrollView as RNScrollView, Text, View } from "react-native";
+import { ScrollView as RNScrollView, Text, View } from "react-native";
 import { StyleSheet, UnistylesRuntime, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import { useIsCompactFormFactor } from "@/constants/layout";
@@ -20,6 +20,7 @@ import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { lineNumberGutterWidth } from "@/components/code-insets";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
 import { filePreviewRenderKind } from "@/components/file-pane-render-mode";
+import type { AttachmentMetadata } from "@/attachments/types";
 import { useAttachmentPreviewUrl } from "@/attachments/use-attachment-preview-url";
 import { getFileNameFromPath } from "@/attachments/utils";
 import { resolveFilePreviewReadTarget } from "@/file-explorer/preview-target";
@@ -29,12 +30,14 @@ import { useAppActivelyVisible } from "@/hooks/use-app-visible";
 import { isFileQueryEnabled } from "@/components/file-pane-enabled";
 import { isWeb } from "@/constants/platform";
 import { useAppSettings } from "@/hooks/use-settings";
+import { useFileDownload } from "@/hooks/use-file-download";
 import { useLiveFile } from "./live-file/hook";
 import { useFilePreview } from "./preview-lifecycle/hook";
 import { resolveFilePreviewLifecycle } from "./preview-lifecycle/model";
 import { FilePanelBar } from "./bar";
 import { FileHtmlPreview } from "./html-preview";
 import { FileMarkdownPreview } from "./markdown-preview";
+import { FileImagePreview } from "./image-preview";
 import { FileEditorModel, getFileConflictCallout, type FileConflictCallout } from "./editor/model";
 import { createFileObservationSource } from "./editor/observation-source";
 import { FileEditorView } from "./editor/view";
@@ -48,6 +51,7 @@ const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 const foregroundMutedColorMapping = (theme: Theme) => ({
   color: theme.colors.foregroundMuted,
 });
+const noop = () => {};
 
 interface CodeLineProps {
   tokens: HighlightToken[];
@@ -64,6 +68,9 @@ interface FilePreviewBodyProps {
   location: WorkspaceFileLocation;
   navigationRevision: number;
   imagePreviewUri: string | null;
+  imageAttachment: AttachmentMetadata | null;
+  imageFileName: string;
+  onDownloadImage: () => void;
 }
 
 type TextExplorerFile = ExplorerFile & { kind: "text" };
@@ -184,6 +191,9 @@ function FilePreviewBody({
   location,
   navigationRevision,
   imagePreviewUri,
+  imageAttachment,
+  imageFileName,
+  onDownloadImage,
 }: FilePreviewBodyProps) {
   const theme = UnistylesRuntime.getTheme();
   const { t } = useTranslation();
@@ -220,11 +230,6 @@ function FilePreviewBody({
       lineCount: highlightedLines.length,
     });
   }, [highlightedLines, location.lineEnd, location.lineStart]);
-
-  const imageSource = useMemo(
-    () => (imagePreviewUri ? { uri: imagePreviewUri } : null),
-    [imagePreviewUri],
-  );
 
   useEffect(() => {
     if (!lineSelection) {
@@ -339,20 +344,12 @@ function FilePreviewBody({
     }
 
     return (
-      <View style={styles.previewScrollContainer}>
-        <RNScrollView
-          ref={previewScrollRef}
-          style={styles.previewContent}
-          contentContainerStyle={styles.previewImageScrollContent}
-          showsVerticalScrollIndicator
-        >
-          <RNImage
-            source={imageSource ?? undefined}
-            style={styles.previewImage}
-            resizeMode="contain"
-          />
-        </RNScrollView>
-      </View>
+      <FileImagePreview
+        uri={imagePreviewUri}
+        fileName={imageFileName}
+        attachment={imageAttachment}
+        onDownload={onDownloadImage}
+      />
     );
   }
 
@@ -366,11 +363,13 @@ function FilePreviewBody({
 
 export function FilePane({
   serverId,
+  workspaceId,
   workspaceRoot,
   location,
   navigationRevision,
 }: {
   serverId: string;
+  workspaceId: string;
   workspaceRoot: string;
   location: WorkspaceFileLocation;
   navigationRevision: number;
@@ -425,6 +424,16 @@ export function FilePane({
 
   const { file: preview, imageAttachment } = resolveFilePreviewLifecycle(previewLifecycle);
   const imagePreviewUri = useAttachmentPreviewUrl(imageAttachment);
+  const imageFileName = getFileNameFromPath(location.path) ?? location.path;
+  const downloadFile = useFileDownload({
+    serverId,
+    workspaceId,
+    workspaceRoot: readTarget?.cwd ?? normalizedWorkspaceRoot,
+  });
+  const handleDownloadImage = useCallback(() => {
+    if (!readTarget) return;
+    downloadFile({ fileName: imageFileName, path: readTarget.path });
+  }, [downloadFile, imageFileName, readTarget]);
   const isRenderable = isRenderablePreview(preview, location.path);
   const editable = isEditableTextFile({
     preview,
@@ -449,7 +458,7 @@ export function FilePane({
       onRetryRead={liveFile.refresh}
       retryingRead={liveFile.isRetrying}
       retryLabel={t("common.actions.retry")}
-      filename={getFileNameFromPath(location.path) ?? location.path}
+      filename={imageFileName}
       previewMode={canTogglePreviewMode ? previewMode : undefined}
       onPreviewModeChange={canTogglePreviewMode ? setPreviewMode : undefined}
       lineCount={lineCount}
@@ -461,6 +470,8 @@ export function FilePane({
       location={location}
       navigationRevision={navigationRevision}
       imagePreviewUri={imagePreviewUri}
+      imageAttachment={imageAttachment}
+      onDownloadImage={handleDownloadImage}
     />
   );
 }
@@ -502,6 +513,8 @@ function FilePanePresentation({
   location,
   navigationRevision,
   imagePreviewUri,
+  imageAttachment,
+  onDownloadImage,
 }: {
   serverId: string;
   client: DaemonClient | null;
@@ -523,6 +536,8 @@ function FilePanePresentation({
   location: WorkspaceFileLocation;
   navigationRevision: number;
   imagePreviewUri: string | null;
+  imageAttachment: AttachmentMetadata | null;
+  onDownloadImage: () => void;
 }) {
   if (!client && readTarget) {
     return (
@@ -587,6 +602,9 @@ function FilePanePresentation({
         location={location}
         navigationRevision={navigationRevision}
         imagePreviewUri={imagePreviewUri}
+        imageAttachment={imageAttachment}
+        imageFileName={filename}
+        onDownloadImage={onDownloadImage}
       />
     </View>
   );
@@ -760,6 +778,9 @@ function EditableFilePane({
           location={location}
           navigationRevision={navigationRevision}
           imagePreviewUri={null}
+          imageAttachment={null}
+          imageFileName={filename}
+          onDownloadImage={noop}
         />
       )}
     </View>
@@ -829,15 +850,5 @@ const styles = StyleSheet.create((theme) => ({
   },
   previewCodeScrollContent: {
     padding: theme.spacing[4],
-  },
-  previewImageScrollContent: {
-    flexGrow: 1,
-    padding: theme.spacing[4],
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  previewImage: {
-    width: "100%",
-    height: 420,
   },
 }));

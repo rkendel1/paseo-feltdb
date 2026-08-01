@@ -63,6 +63,7 @@ function FilePanel() {
     return (
       <FilePane
         serverId={serverId}
+        workspaceId={workspaceId}
         workspaceRoot={workspaceDirectory}
         location={target}
         navigationRevision={fileNavigationRevision ?? 0}
@@ -78,6 +79,7 @@ function FilePanel() {
     >
       <FilePane
         serverId={serverId}
+        workspaceId={workspaceId}
         workspaceRoot={workspaceDirectory}
         location={target}
         navigationRevision={fileNavigationRevision ?? 0}

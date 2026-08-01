@@ -1730,6 +1730,16 @@ export const ru: TranslationResources = {
       binaryPreviewUnavailable: "Предварительный просмотр двоичного файла недоступен.",
       failedToLoad: "Не удалось загрузить файл",
       failedToLoadPreview: "Не удалось загрузить предварительный просмотр файла.",
+      closePreview: "Закрыть просмотр файла",
+      closePreviewHint: "Закрывает этот файл и возвращает на родительскую вкладку",
+      image: {
+        accessibilityLabel: "Просмотр изображения: {{fileName}}",
+        accessibilityHint:
+          "Сведите или разведите пальцы либо дважды нажмите для масштабирования. Удерживайте для действий с изображением.",
+        copy: "Копировать изображение",
+        copying: "Копирование изображения...",
+        copyFailed: "Не удалось скопировать изображение",
+      },
       editor: {
         fileSize: "Размер файла {{size}}",
         lines: "Строк: {{count}}",

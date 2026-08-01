@@ -14,6 +14,7 @@ import {
   type HostConnection,
   type HostProfile,
 } from "@/types/host-connection";
+import { normalizeSshConnection } from "@getpaseo/protocol/host-connection-schema";
 import {
   buildDaemonWebSocketUrl,
   buildRelayWebSocketUrl,
@@ -25,7 +26,7 @@ import { resolveAppVersion } from "@/utils/app-version";
 import { ConnectionOfferSchema, type ConnectionOffer } from "@getpaseo/protocol/connection-offer";
 import { shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
 import { isWeb } from "@/constants/platform";
-import { connectToDaemon } from "@/utils/test-daemon-connection";
+import { connectToDaemon, closeClientAndTransport } from "@/utils/test-daemon-connection";
 import { getOrCreateClientId } from "@/utils/client-id";
 import {
   selectBestConnection,
@@ -65,7 +66,8 @@ export type ActiveConnection =
   | { type: "directTcp"; endpoint: string; display: string }
   | { type: "directSocket"; endpoint: string; display: "socket" }
   | { type: "directPipe"; endpoint: string; display: "pipe" }
-  | { type: "relay"; endpoint: string; display: "relay" };
+  | { type: "relay"; endpoint: string; display: "relay" }
+  | { type: "ssh"; endpoint: string; display: string };
 
 export type HostRuntimeAgentDirectoryStatus =
   | "idle"
@@ -144,6 +146,7 @@ export interface HostRuntimeControllerDeps {
     host: HostProfile;
     connection: HostConnection;
     timeoutMs?: number;
+    onProgress?: (message: string) => void;
   }) => Promise<{
     client: DaemonClient;
     serverId: string;
@@ -200,6 +203,19 @@ function toActiveConnection(connection: HostConnection): ActiveConnection {
       type: "directTcp",
       endpoint: connection.endpoint,
       display: connection.endpoint,
+    };
+  }
+  if (connection.type === "ssh") {
+    // Both user and port are legitimately unset when ~/.ssh/config supplies
+    // them, so neither can be interpolated unconditionally — that renders as
+    // "@host:undefined" in the host picker. Showing just the host is also the
+    // honest thing: the effective user is resolved by ssh, not by us, so we
+    // must not imply a username we do not actually know.
+    const authority = connection.user ? `${connection.user}@${connection.host}` : connection.host;
+    return {
+      type: "ssh",
+      endpoint: connection.port ? `${authority}:${connection.port}` : authority,
+      display: authority,
     };
   }
   return {
@@ -504,6 +520,9 @@ function createDefaultDeps(): HostRuntimeControllerDeps {
           ...(connection.password ? { password: connection.password } : {}),
         });
       }
+      if (connection.type === "ssh") {
+        throw new Error("SSH connections are established through the probe path, not createClient");
+      }
       return new DaemonClient({
         ...base,
         url: buildRelayWebSocketUrl({
@@ -517,11 +536,12 @@ function createDefaultDeps(): HostRuntimeControllerDeps {
         },
       });
     },
-    connectToDaemon: ({ host, connection, timeoutMs }) =>
+    connectToDaemon: ({ host, connection, timeoutMs, onProgress }) =>
       connectToDaemon(connection, {
         ...(host.serverId ? { serverId: host.serverId } : {}),
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
         capabilities: appCapabilities,
+        ...(onProgress ? { onProgress } : {}),
       }),
     getClientId: () => getOrCreateClientId(),
     mountClientHandlers: ({ client, host }) => {
@@ -757,6 +777,23 @@ export class HostRuntimeController {
     const hasActiveOnlineConnection = isOnline && activeConnectionId !== null;
 
     const connectionsToProbe = this.host.connections.filter((connection) => {
+      // Probing a non-active SSH connection means spawning ssh, authenticating,
+      // and running the ensure script just to time a round trip — then throwing
+      // the tunnel away. On a password-auth host that re-prompts the user every
+      // cycle. Only probe SSH when it is already the live client (reading its
+      // liveness RTT is free) or when nothing is online and connecting is the
+      // point. The cost is that SSH never carries a latency number while
+      // another transport is up, so the adaptive switcher will not move *onto*
+      // a tunnel on RTT alone — which is the behavior we want anyway. Failover
+      // still works: once the active connection drops, this predicate opens up
+      // again on the next cycle.
+      if (
+        connection.type === "ssh" &&
+        hasActiveOnlineConnection &&
+        connection.id !== activeConnectionId
+      ) {
+        return false;
+      }
       const lastProbed = this.connectionLastProbedAt.get(connection.id);
       if (lastProbed == null) {
         return true;
@@ -940,7 +977,7 @@ export class HostRuntimeController {
                 if (isPlaceholderServerId(this.host.serverId) && this.onReconcileServerId) {
                   this.onReconcileServerId(this.host.serverId, serverId);
                 } else {
-                  await client.close().catch(() => undefined);
+                  await closeClientAndTransport(client);
                   throw new Error(
                     `Connection resolved to ${serverId}, expected ${this.host.serverId}.`,
                   );
@@ -992,7 +1029,9 @@ export class HostRuntimeController {
             }
           } finally {
             if (connectedClient && shouldCloseClient) {
-              await connectedClient.close().catch(() => undefined);
+              // Throwaway probe clients can own an SSH tunnel; closing the
+              // client alone would orphan the ssh process every cycle.
+              await closeClientAndTransport(connectedClient);
             }
             settleProbe();
           }
@@ -1083,7 +1122,9 @@ export class HostRuntimeController {
 
   private async abortSwitchWithClient(client: DaemonClient | undefined): Promise<void> {
     if (client) {
-      await client.close().catch(() => undefined);
+      // Not a bare close(): a probed SSH client owns a tunnel, and abandoning
+      // the switch has to reap it too.
+      await closeClientAndTransport(client);
     }
   }
 
@@ -1128,7 +1169,7 @@ export class HostRuntimeController {
     if (this.activeClient) {
       const previousClient = this.activeClient;
       this.activeClient = null;
-      await previousClient.close().catch(() => undefined);
+      await closeClientAndTransport(previousClient);
     }
   }
 
@@ -1180,20 +1221,31 @@ export class HostRuntimeController {
     }
 
     const nextGeneration = this.snapshot.clientGeneration + 1;
+    let client: DaemonClient;
     if (existingClient) {
       existingClient.setReconnectEnabled(true);
-    }
-    const client =
-      existingClient ??
-      this.deps.createClient({
+      client = existingClient;
+    } else if (connection.type === "ssh") {
+      // SSH connections need a tunnel opened before the client can connect.
+      // The probe path (connectToDaemon) handles this and passes existingClient;
+      // this branch covers manual activation without a prior probe.
+      const { client: probedClient } = await this.deps.connectToDaemon({
+        host: this.host,
+        connection,
+      });
+      probedClient.setReconnectEnabled(true);
+      client = probedClient;
+    } else {
+      client = this.deps.createClient({
         host: this.host,
         connection,
         clientId,
         runtimeGeneration: nextGeneration,
       });
+    }
 
     if (!this.isSwitchStillValid(requestVersion, expectedProbeVersion)) {
-      await client.close().catch(() => undefined);
+      await closeClientAndTransport(client);
       return;
     }
 
@@ -1233,7 +1285,7 @@ export class HostRuntimeController {
     });
 
     try {
-      if (!existingClient) {
+      if (!existingClient && connection.type !== "ssh") {
         await client.connect();
       }
     } catch (error) {
@@ -1657,6 +1709,7 @@ export class HostRuntimeStore {
     connection: HostConnection;
     label?: string;
     timeoutMs?: number;
+    onProgress?: (message: string) => void;
   }): Promise<{ profile: HostProfile; serverId: string; hostname: string | null }> {
     if (input.connection.type === "relay") {
       throw new Error("Cannot probe a relay connection without a server id.");
@@ -1674,6 +1727,7 @@ export class HostRuntimeStore {
       host: probeHost,
       connection: input.connection,
       ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+      ...(input.onProgress ? { onProgress: input.onProgress } : {}),
     });
     const profile = await this.upsertHostConnection({
       serverId,
@@ -1701,6 +1755,32 @@ export class HostRuntimeStore {
         useTls: input.useTls ?? false,
         ...(password ? { password } : {}),
       },
+    });
+  }
+
+  async probeAndUpsertSshConnection(input: {
+    host: string;
+    port?: number;
+    user?: string;
+    remotePort?: number;
+    remoteHome?: string;
+    installDir?: string;
+    label?: string;
+    onProgress?: (message: string) => void;
+  }): Promise<{ profile: HostProfile; serverId: string; hostname: string | null }> {
+    const connection = normalizeSshConnection({
+      id: input.user ? `ssh:${input.user}@${input.host}` : `ssh:${input.host}`,
+      host: input.host,
+      ...(input.user ? { user: input.user } : {}),
+      port: input.port,
+      remotePort: input.remotePort,
+      remoteHome: input.remoteHome,
+      installDir: input.installDir,
+    });
+    return this.probeAndUpsertConnection({
+      label: input.label ?? (input.user ? `${input.user}@${input.host}` : input.host),
+      connection,
+      ...(input.onProgress ? { onProgress: input.onProgress } : {}),
     });
   }
 
@@ -2358,6 +2438,7 @@ export function useHosts(): HostProfile[] {
 
 export function useHostRegistryStatus(): HostRegistryStatus {
   const store = getHostRuntimeStore();
+
   return useSyncExternalStore(
     (onStoreChange) => store.subscribeHostList(onStoreChange),
     () => store.getHostRegistryStatus(),
@@ -2388,6 +2469,16 @@ export interface HostMutations {
     password?: string;
     label?: string;
   }) => Promise<{ profile: HostProfile; serverId: string; hostname: string | null }>;
+  probeAndUpsertSshConnection: (input: {
+    host: string;
+    port?: number;
+    user?: string;
+    remotePort?: number;
+    remoteHome?: string;
+    installDir?: string;
+    label?: string;
+    onProgress?: (message: string) => void;
+  }) => Promise<{ profile: HostProfile; serverId: string; hostname: string | null }>;
   upsertRelayConnection: (input: {
     serverId: string;
     relayEndpoint: string;
@@ -2412,6 +2503,7 @@ export function useHostMutations(): HostMutations {
       upsertDirectConnection: (input) => store.upsertDirectConnection(input),
       probeAndUpsertDirectConnection: (input) => store.probeAndUpsertDirectConnection(input),
       upsertRelayConnection: (input) => store.upsertRelayConnection(input),
+      probeAndUpsertSshConnection: (input) => store.probeAndUpsertSshConnection(input),
       upsertConnectionFromOffer: (offer, label) => store.upsertConnectionFromOffer(offer, label),
       upsertConnectionFromOfferUrl: (url, label) => store.upsertConnectionFromOfferUrl(url, label),
       renameHost: (serverId, label) => store.renameHost(serverId, label),

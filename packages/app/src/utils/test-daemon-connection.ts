@@ -1,6 +1,7 @@
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { DaemonClientConfig } from "@getpaseo/client/internal/daemon-client";
 import type { HostConnection } from "@/types/host-connection";
+import { normalizeSshConnection } from "@getpaseo/protocol/host-connection-schema";
 import { getOrCreateClientId } from "./client-id";
 import { resolveAppVersion } from "./app-version";
 import {
@@ -12,6 +13,8 @@ import {
   buildLocalDaemonTransportUrl,
   createDesktopLocalDaemonTransportFactory,
 } from "@/desktop/daemon/desktop-daemon-transport";
+import { getDesktopHost } from "@/desktop/host";
+import { i18n } from "@/i18n/i18next";
 
 export interface DaemonProbeClient {
   readonly lastError: string | null;
@@ -82,6 +85,37 @@ function isIncorrectPasswordFailure(input: {
   );
 }
 
+/**
+ * Cleanup for transport resources a client was handed but does not own — today
+ * that means the SSH tunnel its WebSocket runs through.
+ *
+ * A WeakMap rather than a field on the client: the tunnel's lifetime is tied to
+ * the client instance, but every intermediate signature between the probe and
+ * the eventual close would otherwise have to carry it, and any one of them
+ * forgetting leaks an `ssh` process for the lifetime of the app.
+ */
+const transportDisposers = new WeakMap<DaemonProbeClient, () => Promise<void>>();
+
+export function registerTransportDisposer(
+  client: DaemonProbeClient,
+  dispose: () => Promise<void>,
+): void {
+  transportDisposers.set(client, dispose);
+}
+
+/**
+ * Close a client and release its transport. Every path that disposes a client
+ * must go through here — closing the client alone leaves the tunnel open.
+ */
+export async function closeClientAndTransport(client: DaemonProbeClient): Promise<void> {
+  const dispose = transportDisposers.get(client);
+  transportDisposers.delete(client);
+  await client.close().catch(() => undefined);
+  if (dispose) {
+    await dispose().catch(() => undefined);
+  }
+}
+
 export class DaemonConnectionTestError extends Error {
   reason: string | null;
   lastError: string | null;
@@ -134,6 +168,10 @@ export async function buildClientConfig(
       url: buildDaemonWebSocketUrl(connection.endpoint, { useTls: connection.useTls ?? false }),
       ...(connection.password ? { password: connection.password } : {}),
     };
+  }
+
+  if (connection.type === "ssh") {
+    throw new Error("SSH connections must be probed via connectToDaemonViaSsh");
   }
 
   if (!serverId) {
@@ -224,11 +262,101 @@ interface ProbeOptions {
   serverId?: string;
   timeoutMs?: number;
   capabilities?: DaemonClientConfig["capabilities"];
+  onProgress?: (message: string) => void;
 }
 
 function resolveTimeout(connection: HostConnection, options?: ProbeOptions): number {
   if (options?.timeoutMs) return options.timeoutMs;
+  if (connection.type === "ssh") return 30_000;
   return connection.type === "relay" ? 10_000 : 6_000;
+}
+
+/** Distinguishes concurrent SSH probes so their progress streams don't mix. */
+let probeSequence = 0;
+
+async function connectToDaemonViaSsh(
+  connection: Extract<HostConnection, { type: "ssh" }>,
+  options: ProbeOptions | undefined,
+  deps: DaemonConnectionDependencies<DaemonProbeClient>,
+): Promise<{ client: DaemonProbeClient; serverId: string; hostname: string | null }> {
+  const sshBridge = getDesktopHost()?.ssh;
+  if (!sshBridge) {
+    throw new DaemonConnectionTestError(i18n.t("pairing.ssh.errors.desktopOnly"), {
+      reason: "SSH not available",
+      lastError: null,
+    });
+  }
+  const sshConfig = normalizeSshConnection({
+    id: connection.id,
+    host: connection.host,
+    user: connection.user,
+    port: connection.port,
+    remotePort: connection.remotePort,
+    remoteHome: connection.remoteHome,
+    installDir: connection.installDir,
+  });
+  const bridgeConfig = {
+    host: sshConfig.host,
+    port: sshConfig.port,
+    user: sshConfig.user,
+    remotePort: sshConfig.remotePort,
+    remoteHome: sshConfig.remoteHome,
+    installDir: sshConfig.installDir,
+  };
+  // The main process reports ensure-script progress out of band, tagged with
+  // the request id so concurrent connects to the same host don't cross streams.
+  const requestId = `ssh-${connection.id}-${probeSequence++}`;
+  const events = getDesktopHost()?.events;
+  let unsubscribeProgress: (() => void) | null = null;
+  if (events?.on && options?.onProgress) {
+    // The Electron bridge resolves the unsubscribe asynchronously; awaiting it
+    // is what makes the listener removable at all.
+    unsubscribeProgress = await events.on("ssh-progress", (payload) => {
+      if (!payload || typeof payload !== "object") return;
+      const event = payload as { requestId?: string; message?: string };
+      if (event.requestId === requestId && typeof event.message === "string") {
+        options.onProgress?.(event.message);
+      }
+    });
+  }
+
+  try {
+    const { tunnelId, localPort } = await sshBridge.openTunnel({ ...bridgeConfig, requestId });
+    const closeTunnel = () => sshBridge.closeTunnel(tunnelId).then(() => undefined);
+
+    const config = await buildClientConfig(
+      {
+        id: connection.id,
+        type: "directTcp",
+        endpoint: `127.0.0.1:${localPort}`,
+        useTls: false,
+      },
+      options?.serverId,
+      options,
+      deps,
+    );
+
+    try {
+      const result = await connectAndProbe(config, resolveTimeout(connection, options), deps);
+      registerTransportDisposer(result.client, closeTunnel);
+      return result;
+    } catch (error) {
+      await closeTunnel().catch(() => undefined);
+      throw error;
+    }
+  } catch (error) {
+    // The tunnel reports a declined prompt as a cancellation; say so plainly
+    // rather than surfacing the authentication error it produced.
+    if (error instanceof Error && /cancelled/i.test(error.message)) {
+      throw new DaemonConnectionTestError(i18n.t("pairing.ssh.errors.cancelled"), {
+        reason: "cancelled",
+        lastError: null,
+      });
+    }
+    throw error;
+  } finally {
+    unsubscribeProgress?.();
+  }
 }
 
 export function connectToDaemon(
@@ -245,6 +373,9 @@ export async function connectToDaemon(
   options?: ProbeOptions,
   deps: DaemonConnectionDependencies<DaemonProbeClient> = defaultDaemonConnectionDependencies,
 ): Promise<{ client: DaemonProbeClient; serverId: string; hostname: string | null }> {
+  if (connection.type === "ssh") {
+    return connectToDaemonViaSsh(connection, options, deps);
+  }
   const config = await buildClientConfig(connection, options?.serverId, options, deps);
   return connectAndProbe(config, resolveTimeout(connection, options), deps);
 }

@@ -7,9 +7,10 @@ log.initialize({ spyRendererConsole: true });
 import { inheritLoginShellEnv } from "./login-shell-env.js";
 
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   app,
   autoUpdater as electronAutoUpdater,
@@ -96,6 +97,13 @@ import {
   type AgentDeepLinkTarget,
 } from "@getpaseo/protocol/agent-deep-link";
 import { AgentNavigationInbox, parseAgentDeepLinkFromArgv } from "./agent-navigation.js";
+import {
+  SshTunnel,
+  normalizeSshHostConfig,
+  createAskpassChannel,
+  type AskpassRequest,
+  buildEnsureScript,
+} from "@getpaseo/cli/ssh";
 
 const DEV_SERVER_URL = process.env.EXPO_DEV_URL ?? "http://localhost:8081";
 const APP_SCHEME = "paseo";
@@ -105,6 +113,100 @@ const APP_NAME = process.env.PASEO_TEST_APP_NAME?.trim() || "Paseo";
 const UPDATE_QUIT_DEADLINE_MS = 5_000;
 const pendingBrowserWindowOpenRequests = new PendingBrowserWindowOpenRequests();
 const agentNavigationInbox = new AgentNavigationInbox();
+const sshTunnels = new Map<string, SshTunnel>();
+
+/**
+ * Password prompts waiting on the renderer. SSH asks through our own askpass
+ * channel rather than a system dialog, so the prompt is rendered by Paseo and
+ * the answer comes back through IPC.
+ */
+const pendingSshPrompts = new Map<string, (secret: string | null) => void>();
+
+function requestSshSecretFromRenderer(input: {
+  requestId: string;
+  host: string;
+  request: AskpassRequest;
+}): Promise<string | null> {
+  return new Promise((resolve) => {
+    pendingSshPrompts.set(input.requestId, resolve);
+    broadcastToRenderers("paseo:event:ssh-password-request", {
+      requestId: input.requestId,
+      host: input.host,
+      prompt: input.request.prompt,
+      kind: input.request.kind,
+    });
+  });
+}
+
+function settleSshPrompt(requestId: string, secret: string | null): void {
+  const resolve = pendingSshPrompts.get(requestId);
+  if (!resolve) return;
+  pendingSshPrompts.delete(requestId);
+  resolve(secret);
+}
+
+/**
+ * Local ports this process currently forwards over SSH.
+ *
+ * The renderer's Origin (`http://localhost:8081` in dev, `paseo://…` when
+ * packaged) never matches a tunnel's ephemeral loopback port, so the remote
+ * daemon's same-origin check rejects the upgrade and the socket closes with
+ * 1006. Stripping Origin is the fix, but only for these ports: the check is
+ * the daemon's DNS-rebinding defense, and disabling it for all of loopback
+ * would also disable it for a directly-connected local daemon.
+ */
+const sshTunnelPorts = new Map<string, number>();
+
+function rememberTunnelPort(tunnelId: string, localPort: number): void {
+  sshTunnelPorts.set(tunnelId, localPort);
+}
+
+function forgetTunnelPort(tunnelId: string): void {
+  sshTunnelPorts.delete(tunnelId);
+}
+
+function isSshTunnelUrl(rawUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") return false;
+  const port = Number(parsed.port);
+  if (!Number.isInteger(port)) return false;
+  for (const tunnelPort of sshTunnelPorts.values()) {
+    if (tunnelPort === port) return true;
+  }
+  return false;
+}
+
+/**
+ * Install the Origin-stripping rule once per session. `onBeforeSendHeaders`
+ * allows a single listener per session, so registering it per window would
+ * silently replace whatever was registered before.
+ */
+const sessionsWithSshHeaderRule = new WeakSet<Electron.Session>();
+
+function installSshOriginRule(targetSession: Electron.Session): void {
+  if (sessionsWithSshHeaderRule.has(targetSession)) return;
+  sessionsWithSshHeaderRule.add(targetSession);
+  targetSession.webRequest.onBeforeSendHeaders(
+    { urls: ["ws://127.0.0.1:*/*", "ws://localhost:*/*"] },
+    (details, callback) => {
+      if (details.resourceType !== "webSocket" || !isSshTunnelUrl(details.url)) {
+        callback({ requestHeaders: details.requestHeaders });
+        return;
+      }
+      // Header names are case-insensitive on the wire; Chromium's casing here
+      // is not contractual, so match rather than delete a fixed spelling.
+      const requestHeaders = Object.fromEntries(
+        Object.entries(details.requestHeaders).filter(([name]) => name.toLowerCase() !== "origin"),
+      );
+      callback({ requestHeaders });
+    },
+  );
+}
 
 // A second-instance launch can arrive before the packaged protocol handler,
 // IPC handlers, and first window exist. Wait for full bootstrap, not just
@@ -595,6 +697,94 @@ ipcMain.handle("paseo:browser:copy-element", (_event, payload: unknown): boolean
   return false;
 });
 
+function parseSshConfig(config: Record<string, unknown>) {
+  return normalizeSshHostConfig({
+    id: "desktop",
+    label: "desktop",
+    host: String(config.host ?? ""),
+    user: String(config.user ?? ""),
+    // Undefined, not 22: an unset port lets the user's ~/.ssh/config decide.
+    port: typeof config.port === "number" ? config.port : undefined,
+    remotePort: typeof config.remotePort === "number" ? config.remotePort : undefined,
+    remoteHome: typeof config.remoteHome === "string" ? config.remoteHome : undefined,
+    installDir: typeof config.installDir === "string" ? config.installDir : undefined,
+  });
+}
+
+function broadcastToRenderers(channel: string, payload: unknown): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(channel, payload);
+  }
+}
+
+ipcMain.handle("paseo:ssh:open-tunnel", async (_event, config: Record<string, unknown>) => {
+  const sshConfig = parseSshConfig(config);
+  const requestId = typeof config.requestId === "string" ? config.requestId : randomUUID();
+  log.info("[ssh] open-tunnel", { host: sshConfig.host, port: sshConfig.port, requestId });
+
+  // One channel per attempt: SSH answers prompts through Paseo's own UI, and
+  // the channel's signal is how a declined prompt stops the connection at once
+  // instead of letting SSH retry.
+  const askpass = await createAskpassChannel({
+    onPrompt: (request) =>
+      requestSshSecretFromRenderer({ requestId, host: sshConfig.host, request }),
+  });
+
+  try {
+    const version =
+      typeof config.version === "string" ? config.version : (sshConfig.packageVersion ?? "latest");
+    const tunnelId = randomUUID();
+    const tunnel = await SshTunnel.open(sshConfig, sshConfig.remotePort, {
+      askpassPath: askpass.askpassPath,
+      cancelSignal: askpass.signal,
+      ensureScript: buildEnsureScript(sshConfig, version),
+      onProgress: (message) => {
+        // Tagged with requestId so two connects to the same host don't mix.
+        broadcastToRenderers("paseo:event:ssh-progress", { requestId, message });
+      },
+      onClose: (reason) => {
+        log.warn("[ssh] tunnel closed unexpectedly", { tunnelId, reason });
+        forgetTunnelPort(tunnelId);
+        sshTunnels.delete(tunnelId);
+        broadcastToRenderers("paseo:event:ssh-closed", { tunnelId, host: sshConfig.host, reason });
+      },
+    });
+    sshTunnels.set(tunnelId, tunnel);
+    rememberTunnelPort(tunnelId, tunnel.localPort);
+    log.info("[ssh] tunnel open", { tunnelId, localPort: tunnel.localPort });
+    return { tunnelId, localPort: tunnel.localPort };
+  } catch (error) {
+    log.error("[ssh] tunnel open failed", {
+      host: sshConfig.host,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  } finally {
+    // Authentication is over either way; nothing should be able to prompt now.
+    settleSshPrompt(requestId, null);
+    askpass.close();
+  }
+});
+
+ipcMain.handle(
+  "paseo:ssh:submit-password",
+  (_event, payload: { requestId?: unknown; secret?: unknown }) => {
+    const requestId = typeof payload?.requestId === "string" ? payload.requestId : null;
+    if (!requestId) return;
+    // A null secret is the user declining, which is a real answer.
+    settleSshPrompt(requestId, typeof payload.secret === "string" ? payload.secret : null);
+  },
+);
+
+ipcMain.handle("paseo:ssh:close-tunnel", async (_event, tunnelId: string) => {
+  const tunnel = sshTunnels.get(tunnelId);
+  if (!tunnel) return;
+  log.info("[ssh] close-tunnel", { tunnelId });
+  tunnel.close();
+  sshTunnels.delete(tunnelId);
+  forgetTunnelPort(tunnelId);
+});
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: APP_SCHEME,
@@ -713,6 +903,8 @@ async function createWindow(
       webviewTag: true,
     },
   });
+
+  installSshOriginRule(mainWindow.webContents.session);
 
   const webContentsId = mainWindow.webContents.id;
   pendingOpenProjectStore.set(webContentsId, options.pendingOpenProjectPath);

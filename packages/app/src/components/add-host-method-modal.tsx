@@ -2,10 +2,10 @@ import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Pressable, Text, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
-import { QrCode, Link2, ClipboardPaste } from "lucide-react-native";
+import { QrCode, Link2, ClipboardPaste, Terminal } from "lucide-react-native";
 import { AdaptiveModalSheet, type SheetHeader } from "./adaptive-modal-sheet";
 import { isFdroidBuild } from "@/constants/build-profile";
-import { isNative } from "@/constants/platform";
+import { isNative, getIsElectron } from "@/constants/platform";
 
 const styles = StyleSheet.create((theme) => ({
   option: {
@@ -39,6 +39,7 @@ export interface AddHostMethodModalProps {
   onDirectConnection: () => void;
   onScanQr: () => void;
   onPasteLink: () => void;
+  onSshConnection: () => void;
 }
 
 export function AddHostMethodModal({
@@ -47,9 +48,11 @@ export function AddHostMethodModal({
   onDirectConnection,
   onScanQr,
   onPasteLink,
+  onSshConnection,
 }: AddHostMethodModalProps) {
   const { theme } = useUnistyles();
   const { t } = useTranslation();
+  const isElectron = getIsElectron();
   const header = useMemo<SheetHeader>(() => ({ title: t("pairing.connectionMethods.title") }), [t]);
 
   const handleDirect = useCallback(() => {
@@ -63,6 +66,10 @@ export function AddHostMethodModal({
   const handlePaste = useCallback(() => {
     onPasteLink();
   }, [onPasteLink]);
+
+  const handleSsh = useCallback(() => {
+    onSshConnection();
+  }, [onSshConnection]);
 
   return (
     <AdaptiveModalSheet
@@ -99,6 +106,25 @@ export function AddHostMethodModal({
             <Text style={styles.optionText}>{t("pairing.connectionMethods.scanQr.title")}</Text>
             <Text style={styles.optionSubtext}>
               {t("pairing.connectionMethods.scanQr.description")}
+            </Text>
+          </View>
+        </Pressable>
+      ) : null}
+      {/* Spawning `ssh` needs a main process, so this is desktop-only — not
+          merely web. Browser web would show the option and dead-end. */}
+      {isElectron ? (
+        <Pressable
+          style={styles.option}
+          onPress={handleSsh}
+          accessibilityRole="button"
+          accessibilityLabel={t("pairing.connectionMethods.ssh.title")}
+          testID="add-host-method-ssh"
+        >
+          <Terminal size={18} color={theme.colors.foreground} />
+          <View style={styles.optionBody}>
+            <Text style={styles.optionText}>{t("pairing.connectionMethods.ssh.title")}</Text>
+            <Text style={styles.optionSubtext}>
+              {t("pairing.connectionMethods.ssh.description")}
             </Text>
           </View>
         </Pressable>

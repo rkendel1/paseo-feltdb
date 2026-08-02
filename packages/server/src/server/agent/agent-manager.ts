@@ -2063,6 +2063,7 @@ export class AgentManager {
       } catch (error) {
         agent.pendingReplacement = false;
         const errorMsg = error instanceof Error ? error.message : "Failed to start turn";
+        pendingRun.failStart(error instanceof Error ? error : new Error(errorMsg));
         await this.handleStreamEvent(agent, {
           type: "turn_failed",
           provider: agent.provider,
@@ -2078,6 +2079,7 @@ export class AgentManager {
       }
       const turnStartedAt = new Date();
       pendingRun.started = true;
+      pendingRun.acknowledgeStart();
       pendingRun.turnId = turnId;
       agent.activeForegroundTurnId = turnId;
       this.openActiveTurn(agent, turnId, turnStartedAt);
@@ -2354,6 +2356,10 @@ export class AgentManager {
 
       checkCurrentState();
     });
+  }
+
+  getPendingAgentRunStartAcknowledged(agentId: string): Promise<void> | null {
+    return this.runs.getPendingRun(agentId)?.startAcknowledged ?? null;
   }
 
   async respondToPermission(

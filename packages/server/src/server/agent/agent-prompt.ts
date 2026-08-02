@@ -15,6 +15,7 @@ export type AgentRunController = Pick<
   | "hasInFlightRun"
   | "replaceAgentRun"
   | "streamAgent"
+  | "getPendingAgentRunStartAcknowledged"
   | "waitForAgentRunStart"
 >;
 
@@ -26,6 +27,13 @@ export interface StartAgentRunOptions {
 export interface StartAgentRunResult {
   outOfBand: boolean;
   startAcknowledged: Promise<void>;
+}
+
+function getStartAcknowledged(agentManager: AgentRunController, agentId: string): Promise<void> {
+  return (
+    agentManager.getPendingAgentRunStartAcknowledged(agentId) ??
+    agentManager.waitForAgentRunStart(agentId)
+  );
 }
 
 export async function startAgentRun(
@@ -68,7 +76,7 @@ export async function startAgentRun(
     },
     "agent.session.start_stream.iterator_returned",
   );
-  const startAcknowledged = agentManager.waitForAgentRunStart(agentId);
+  const startAcknowledged = getStartAcknowledged(agentManager, agentId);
   void startAcknowledged.catch(() => {});
   void (async () => {
     try {

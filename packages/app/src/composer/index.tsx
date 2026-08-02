@@ -104,7 +104,7 @@ import type { KeyboardActionDefinition } from "@/keyboard/keyboard-action-dispat
 import type { MessageInputKeyboardActionKind } from "@/keyboard/actions";
 import { submitAgentInput } from "@/composer/submit";
 import { createMessageSubmissionWriter } from "@/composer/submission/writer";
-import { createUserMessage, generateMessageId } from "@/types/stream";
+import { createUserMessage } from "@/types/stream";
 import { ComposerKeyboardScopeProvider } from "@/composer/keyboard-scope";
 import { useAppSettings } from "@/hooks/use-settings";
 import { isWeb, isNative } from "@/constants/platform";
@@ -1895,7 +1895,7 @@ export function Composer({
             supportsForgeAttachments: supportsForgeSearch,
           }),
         });
-        const clientMessageId = generateMessageId();
+        const clientMessageId = id;
         const submission = createMessageSubmissionWriter(serverId);
         submission.begin(
           agentId,

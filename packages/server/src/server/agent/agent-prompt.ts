@@ -15,9 +15,9 @@ export type AgentRunController = Pick<
   | "hasInFlightRun"
   | "replaceAgentRun"
   | "streamAgent"
-  | "getPendingAgentRunStartAcknowledged"
   | "waitForAgentRunStart"
->;
+> &
+  Partial<Pick<AgentManager, "getPendingAgentRunStartAcknowledged">>;
 
 export interface StartAgentRunOptions {
   replaceRunning?: boolean;
@@ -31,7 +31,7 @@ export interface StartAgentRunResult {
 
 function getStartAcknowledged(agentManager: AgentRunController, agentId: string): Promise<void> {
   return (
-    agentManager.getPendingAgentRunStartAcknowledged(agentId) ??
+    agentManager.getPendingAgentRunStartAcknowledged?.(agentId) ??
     agentManager.waitForAgentRunStart(agentId)
   );
 }

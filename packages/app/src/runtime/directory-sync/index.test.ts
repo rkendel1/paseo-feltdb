@@ -93,6 +93,8 @@ function createDirectory(serverId: string): {
   const client = new FakeDirectoryClient();
   const directory = new DirectorySync(serverId, {
     onAgentStoppedRunning: () => undefined,
+    onAgentInactive: () => undefined,
+    onAgentDirectoryCommitted: () => undefined,
     markAgentLoading: () => undefined,
     markAgentReady: () => undefined,
     markAgentError: () => undefined,

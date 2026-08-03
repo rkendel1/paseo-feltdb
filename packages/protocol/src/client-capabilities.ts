@@ -21,6 +21,9 @@ export const CLIENT_CAPS = {
   // COMPAT(projectUpdates): added in v0.1.109, remove gate after 2027-01-15.
   projectUpdates: "project_updates",
   browserHost: "browser_host",
+  // The daemon sends queue.agent_message.updated only to clients that know the
+  // event type; the compatibility cleanup site lives at the broadcast filter.
+  agentMessageQueueEvents: "agent_message_queue_events",
 } as const;
 
 export type ClientCapability = (typeof CLIENT_CAPS)[keyof typeof CLIENT_CAPS];

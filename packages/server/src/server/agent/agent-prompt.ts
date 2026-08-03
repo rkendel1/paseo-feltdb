@@ -10,12 +10,30 @@ export type AgentUnarchiveController = Pick<AgentManager, "notifyAgentState" | "
 
 export type AgentRunController = Pick<
   AgentManager,
-  "getAgent" | "tryRunOutOfBand" | "hasInFlightRun" | "replaceAgentRun" | "streamAgent"
->;
+  | "getAgent"
+  | "tryRunOutOfBand"
+  | "hasInFlightRun"
+  | "replaceAgentRun"
+  | "streamAgent"
+  | "waitForAgentRunStart"
+> &
+  Partial<Pick<AgentManager, "getPendingAgentRunStartAcknowledged">>;
 
 export interface StartAgentRunOptions {
   replaceRunning?: boolean;
   runOptions?: AgentRunOptions;
+}
+
+export interface StartAgentRunResult {
+  outOfBand: boolean;
+  startAcknowledged: Promise<void>;
+}
+
+function getStartAcknowledged(agentManager: AgentRunController, agentId: string): Promise<void> {
+  return (
+    agentManager.getPendingAgentRunStartAcknowledged?.(agentId) ??
+    agentManager.waitForAgentRunStart(agentId)
+  );
 }
 
 export async function startAgentRun(
@@ -24,7 +42,7 @@ export async function startAgentRun(
   prompt: AgentPromptInput,
   logger: Logger,
   options?: StartAgentRunOptions,
-): Promise<{ outOfBand: boolean }> {
+): Promise<StartAgentRunResult> {
   const snapshot = agentManager.getAgent(agentId);
   logger.trace(
     {
@@ -42,7 +60,7 @@ export async function startAgentRun(
   // in-flight turn — replaceAgentRun would interrupt the running turn. The
   // intercept lives at this layer so it covers every prompt entrypoint.
   if (agentManager.tryRunOutOfBand(agentId, prompt, options?.runOptions)) {
-    return { outOfBand: true };
+    return { outOfBand: true, startAcknowledged: Promise.resolve() };
   }
   const shouldReplace = Boolean(options?.replaceRunning && agentManager.hasInFlightRun(agentId));
   const runOptions = options?.runOptions;
@@ -58,6 +76,8 @@ export async function startAgentRun(
     },
     "agent.session.start_stream.iterator_returned",
   );
+  const startAcknowledged = getStartAcknowledged(agentManager, agentId);
+  void startAcknowledged.catch(() => {});
   void (async () => {
     try {
       for await (const _ of iterator) {
@@ -84,7 +104,7 @@ export async function startAgentRun(
       logger.error({ err: error, agentId }, "Agent stream failed");
     }
   })();
-  return { outOfBand: false };
+  return { outOfBand: false, startAcknowledged };
 }
 
 /**
@@ -127,6 +147,8 @@ export interface SendPromptToAgentParams {
   prompt: AgentPromptInput;
   messageId?: string;
   runOptions?: AgentRunOptions;
+  /** Whether this send may interrupt an active foreground run. Defaults to true. */
+  replaceRunning?: boolean;
   /** Optional mode to set on the agent before the run starts. */
   sessionMode?: string;
   /**
@@ -136,6 +158,12 @@ export interface SendPromptToAgentParams {
    */
   unarchive?: boolean;
   logger: Logger;
+}
+
+export interface SendPromptToAgentResult {
+  outOfBand: boolean;
+  startAcknowledged: Promise<void>;
+  skippedReason?: "archived";
 }
 
 export interface StartCreatedAgentInitialPromptParams {
@@ -150,14 +178,17 @@ export interface StartCreatedAgentInitialPromptParams {
 const AGENT_RUN_START_TIMEOUT_MS = 15_000;
 
 export async function waitForAgentRunStartWithTimeout(
-  agentManager: AgentManager,
-  agentId: string,
+  startAcknowledged: Promise<void>,
 ): Promise<void> {
-  const startAbort = new AbortController();
-  const startTimeout = setTimeout(() => startAbort.abort("timeout"), AGENT_RUN_START_TIMEOUT_MS);
-
+  let rejectTimeout: ((error: Error) => void) | null = null;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    rejectTimeout = reject;
+  });
+  const startTimeout = setTimeout(() => {
+    rejectTimeout?.(new Error("Timed out waiting for agent run to start"));
+  }, AGENT_RUN_START_TIMEOUT_MS);
   try {
-    await agentManager.waitForAgentRunStart(agentId, { signal: startAbort.signal });
+    await Promise.race([startAcknowledged, timeout]);
   } finally {
     clearTimeout(startTimeout);
   }
@@ -171,18 +202,22 @@ export async function waitForAgentRunStartWithTimeout(
  * chat mentions, notify-on-finish) MUST go through this so behavior can never
  * drift between them.
  *
- * When `unarchive` is false and the agent is archived, the call is a silent
- * no-op (returns `{ outOfBand: false }`) — the agent is not run.
+ * When `unarchive` is false and the agent is archived, the call is a no-op
+ * with `skippedReason: "archived"` — the agent is not run.
  */
 export async function sendPromptToAgent(
   params: SendPromptToAgentParams,
-): Promise<{ outOfBand: boolean }> {
+): Promise<SendPromptToAgentResult> {
   const unarchive = params.unarchive ?? true;
 
   const record = await params.agentStorage.get(params.agentId);
   if (record?.archivedAt) {
     if (!unarchive) {
-      return { outOfBand: false };
+      return {
+        outOfBand: false,
+        startAcknowledged: Promise.resolve(),
+        skippedReason: "archived",
+      };
     }
     await unarchiveAgentState(params.agentStorage, params.agentManager, params.agentId);
   }
@@ -202,7 +237,7 @@ export async function sendPromptToAgent(
     : params.runOptions;
 
   return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
-    replaceRunning: true,
+    replaceRunning: params.replaceRunning ?? true,
     runOptions,
   });
 }
@@ -230,7 +265,7 @@ export async function startCreatedAgentInitialPrompt(
   );
 
   if (!dispatchResult.outOfBand) {
-    await waitForAgentRunStartWithTimeout(params.agentManager, params.agentId);
+    await waitForAgentRunStartWithTimeout(dispatchResult.startAcknowledged);
   }
 
   const refreshedSnapshot = params.agentManager.getAgent(params.agentId) ?? params.snapshot ?? null;

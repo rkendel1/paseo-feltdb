@@ -26,7 +26,11 @@ export class AgentDirectoryReplica {
 
   constructor(
     private readonly serverId: string,
-    private readonly onStoppedRunning: (agentId: string) => void,
+    private readonly callbacks: {
+      onStoppedRunning: (agentId: string) => void;
+      onAgentInactive: (agentId: string) => void;
+      onDirectoryCommitted: (agentIds: ReadonlySet<string>) => void;
+    },
   ) {}
 
   captureTimeline(agentId: string): AgentLifecycleToken {
@@ -64,11 +68,13 @@ export class AgentDirectoryReplica {
     if (delta.kind === "remove") {
       this.members.delete(delta.agentId);
       this.advance(delta.agentId);
+      this.callbacks.onAgentInactive(delta.agentId);
     } else {
       this.members.add(delta.agent.id);
       if (!before) this.advance(delta.agent.id);
     }
-    if (result.stoppedRunning) this.onStoppedRunning(result.agentId);
+    if (result.stoppedRunning) this.callbacks.onStoppedRunning(result.agentId);
+    this.callbacks.onDirectoryCommitted(new Set(this.members));
   }
 
   commitSnapshot(
@@ -85,7 +91,10 @@ export class AgentDirectoryReplica {
       if (!this.members.has(agentId)) this.advance(agentId);
     }
     for (const agentId of previous.keys()) {
-      if (!nextIds.has(agentId)) removeAgentDirectoryReplica(this.serverId, agentId);
+      if (!nextIds.has(agentId)) {
+        removeAgentDirectoryReplica(this.serverId, agentId);
+        this.callbacks.onAgentInactive(agentId);
+      }
     }
     this.members.clear();
     for (const agentId of nextIds) this.members.add(agentId);
@@ -93,11 +102,15 @@ export class AgentDirectoryReplica {
       serverId: this.serverId,
       entries: reconciled.entries,
     });
-    for (const agentId of reconciled.stoppedRunningAgentIds) this.onStoppedRunning(agentId);
+    for (const agentId of reconciled.stoppedRunningAgentIds) {
+      this.callbacks.onStoppedRunning(agentId);
+    }
+    this.callbacks.onDirectoryCommitted(nextIds);
     return agents;
   }
 
   archive(agentId: string, archivedAt: string): void {
+    this.members.delete(agentId);
     this.advance(agentId);
     useSessionStore.getState().setAgents(this.serverId, (current) => {
       const agent = current.get(agentId);
@@ -107,12 +120,14 @@ export class AgentDirectoryReplica {
       return next;
     });
     clearArchiveAgentPending({ queryClient, serverId: this.serverId, agentId });
+    this.callbacks.onAgentInactive(agentId);
   }
 
   remove(agentId: string): void {
     this.members.delete(agentId);
     this.advance(agentId);
     removeAgentDirectoryReplica(this.serverId, agentId);
+    this.callbacks.onAgentInactive(agentId);
   }
 
   private advance(agentId: string): void {

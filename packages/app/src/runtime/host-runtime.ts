@@ -55,6 +55,10 @@ import { createMessageSubmissionWriter } from "@/composer/submission/writer";
 import { resolveComposerAttachmentSubmitFormat } from "@/composer/attachments/submit";
 import { encodeImages } from "@/utils/encode-images";
 import { DirectorySync, type RefreshAgentDirectoryResult } from "@/runtime/directory-sync";
+import {
+  AgentMessageQueueSync,
+  toAgentMessageQueueConnection,
+} from "@/runtime/agent-message-queue-sync";
 import { ReplicaCache } from "@/runtime/replica-cache";
 
 export type HostRuntimeConnectionStatus = "idle" | "connecting" | "online" | "offline" | "error";
@@ -1355,6 +1359,7 @@ export class HostRuntimeStore {
   private directoryBootstrapInFlight = new Map<string, Promise<void>>();
   private queuedAgentDrainInFlight = new Set<string>();
   private directorySyncByServer = new Map<string, DirectorySync>();
+  private agentMessageQueueSyncByServer = new Map<string, AgentMessageQueueSync>();
   private configuredOverrideBootstrapInFlight: Promise<void> | null = null;
   private bootStarted = false;
   private storage: HostRuntimeStorage;
@@ -1591,10 +1596,19 @@ export class HostRuntimeStore {
     rekeyMap(this.directoryBootstrapInFlight, oldServerId, newServerId);
     rekeyMap(this.agentStoppedRunningListeners, oldServerId, newServerId);
     this.replicaCache.reconcileServerId(oldServerId, newServerId);
+    const queuedMessages = useSessionStore.getState().sessions[oldServerId]?.queuedMessages;
     this.directorySyncByServer.get(oldServerId)?.dispose();
     this.directorySyncByServer.delete(oldServerId);
+    const queueSync =
+      this.agentMessageQueueSyncByServer.get(oldServerId) ?? new AgentMessageQueueSync(newServerId);
+    this.agentMessageQueueSyncByServer.delete(oldServerId);
+    queueSync.adoptServerId(newServerId);
+    this.agentMessageQueueSyncByServer.set(newServerId, queueSync);
     const directory = new DirectorySync(newServerId, {
       onAgentStoppedRunning: (agentId) => this.onAgentStoppedRunning(newServerId, agentId),
+      onAgentInactive: (agentId, source) => queueSync.removeAgent(agentId, source),
+      onAgentDirectoryCommitted: (agentIds, source) =>
+        queueSync.directoryCommitted(agentIds, source),
       markAgentLoading: () => controller.markAgentDirectorySyncLoading(),
       markAgentReady: () => controller.markAgentDirectorySyncReady(),
       markAgentError: (error) => controller.markAgentDirectorySyncError(error),
@@ -1604,14 +1618,19 @@ export class HostRuntimeStore {
     const snapshot = controller.getSnapshot();
     this.clearHostReplica(oldServerId);
     this.syncSessionReplica(newServerId, snapshot);
-    directory.connectionChanged({
+    if (queuedMessages && queuedMessages.size > 0) {
+      useSessionStore.getState().setQueuedMessages(newServerId, queuedMessages);
+    }
+    const connection = {
       client: snapshot.client,
       status: snapshot.connectionStatus === "online" ? "online" : "offline",
       source: {
         clientGeneration: snapshot.clientGeneration,
         connectionEpoch: snapshot.connectionEpoch,
       },
-    });
+    } as const;
+    queueSync.connectionChanged(toAgentMessageQueueConnection(connection));
+    directory.connectionChanged(connection);
 
     const listeners = this.serverListeners.get(oldServerId);
     if (listeners) {
@@ -1951,6 +1970,8 @@ export class HostRuntimeStore {
       this.directoryBootstrapInFlight.delete(serverId);
       this.directorySyncByServer.get(serverId)?.dispose();
       this.directorySyncByServer.delete(serverId);
+      this.agentMessageQueueSyncByServer.get(serverId)?.dispose();
+      this.agentMessageQueueSyncByServer.delete(serverId);
       this.clearHostReplica(serverId);
       void controller.stop();
       this.emit(serverId);
@@ -1974,10 +1995,15 @@ export class HostRuntimeStore {
         onReconcileServerId: (oldId, newId) => this.reconcileServerId(oldId, newId),
       });
       this.controllers.set(host.serverId, controller);
+      const queueSync = new AgentMessageQueueSync(host.serverId);
+      this.agentMessageQueueSyncByServer.set(host.serverId, queueSync);
       this.directorySyncByServer.set(
         host.serverId,
         new DirectorySync(host.serverId, {
           onAgentStoppedRunning: (agentId) => this.onAgentStoppedRunning(host.serverId, agentId),
+          onAgentInactive: (agentId, source) => queueSync.removeAgent(agentId, source),
+          onAgentDirectoryCommitted: (agentIds, source) =>
+            queueSync.directoryCommitted(agentIds, source),
           markAgentLoading: () => controller.markAgentDirectorySyncLoading(),
           markAgentReady: () => controller.markAgentDirectorySyncReady(),
           markAgentError: (error) => controller.markAgentDirectorySyncError(error),
@@ -2031,15 +2057,19 @@ export class HostRuntimeStore {
       return;
     }
     const snapshot = controller.getSnapshot();
+    const connection = {
+      client: snapshot.client,
+      status: snapshot.connectionStatus === "online" ? "online" : "offline",
+      source: {
+        clientGeneration: snapshot.clientGeneration,
+        connectionEpoch: snapshot.connectionEpoch,
+      },
+    } as const;
+    this.agentMessageQueueSyncByServer
+      .get(serverId)
+      ?.connectionChanged(toAgentMessageQueueConnection(connection));
     const directorySourceChanged =
-      this.directorySyncByServer.get(serverId)?.connectionChanged({
-        client: snapshot.client,
-        status: snapshot.connectionStatus === "online" ? "online" : "offline",
-        source: {
-          clientGeneration: snapshot.clientGeneration,
-          connectionEpoch: snapshot.connectionEpoch,
-        },
-      }) ?? false;
+      this.directorySyncByServer.get(serverId)?.connectionChanged(connection) ?? false;
     const previousStatus = this.lastConnectionStatusByServer.get(serverId);
     this.lastConnectionStatusByServer.set(serverId, snapshot.connectionStatus);
     const didTransitionOnline =
@@ -2098,6 +2128,9 @@ export class HostRuntimeStore {
   }
 
   drainQueuedAgentMessage(serverId: string, agentId: string): void {
+    if (this.agentMessageQueueSyncByServer.get(serverId)?.isDaemonQueueEnabled()) {
+      return;
+    }
     const drainKey = `${serverId}:${agentId}`;
     if (this.queuedAgentDrainInFlight.has(drainKey)) return;
     const store = useSessionStore.getState();

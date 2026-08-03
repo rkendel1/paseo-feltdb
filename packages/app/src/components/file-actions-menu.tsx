@@ -11,11 +11,13 @@ import {
   FolderPlus,
   MessageSquarePlus,
   Pencil,
+  Share2,
   Trash2,
   Undo2,
   type LucideIcon,
 } from "lucide-react-native";
 import { useTranslation } from "react-i18next";
+import { isNative } from "@/constants/platform";
 import { ICON_SIZE, type Theme } from "@/styles/theme";
 import {
   ContextMenuContent,
@@ -159,9 +161,10 @@ export function FileActionsContextMenuContent({
         : null,
       availableFile && onDownload
         ? {
-            key: "download",
-            label: t("workspace.fileActions.download"),
-            icon: Download,
+            // Native has no filesystem download target, so the same handler is surfaced as Share.
+            key: isNative ? "share" : "download",
+            label: t(isNative ? "workspace.fileActions.share" : "workspace.fileActions.download"),
+            icon: isNative ? Share2 : Download,
             onSelect: onDownload,
           }
         : null,

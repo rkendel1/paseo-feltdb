@@ -30,7 +30,6 @@ import { useAppActivelyVisible } from "@/hooks/use-app-visible";
 import { isFileQueryEnabled } from "@/components/file-pane-enabled";
 import { isWeb } from "@/constants/platform";
 import { useAppSettings } from "@/hooks/use-settings";
-import { useFileDownload } from "@/hooks/use-file-download";
 import { useLiveFile } from "./live-file/hook";
 import { useFilePreview } from "./preview-lifecycle/hook";
 import { resolveFilePreviewLifecycle } from "./preview-lifecycle/model";
@@ -51,7 +50,6 @@ const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 const foregroundMutedColorMapping = (theme: Theme) => ({
   color: theme.colors.foregroundMuted,
 });
-const noop = () => {};
 
 interface CodeLineProps {
   tokens: HighlightToken[];
@@ -70,7 +68,6 @@ interface FilePreviewBodyProps {
   imagePreviewUri: string | null;
   imageAttachment: AttachmentMetadata | null;
   imageFileName: string;
-  onDownloadImage: () => void;
 }
 
 type TextExplorerFile = ExplorerFile & { kind: "text" };
@@ -193,7 +190,6 @@ function FilePreviewBody({
   imagePreviewUri,
   imageAttachment,
   imageFileName,
-  onDownloadImage,
 }: FilePreviewBodyProps) {
   const theme = UnistylesRuntime.getTheme();
   const { t } = useTranslation();
@@ -348,7 +344,6 @@ function FilePreviewBody({
         uri={imagePreviewUri}
         fileName={imageFileName}
         attachment={imageAttachment}
-        onDownload={onDownloadImage}
       />
     );
   }
@@ -363,13 +358,11 @@ function FilePreviewBody({
 
 export function FilePane({
   serverId,
-  workspaceId,
   workspaceRoot,
   location,
   navigationRevision,
 }: {
   serverId: string;
-  workspaceId: string;
   workspaceRoot: string;
   location: WorkspaceFileLocation;
   navigationRevision: number;
@@ -425,15 +418,6 @@ export function FilePane({
   const { file: preview, imageAttachment } = resolveFilePreviewLifecycle(previewLifecycle);
   const imagePreviewUri = useAttachmentPreviewUrl(imageAttachment);
   const imageFileName = getFileNameFromPath(location.path) ?? location.path;
-  const downloadFile = useFileDownload({
-    serverId,
-    workspaceId,
-    workspaceRoot: readTarget?.cwd ?? normalizedWorkspaceRoot,
-  });
-  const handleDownloadImage = useCallback(() => {
-    if (!readTarget) return;
-    downloadFile({ fileName: imageFileName, path: readTarget.path });
-  }, [downloadFile, imageFileName, readTarget]);
   const isRenderable = isRenderablePreview(preview, location.path);
   const editable = isEditableTextFile({
     preview,
@@ -471,7 +455,6 @@ export function FilePane({
       navigationRevision={navigationRevision}
       imagePreviewUri={imagePreviewUri}
       imageAttachment={imageAttachment}
-      onDownloadImage={handleDownloadImage}
     />
   );
 }
@@ -514,7 +497,6 @@ function FilePanePresentation({
   navigationRevision,
   imagePreviewUri,
   imageAttachment,
-  onDownloadImage,
 }: {
   serverId: string;
   client: DaemonClient | null;
@@ -537,7 +519,6 @@ function FilePanePresentation({
   navigationRevision: number;
   imagePreviewUri: string | null;
   imageAttachment: AttachmentMetadata | null;
-  onDownloadImage: () => void;
 }) {
   if (!client && readTarget) {
     return (
@@ -604,7 +585,6 @@ function FilePanePresentation({
         imagePreviewUri={imagePreviewUri}
         imageAttachment={imageAttachment}
         imageFileName={filename}
-        onDownloadImage={onDownloadImage}
       />
     </View>
   );
@@ -780,7 +760,6 @@ function EditableFilePane({
           imagePreviewUri={null}
           imageAttachment={null}
           imageFileName={filename}
-          onDownloadImage={noop}
         />
       )}
     </View>

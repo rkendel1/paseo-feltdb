@@ -21,7 +21,8 @@ import { lineNumberGutterWidth } from "@/components/code-insets";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
 import { filePreviewRenderKind } from "@/components/file-pane-render-mode";
 import type { AttachmentMetadata } from "@/attachments/types";
-import { useAttachmentPreviewUrl } from "@/attachments/use-attachment-preview-url";
+import { retainAttachmentForGarbageCollection } from "@/attachments/gc-retention";
+import { useAttachmentPreviewUrlState } from "@/attachments/use-attachment-preview-url";
 import { getFileNameFromPath } from "@/attachments/utils";
 import { resolveFilePreviewReadTarget } from "@/file-explorer/preview-target";
 import type { WorkspaceFileLocation } from "@/workspace/file-open";
@@ -370,6 +371,7 @@ export function FilePane({
   const { t } = useTranslation();
   const isMobile = useIsCompactFormFactor();
   const [previewMode, setPreviewMode] = useState<"preview" | "source">("preview");
+  const [previewRetry, setPreviewRetry] = useState(0);
 
   const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
   // COMPAT(workspaceFileEditing): added in v0.2.0, remove after 2027-01-18 once daemon floor >= v0.2.0.
@@ -406,17 +408,28 @@ export function FilePane({
     enabled,
     liveUpdates: supportsEditing,
   });
+  const refreshLiveFile = liveFile.refresh;
 
   const targetKey = readTarget ? `${readTarget.cwd}:${readTarget.path}` : null;
   const previewLifecycle = useFilePreview({
     targetKey,
     liveFileSnapshot: liveFile.snapshot,
+    preparationRevision: previewRetry,
   });
 
   useEffect(() => setPreviewMode("preview"), [targetKey]);
 
   const { file: preview, imageAttachment } = resolveFilePreviewLifecycle(previewLifecycle);
-  const imagePreviewUri = useAttachmentPreviewUrl(imageAttachment);
+  useEffect(() => {
+    if (!imageAttachment) return;
+    return retainAttachmentForGarbageCollection(imageAttachment.id);
+  }, [imageAttachment]);
+  const imagePreview = useAttachmentPreviewUrlState(imageAttachment, previewRetry);
+  const imagePreviewUri = imagePreview.url;
+  const handleRetryRead = useCallback(() => {
+    setPreviewRetry((attempt) => attempt + 1);
+    refreshLiveFile();
+  }, [refreshLiveFile]);
   const imageFileName = getFileNameFromPath(location.path) ?? location.path;
   const isRenderable = isRenderablePreview(preview, location.path);
   const editable = isEditableTextFile({
@@ -426,7 +439,12 @@ export function FilePane({
   const canTogglePreviewMode = isRenderable && !location.lineStart;
   const lineCount =
     preview?.kind === "text" ? (preview.content ?? "").split("\n").length : undefined;
-  const errorMessage = previewLifecycle.status === "error" ? previewLifecycle.message : null;
+  let errorMessage: string | null = null;
+  if (previewLifecycle.status === "error") {
+    errorMessage = previewLifecycle.message;
+  } else if (imagePreview.status === "error") {
+    errorMessage = t("panels.file.failedToLoad");
+  }
   const isLoading =
     previewLifecycle.status === "initial" ||
     previewLifecycle.status === "read_pending" ||
@@ -439,7 +457,7 @@ export function FilePane({
       readTarget={readTarget}
       preview={preview}
       liveFile={liveFile.model}
-      onRetryRead={liveFile.refresh}
+      onRetryRead={handleRetryRead}
       retryingRead={liveFile.isRetrying}
       retryLabel={t("common.actions.retry")}
       filename={imageFileName}

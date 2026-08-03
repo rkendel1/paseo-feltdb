@@ -2193,6 +2193,12 @@ export const ptBR: TranslationResources = {
         color: {
           label: "Cor",
           accessibilityLabel: "Cor, {{value}}",
+          custom: {
+            action: "Personalizada…",
+            title: "Cor personalizada",
+            submit: "Aplicar",
+            invalid: "Insira uma cor hexadecimal como #368080.",
+          },
           options: {
             none: "Padrão",
             violet: "Violeta",

@@ -2163,6 +2163,9 @@ export const ar: TranslationResources = {
             title: "لون مخصص",
             submit: "تطبيق",
             invalid: "أدخل لونًا سداسيًا مثل #368080.",
+            panelAccessibility: "التشبع والسطوع",
+            hueAccessibility: "تدرج اللون",
+            hexAccessibility: "اللون السداسي العشري",
           },
           options: {
             none: "افتراضي",

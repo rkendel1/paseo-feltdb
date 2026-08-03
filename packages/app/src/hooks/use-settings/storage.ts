@@ -73,6 +73,7 @@ export interface AppSettings {
   sidebarWorkspaceTrailing: SidebarWorkspaceTrailing;
   sidebarRowItems: SidebarRowItems;
   sidebarChecksDisplay: SidebarChecksDisplay;
+  alwaysShowHostLabels: boolean;
   autoExpandReasoning: boolean;
   toolCallDetailLevel: ToolCallDetailLevel;
   chatOutlineEnabled: boolean;
@@ -149,6 +150,7 @@ export const DEFAULT_CLIENT_SETTINGS: AppSettings = {
   sidebarWorkspaceTrailing: "diff",
   sidebarRowItems: DEFAULT_SIDEBAR_ROW_ITEMS,
   sidebarChecksDisplay: DEFAULT_SIDEBAR_CHECKS_DISPLAY,
+  alwaysShowHostLabels: false,
   autoExpandReasoning: false,
   toolCallDetailLevel: "detailed",
   chatOutlineEnabled: true,
@@ -314,6 +316,9 @@ function pickBooleanAppSettings(stored: StoredAppSettings): Partial<AppSettings>
   }
   if (typeof stored.chatOutlineEnabled === "boolean") {
     result.chatOutlineEnabled = stored.chatOutlineEnabled;
+  }
+  if (typeof stored.alwaysShowHostLabels === "boolean") {
+    result.alwaysShowHostLabels = stored.alwaysShowHostLabels;
   }
   return result;
 }

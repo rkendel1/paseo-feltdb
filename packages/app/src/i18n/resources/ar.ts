@@ -1024,7 +1024,6 @@ export const ar: TranslationResources = {
         branch: "الفرع",
         project: "المشروع",
         host: "المضيف",
-        alwaysShowHost: "إظهار المضيف دائمًا",
         changeRequest: "طلب السحب",
         checks: "الفحوصات",
         services: "الخدمات",
@@ -2017,6 +2016,13 @@ export const ar: TranslationResources = {
           ghostty: "شبحي",
           pureBlack: "أسود خالص",
           auto: "نظام",
+        },
+      },
+      sidebar: {
+        title: "الشريط الجانبي",
+        alwaysShowHostLabels: {
+          title: "إظهار تسميات المضيف دائمًا",
+          description: "اعرض تسميات المضيف حتى عندما تكون كل مساحات العمل المرئية على هذا الجهاز",
         },
       },
       detailLevel: {

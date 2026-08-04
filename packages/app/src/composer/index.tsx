@@ -269,8 +269,18 @@ function renderContextWindowMeter(
 function resolveContextWindowPlacement(
   meter: ReactElement | null,
   reserveSlot: boolean,
-): ReactNode {
-  return reserveSlot ? <View style={styles.contextWindowMeterSlot}>{meter}</View> : null;
+  isCompactLayout: boolean,
+): { beforeVoiceContent: ReactNode; compactContextWindowContent: ReactNode } {
+  if (!reserveSlot) {
+    return { beforeVoiceContent: null, compactContextWindowContent: null };
+  }
+  if (isCompactLayout) {
+    return { beforeVoiceContent: null, compactContextWindowContent: meter };
+  }
+  return {
+    beforeVoiceContent: <View style={styles.contextWindowMeterSlot}>{meter}</View>,
+    compactContextWindowContent: null,
+  };
 }
 
 interface RenderLeftContentArgs {
@@ -1782,7 +1792,7 @@ export function Composer({
         contextWindowMaxTokens,
         contextWindowUsedTokens,
         agentState.totalCostUsd,
-        false,
+        isCompactLayout,
         serverId,
         agentState.provider,
         contextWindowPending,
@@ -1792,15 +1802,16 @@ export function Composer({
       contextWindowMaxTokens,
       contextWindowUsedTokens,
       agentState.totalCostUsd,
+      isCompactLayout,
       serverId,
       agentState.provider,
       contextWindowPending,
       contextWindowMeterGlyphSize,
     ],
   );
-  const beforeVoiceContent = useMemo(
-    () => resolveContextWindowPlacement(contextWindowMeter, hasAgent),
-    [contextWindowMeter, hasAgent],
+  const { beforeVoiceContent, compactContextWindowContent } = useMemo(
+    () => resolveContextWindowPlacement(contextWindowMeter, hasAgent, isCompactLayout),
+    [contextWindowMeter, hasAgent, isCompactLayout],
   );
 
   const hasGithubAttachment = useMemo(
@@ -2119,6 +2130,11 @@ export function Composer({
                 inputWrapperStyle={inputWrapperStyle}
                 attachmentSlot={attachmentTray}
               />
+              {compactContextWindowContent ? (
+                <View style={styles.contextWindowMeterCompactSlot}>
+                  {compactContextWindowContent}
+                </View>
+              ) : null}
               <Combobox
                 options={githubSearchOptions}
                 value=""
@@ -2202,6 +2218,9 @@ const styles = StyleSheet.create((theme: Theme) => ({
     flexShrink: 0,
     alignItems: "center",
     justifyContent: "center",
+  },
+  contextWindowMeterCompactSlot: {
+    alignSelf: "flex-start",
   },
   realtimeVoiceButton: {
     width: 28,

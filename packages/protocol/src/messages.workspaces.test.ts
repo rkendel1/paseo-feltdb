@@ -499,6 +499,26 @@ describe("workspace message schemas", () => {
       throw new Error("Expected workspace_update upsert payload");
     }
     expect(parsed.payload.workspace.workspaceDirectory).toBe("/repo");
+    expect(parsed.payload.workspace.worktreeSlug).toBeUndefined();
+  });
+
+  test("preserves a Paseo-owned worktree slug", () => {
+    const parsed = WorkspaceDescriptorPayloadSchema.parse({
+      id: "owned-worktree",
+      projectId: "project",
+      projectDisplayName: "repo",
+      projectRootPath: "/repo",
+      workspaceDirectory: "/paseo/worktrees/project/feature/packages/app",
+      worktreeSlug: "feature",
+      projectKind: "git",
+      workspaceKind: "worktree",
+      name: "feature",
+      status: "done",
+      activityAt: null,
+      scripts: [],
+    });
+
+    expect(parsed.worktreeSlug).toBe("feature");
   });
 
   test("defaults omitted workspace archiving state and preserves present timestamps", () => {
@@ -620,6 +640,42 @@ describe("workspace message schemas", () => {
     }
     expect(parsed.payload.workspace.projectKind).toBe("non_git");
     expect(parsed.payload.workspace.workspaceKind).toBe("directory");
+  });
+
+  test("parses workspace script management request and response payloads", () => {
+    expect(
+      SessionInboundMessageSchema.parse({
+        type: "workspace.script.stop.request",
+        requestId: "req-script-stop",
+        workspaceId: "ws-repo",
+        scriptName: "web",
+      }),
+    ).toMatchObject({ type: "workspace.script.stop.request", scriptName: "web" });
+
+    expect(
+      SessionOutboundMessageSchema.parse({
+        type: "workspace.script.start.response",
+        payload: {
+          requestId: "req-script-start",
+          workspaceId: "ws-repo",
+          scriptName: "web",
+          script: {
+            scriptName: "web",
+            type: "service",
+            hostname: "web--repo.localhost",
+            port: 3000,
+            proxyUrl: "http://web--repo.localhost:6767",
+            lifecycle: "running",
+            health: "healthy",
+            terminalId: "terminal-1",
+          },
+          error: null,
+        },
+      }),
+    ).toMatchObject({
+      type: "workspace.script.start.response",
+      payload: { script: { terminalId: "terminal-1", lifecycle: "running" } },
+    });
   });
 
   test("parses script_status_update payload", () => {

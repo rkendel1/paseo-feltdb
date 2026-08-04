@@ -1,6 +1,6 @@
 ---
 name: paseo
-description: Paseo reference for managing workspaces, agents, schedules, and heartbeats.
+description: Paseo reference for managing workspaces, workspace scripts, agents, schedules, and heartbeats.
 ---
 
 Paseo is a daemon that supervises AI coding agents on your machine. Control it through tools or a CLI.
@@ -14,6 +14,24 @@ Paseo is a daemon that supervises AI coding agents on your machine. Control it t
 **`archive_workspace`** — `{ workspaceId }`. Archives the workspace, its agents, and its terminals. Local directories remain; Paseo removes an owned worktree only after its final active workspace reference is archived.
 
 Worktree creation and reference accounting are implementation details of `isolation: "worktree"`.
+
+## Workspace scripts
+
+Configured `paseo.json` scripts use the same supervised lifecycle from tools and the CLI.
+
+**`list_workspace_scripts`** — `{ workspaceId }`. Lists configured scripts with lifecycle, service port, proxy URLs, health, exit code, and terminal ID.
+
+**`start_workspace_script`** — `{ workspaceId, scriptName }`. Starts one configured script through Paseo's managed workspace-script launcher and returns its status metadata.
+
+**`stop_workspace_script`** — `{ workspaceId, scriptName }`. Stops a running script through its supervised terminal and returns the stopped status metadata.
+
+The matching CLI surface accepts either an explicit workspace ID or resolves the current directory:
+
+```bash
+paseo script ls [--cwd <path> | --workspace <workspace-id>]
+paseo script start <name> [--cwd <path> | --workspace <workspace-id>]
+paseo script stop <name> [--cwd <path> | --workspace <workspace-id>]
+```
 
 ## Agents
 
@@ -55,10 +73,6 @@ Only set feature IDs returned by `inspect_provider`. For Codex fast mode, look f
 
 Schedules have the full list/inspect/update/pause/resume/run-once/log/delete surface. Heartbeats deliberately do not.
 
-## Models
-
-`claude/sonnet` (default), `claude/opus` (harder reasoning), `codex/gpt-5.4` (frontier coding), `claude/haiku` (tests only).
-
 ## Orchestration preferences
 
 User-specific configuration at `~/.paseo/orchestration-preferences.json`. **Before any Paseo skill chooses a provider or creates an agent, it must read this file.** Reading means an actual file read, not relying on these examples or defaults. Never hardcode a provider string in another skill — resolve through this file.
@@ -86,6 +100,8 @@ Categories: `impl`, `ui`, `research`, `planning`, `audit`. Skills pick the categ
 ```
 
 If the file is missing, use sensible defaults and tell the user once.
+
+All providers shown in this document are examples, you must resolve real providers either found in the preferences or by calling Paseo provider tooling to find a valid provider.
 
 ## Waiting
 

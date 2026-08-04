@@ -2,6 +2,10 @@ npmRebuild: false
 appId: sh.paseo.desktop
 productName: Paseo
 executableName: Paseo
+protocols:
+  - name: Paseo agent link
+    schemes:
+      - paseo
 afterPack: ./scripts/after-pack.js
 afterSign: ./scripts/after-sign.js
 directories:
@@ -38,6 +42,8 @@ mac:
   extraResources:
     - from: bin/paseo
       to: bin/paseo
+    - from: assets/icon.png
+      to: icon.png
   target:
     - dmg
     - zip

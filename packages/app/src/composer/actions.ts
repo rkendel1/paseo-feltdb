@@ -12,13 +12,8 @@ import {
   splitComposerAttachmentsForSubmit,
   type ComposerAttachmentSubmitFormat,
 } from "@/composer/attachments/submit";
-import {
-  appendOptimisticUserMessageToStream,
-  buildOptimisticUserMessage,
-  generateMessageId,
-  type StreamItem,
-  type UserMessageItem,
-} from "@/types/stream";
+import { createUserMessage, generateMessageId, type UserMessageItem } from "@/types/stream";
+import type { MessageSubmissionRejectionOutcome } from "@/composer/submission/model";
 import type { PickedImageAttachmentInput } from "@/hooks/image-attachment-picker";
 import { i18n } from "@/i18n/i18next";
 
@@ -36,6 +31,11 @@ export interface AttachmentPersister {
   }) => Promise<AttachmentMetadata>;
   persistFromFileUri: (input: {
     uri: string;
+    mimeType: string;
+    fileName: string | null;
+  }) => Promise<AttachmentMetadata>;
+  persistFromDataUrl: (input: {
+    dataUrl: string;
     mimeType: string;
     fileName: string | null;
   }) => Promise<AttachmentMetadata>;
@@ -70,11 +70,10 @@ export interface ComposerCancelClient {
   cancelAgent: (agentId: string) => Promise<void> | void;
 }
 
-export interface AgentStreamWriter {
-  getTail: (agentId: string) => StreamItem[] | undefined;
-  getHead: (agentId: string) => StreamItem[] | undefined;
-  setHead: (updater: (prev: Map<string, StreamItem[]>) => Map<string, StreamItem[]>) => void;
-  setTail: (updater: (prev: Map<string, StreamItem[]>) => Map<string, StreamItem[]>) => void;
+export interface MessageSubmissionWriter {
+  begin: (agentId: string, message: UserMessageItem) => void;
+  accept: (agentId: string, clientMessageId: string) => void;
+  reject: (agentId: string, clientMessageId: string) => MessageSubmissionRejectionOutcome;
 }
 
 export interface QueueWriter {
@@ -86,17 +85,27 @@ export interface QueueWriter {
 
 export async function pickAndPersistImages(input: {
   pickImages: () => Promise<PickedImageAttachmentInput[] | null>;
-  persister: Pick<AttachmentPersister, "persistFromBlob" | "persistFromFileUri">;
+  persister: Pick<
+    AttachmentPersister,
+    "persistFromBlob" | "persistFromFileUri" | "persistFromDataUrl"
+  >;
 }): Promise<AttachmentMetadata[]> {
   const result = await input.pickImages();
   if (!result?.length) return [];
   return await Promise.all(
     result.map(async (picked) => {
       const fileName = picked.fileName ?? null;
-      const mimeType = picked.mimeType || "image/jpeg";
+      const mimeType = picked.mimeType;
       if (picked.source.kind === "blob") {
         return await input.persister.persistFromBlob({
           blob: picked.source.blob,
+          mimeType,
+          fileName,
+        });
+      }
+      if (picked.source.kind === "data_url") {
+        return await input.persister.persistFromDataUrl({
+          dataUrl: picked.source.dataUrl,
           mimeType,
           fileName,
         });
@@ -145,19 +154,16 @@ export interface CancelComposerAgentInput {
   isAgentRunning: boolean;
   isCancellingAgent: boolean;
   isConnected: boolean;
-  onCancelFailed: (error: unknown) => void;
 }
 
-export function cancelComposerAgent(input: CancelComposerAgentInput): boolean {
-  if (!input.isAgentRunning || input.isCancellingAgent) return false;
-  if (!input.isConnected || !input.client) return false;
+export function cancelComposerAgent(input: CancelComposerAgentInput): Promise<void> | null {
+  if (!input.isAgentRunning || input.isCancellingAgent) return null;
+  if (!input.isConnected || !input.client) return null;
   try {
-    void Promise.resolve(input.client.cancelAgent(input.agentId)).catch(input.onCancelFailed);
+    return Promise.resolve(input.client.cancelAgent(input.agentId));
   } catch (error) {
-    input.onCancelFailed(error);
-    return false;
+    return Promise.reject(error);
   }
-  return true;
 }
 
 export interface DispatchComposerAgentMessageInput {
@@ -169,7 +175,7 @@ export interface DispatchComposerAgentMessageInput {
   encodeImages: (
     images: AttachmentMetadata[],
   ) => Promise<Array<{ data: string; mimeType: string }> | undefined>;
-  stream: AgentStreamWriter;
+  submission: MessageSubmissionWriter;
 }
 
 export async function dispatchComposerAgentMessage(
@@ -178,47 +184,27 @@ export async function dispatchComposerAgentMessage(
   const wirePayload = splitComposerAttachmentsForSubmit(input.attachments, {
     format: input.attachmentSubmitFormat,
   });
-  const messageId = generateMessageId();
-  const userMessage = buildOptimisticUserMessage({
-    id: messageId,
+  const clientMessageId = generateMessageId();
+  const userMessage = createUserMessage({
+    clientMessageId,
     text: input.text,
     timestamp: new Date(),
     images: wirePayload.images,
     attachments: wirePayload.attachments,
   });
-  appendUserMessageToStream(input.agentId, userMessage, input.stream);
-  const imagesData = await input.encodeImages(wirePayload.images);
-  await input.client.sendAgentMessage(input.agentId, input.text, {
-    messageId,
-    images: imagesData ?? [],
-    attachments: wirePayload.attachments,
-  });
-}
-
-function appendUserMessageToStream(
-  agentId: string,
-  userMessage: UserMessageItem,
-  stream: AgentStreamWriter,
-): void {
-  const result = appendOptimisticUserMessageToStream({
-    tail: stream.getTail(agentId) ?? [],
-    head: stream.getHead(agentId) ?? [],
-    message: userMessage,
-    placement: "active-head",
-  });
-  if (result.changedHead) {
-    stream.setHead((prev) => {
-      const next = new Map(prev);
-      next.set(agentId, result.head);
-      return next;
+  input.submission.begin(input.agentId, userMessage);
+  try {
+    const imagesData = await input.encodeImages(wirePayload.images);
+    await input.client.sendAgentMessage(input.agentId, input.text, {
+      messageId: clientMessageId,
+      images: imagesData ?? [],
+      attachments: wirePayload.attachments,
     });
-  }
-  if (result.changedTail) {
-    stream.setTail((prev) => {
-      const next = new Map(prev);
-      next.set(agentId, result.tail);
-      return next;
-    });
+    input.submission.accept(input.agentId, clientMessageId);
+  } catch (error) {
+    const outcome = input.submission.reject(input.agentId, clientMessageId);
+    if (outcome === "accepted") return;
+    throw error;
   }
 }
 
@@ -338,7 +324,7 @@ export function openComposerAttachment(input: OpenComposerAttachmentInput): void
     input.setLightboxMetadata(input.attachment.metadata);
     return;
   }
-  if (input.attachment.kind === "file") {
+  if (input.attachment.kind === "file" || input.attachment.kind === "workspace_file") {
     return;
   }
   if (isWorkspaceAttachment(input.attachment)) {

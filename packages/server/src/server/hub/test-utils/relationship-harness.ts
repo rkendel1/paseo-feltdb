@@ -12,6 +12,8 @@ import { WebSocket } from "ws";
 import type {
   AgentSnapshotPayload,
   HubExecutionAgentCreateResponse,
+  HubExecutionControlAction,
+  HubExecutionControlResponse,
   HubExecutionAgentStream,
   HubExecutionAgentUpdate,
   RpcErrorMessage,
@@ -461,29 +463,48 @@ export class HubRelationshipHarness {
   private failNextSessionClose = false;
   private observedEnrollments = 0;
   private observedSockets = 0;
-  private readonly codex = new ControlledAgentClient(
-    createTestAgentClients({
-      closeSession: async () => {
-        if (!this.failNextSessionClose) return;
-        this.failNextSessionClose = false;
-        throw new Error("Requested provider session close failure");
-      },
-      onStartTurn: (prompt) => {
-        const promptText = typeof prompt === "string" ? prompt : JSON.stringify(prompt);
-        if (this.promptsToFail.delete(promptText)) {
-          throw new Error("Requested provider prompt startup failure");
-        }
-        this.providerPrompts.push(prompt);
-      },
-    }).codex,
-  );
+  private readonly codex: ControlledAgentClient;
 
-  private constructor(private readonly archiveWatchFiles: ArchiveWatchFiles) {}
+  private constructor(
+    private readonly archiveWatchFiles: ArchiveWatchFiles,
+    private readonly mcpEnabled: boolean,
+  ) {
+    this.codex = new ControlledAgentClient(
+      createTestAgentClients({
+        supportsMcpServers: mcpEnabled,
+        closeSession: async () => {
+          if (!this.failNextSessionClose) return;
+          this.failNextSessionClose = false;
+          throw new Error("Requested provider session close failure");
+        },
+        onStartTurn: (prompt) => {
+          const promptText = typeof prompt === "string" ? prompt : JSON.stringify(prompt);
+          if (this.promptsToFail.delete(promptText)) {
+            throw new Error("Requested provider prompt startup failure");
+          }
+          this.providerPrompts.push(prompt);
+        },
+      }).codex,
+    );
+  }
 
   static async start(
     archiveWatchFiles: ArchiveWatchFiles = nodeArchiveWatchFiles,
   ): Promise<HubRelationshipHarness> {
-    const harness = new HubRelationshipHarness(archiveWatchFiles);
+    return this.launch(archiveWatchFiles, false);
+  }
+
+  static async startWithAgentMcp(
+    archiveWatchFiles: ArchiveWatchFiles = nodeArchiveWatchFiles,
+  ): Promise<HubRelationshipHarness> {
+    return this.launch(archiveWatchFiles, true);
+  }
+
+  private static async launch(
+    archiveWatchFiles: ArchiveWatchFiles,
+    mcpEnabled: boolean,
+  ): Promise<HubRelationshipHarness> {
+    const harness = new HubRelationshipHarness(archiveWatchFiles, mcpEnabled);
     await harness.createHome();
     await harness.startDaemon();
     return harness;
@@ -671,9 +692,9 @@ export class HubRelationshipHarness {
     executionId = "execution-race",
     options: {
       worktree?: CreateAgentWorktreeTarget;
-      autoArchive?: boolean;
       prompt?: string;
       modeId?: string;
+      mcpServers?: AgentSessionConfig["mcpServers"];
     } = {},
   ): void {
     const { prompt = "Create through the Hub", ...requestOptions } = options;
@@ -701,6 +722,49 @@ export class HubRelationshipHarness {
     return this.latestSocket().socket.messageFor(requestId);
   }
 
+  async controlExecution(
+    executionId: string,
+    action: HubExecutionControlAction,
+    requestId = `${action}-${executionId}`,
+  ): Promise<HubExecutionControlResponse["payload"]> {
+    this.beginExecutionControl(requestId, executionId, action);
+    return this.executionControlResult(requestId);
+  }
+
+  beginExecutionControl(
+    requestId: string,
+    executionId: string,
+    action: HubExecutionControlAction,
+  ): void {
+    this.latestSocket().socket.receive({
+      type: "hub.execution.control.request",
+      requestId,
+      executionId,
+      action,
+    });
+  }
+
+  async executionControlResult(requestId: string): Promise<HubExecutionControlResponse["payload"]> {
+    const response = (await this.latestSocket().socket.messageFor(
+      requestId,
+    )) as HubExecutionControlResponse;
+    return response.payload;
+  }
+
+  interruptExecution(
+    executionId: string,
+    requestId?: string,
+  ): Promise<HubExecutionControlResponse["payload"]> {
+    return this.controlExecution(executionId, "interrupt", requestId);
+  }
+
+  archiveExecution(
+    executionId: string,
+    requestId?: string,
+  ): Promise<HubExecutionControlResponse["payload"]> {
+    return this.controlExecution(executionId, "archive", requestId);
+  }
+
   async durableOwnedAgentIds(): Promise<string[]> {
     return (await this.daemon!.agentStorage.list())
       .filter((record) => record.owner?.kind === "daemon")
@@ -721,6 +785,31 @@ export class HubRelationshipHarness {
     return this.daemon!.agentManager.listAgents()
       .filter((agent) => agent.owner?.kind === "daemon")
       .map((agent) => agent.id);
+  }
+
+  ownedAgentIsRunning(agentId: string): boolean {
+    return this.daemon!.agentManager.hasInFlightRun(agentId);
+  }
+
+  async ownedAgentArchivedAt(agentId: string): Promise<string | null> {
+    return (await this.daemon!.agentStorage.get(agentId))?.archivedAt ?? null;
+  }
+
+  async createForeignExecution(executionId: string): Promise<string> {
+    const agent = await this.daemon!.agentManager.createAgent(
+      { provider: "codex", cwd: this.root },
+      undefined,
+      {
+        workspaceId: "foreign-workspace",
+        owner: { kind: "daemon", daemonId: "another-daemon", executionId },
+      },
+    );
+    return agent.id;
+  }
+
+  async agentRemainsAvailable(agentId: string): Promise<boolean> {
+    const record = await this.daemon!.agentStorage.get(agentId);
+    return this.daemon!.agentManager.getAgent(agentId) !== null && !record?.archivedAt;
   }
 
   agentSubscriptionCount(): number {
@@ -757,12 +846,24 @@ export class HubRelationshipHarness {
     );
   }
 
+  latestProviderCreateConfig(): AgentSessionConfig | null {
+    return this.codex.createdConfigs.at(-1) ?? null;
+  }
+
+  hubMessages(): SessionOutboundMessage[] {
+    return this.remote.sockets.flatMap(({ socket }) => socket.sent);
+  }
+
   latestCreatedCwd(): string | null {
     return this.codex.createdConfigs.at(-1)?.cwd ?? null;
   }
 
   repoRoot(): string {
     return this.root;
+  }
+
+  repoExists(): boolean {
+    return existsSync(this.root);
   }
 
   async waitForOwnedArchiveCompletion(
@@ -849,6 +950,10 @@ export class HubRelationshipHarness {
     };
   }
 
+  pathsReferToSameLocation(left: string, right: string): boolean {
+    return this.comparablePath(left) === this.comparablePath(right);
+  }
+
   async createBranch(branch: string): Promise<void> {
     await execFileAsync("git", ["-C", this.root, "branch", branch]);
   }
@@ -887,6 +992,20 @@ export class HubRelationshipHarness {
       .split("\n")
       .filter((line) => line.startsWith("worktree "))
       .map((line) => line.slice("worktree ".length));
+  }
+
+  async createSiblingWorkspace(cwd: string): Promise<string> {
+    const client = await this.trustedClient();
+    try {
+      const result = await client.createWorkspace({
+        source: { kind: "directory", path: cwd },
+        title: "sibling",
+      });
+      if (!result.workspace) throw new Error(result.error ?? "Failed to create sibling workspace");
+      return result.workspace.id;
+    } finally {
+      await client.close();
+    }
   }
 
   async createOwnedConcurrently(executionId = "execution-1"): Promise<{
@@ -1194,7 +1313,7 @@ export class HubRelationshipHarness {
       paseoHome: this.paseoHome,
       corsAllowedOrigins: [],
       hostnames: true,
-      mcpEnabled: false,
+      mcpEnabled: this.mcpEnabled,
       staticDir,
       mcpDebug: false,
       agentClients: {
@@ -1237,7 +1356,7 @@ export class HubRelationshipHarness {
   }
 
   private async executeCli(args: string[]): Promise<Record<string, unknown>> {
-    const entrypoint = path.join(import.meta.dirname, "../../test-utils/hub-cli-entry.ts");
+    const entrypoint = path.join(import.meta.dirname, "hub-cli-entry.ts");
     const { stdout } = await execFileAsync(
       process.execPath,
       [
@@ -1322,16 +1441,19 @@ export class HubRelationshipHarness {
   }
 
   private async removeRoot(): Promise<void> {
-    let retryableCode: string | null = null;
-    if (platform() === "win32") retryableCode = "EBUSY";
-    if (platform() === "darwin") retryableCode = "ENOTEMPTY";
-    const attempts = retryableCode ? 10 : 1;
+    // Daemon may still flush into .paseo/projects during teardown; recursive rm
+    // can race and hit ENOTEMPTY/EBUSY/EPERM. Observed on Linux CI as well as macOS/Windows.
+    const retryableCodes = new Set(["ENOTEMPTY", "EBUSY", "EPERM"]);
+    const attempts = 10;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
         await rm(this.root, { recursive: true, force: true });
         return;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== retryableCode || attempt === attempts) {
+        if (
+          !retryableCodes.has((error as NodeJS.ErrnoException).code ?? "") ||
+          attempt === attempts
+        ) {
           throw error;
         }
         await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
@@ -1385,6 +1507,10 @@ export class HubRelationshipHarness {
           },
           input,
         ),
+      interruptAgent: (agentId) => manager.cancelAgentRun(agentId),
+      archiveAgent: (agentId) => manager.archiveAgent(agentId),
+      listActiveWorkspaces: async () => [],
+      archiveWorkspace: async () => undefined,
     });
   }
 

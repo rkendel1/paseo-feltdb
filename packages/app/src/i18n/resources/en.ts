@@ -62,6 +62,16 @@ export const en = {
       home: "Home",
       modelGroupLabel: "Model",
       modelSearchKeywords: "switch model change model set model select model",
+      thinkingGroupLabel: "Thinking",
+      thinkingSearchKeywords: "reasoning effort thinking think",
+      modeGroupLabel: "Mode",
+      modeSearchKeywords: "access permission approval mode",
+      planModeGroupLabel: "Plan mode",
+      planModeSearchKeywords: "plan planning plan mode",
+      fastModeGroupLabel: "Fast",
+      fastModeSearchKeywords: "fast speed low latency",
+      settingOn: "On",
+      settingOff: "Off",
     },
   },
   composer: {
@@ -100,6 +110,7 @@ export const en = {
     },
     attachments: {
       addImage: "Add image",
+      pasteImage: "Paste image",
       addFile: "Upload file",
       addIssueOrPr: "Add issue or PR",
       addIssueOrPr_mr: "Add issue or MR",
@@ -125,6 +136,8 @@ export const en = {
       initialPromptRequired: "Initial prompt is required",
       alreadyLoading: "Already loading",
       uploadFailed: "Failed to upload file",
+      noClipboardImage: "No image in clipboard",
+      pasteImageFailed: "Failed to paste image",
       fileTooLarge: "{{fileName}} is too large (max {{size}})",
     },
     clientCommands: {
@@ -175,6 +188,7 @@ export const en = {
   agentStream: {
     empty: "Start chatting with this agent...",
     scrollToBottom: "Scroll to bottom",
+    historyLoadFailed: "Couldn't load agent history",
     permission: {
       plan: "Plan",
       required: "Permission Required",
@@ -251,7 +265,7 @@ export const en = {
       copyCode: "Copy code",
       copyTurn: "Copy turn",
       copyMessage: "Copy message",
-      forkMenu: "Fork chat",
+      forkMenu: "Fork chat from here",
       forkInNewTab: "Fork in a new tab",
       forkInNewWorkspace: "Fork in a new workspace",
       forkUnavailable: "Update the host to use this.",
@@ -365,6 +379,13 @@ export const en = {
       copyBranchName: "Copy branch name",
       copied: "Copied",
     },
+    fileActions: {
+      openFile: "Open file",
+      copyPath: "Copy path",
+      download: "Download",
+      addToChat: "Add to chat",
+      moreActions: "More actions",
+    },
     fileExplorer: {
       sort: {
         name: "Name",
@@ -374,8 +395,6 @@ export const en = {
       context: {
         size: "Size",
         modified: "Modified",
-        copyPath: "Copy path",
-        download: "Download",
       },
       actions: {
         back: "Back",
@@ -461,6 +480,7 @@ export const en = {
     },
     terminal: {
       hostDisconnected: "Host is not connected",
+      updateHost: "Update the host to use the native terminal renderer.",
       unableToSubscribe: "Unable to subscribe to terminal",
     },
     tabs: {
@@ -486,6 +506,7 @@ export const en = {
         openFor: "Open menu for {{label}}",
         copyResumeCommand: "Copy resume command",
         copyAgentId: "Copy agent id",
+        copyTerminalId: "Copy terminal id",
         copyFilePath: "Copy file path",
         rename: "Rename",
         closeAbove: "Close tabs above",
@@ -523,6 +544,7 @@ export const en = {
       toasts: {
         copyFailed: "Copy failed",
         agentIdCopiedLabel: "Agent ID",
+        terminalIdCopiedLabel: "Terminal ID",
         resumeCommandCopiedLabel: "resume command",
         filePathCopiedLabel: "File path",
         resumeIdUnavailable: "Resume ID not available",
@@ -763,8 +785,12 @@ export const en = {
         },
       },
       diff: {
+        openChangesTab: "Open Changes tab",
+        closeChangesTab: "Close Changes tab",
         binaryFile: "Binary file",
         tooLarge: "Diff too large to display",
+        previewTooLargeTitle: "This diff is too large to preview",
+        previewTooLargeDescription: "Narrow the comparison to preview it here",
         unified: "Unified diff",
         split: "Side-by-side diff",
         switchToUnified: "Switch to unified diff",
@@ -798,7 +824,8 @@ export const en = {
         deletedFile: "Deleted",
         commits: {
           title: "Commits",
-          countLabel: "{{count}} recent commits",
+          countLabel: "{{count}} workspace commits",
+          noneAhead: "No commits ahead of {{baseRef}} yet",
           fileDiffEmpty: "No changes to display",
           fileDiffError: "Failed to load file diff",
           loading: "Loading commits…",
@@ -817,6 +844,14 @@ export const en = {
         actions: {
           viewPullRequest: "View",
           openOn: "Open on {{brand}}",
+        },
+        checksSummary: {
+          passedLabel: "passed",
+          failedLabel: "failed",
+          runningLabel: "running",
+          passedAccessible: "Checks passed",
+          failedAccessible: "Checks failed",
+          runningAccessible: "Checks running",
         },
         sections: {
           checks: "Checks",
@@ -865,6 +900,33 @@ export const en = {
     },
   },
   sidebar: {
+    display: {
+      trigger: "Display preferences",
+      heading: "Display",
+      grouping: {
+        label: "Grouping",
+        project: "Project",
+        status: "Status",
+      },
+      titleSource: {
+        label: "Title",
+        title: "Title",
+        branch: "Branch name",
+      },
+      show: {
+        label: "Show",
+        host: "Host",
+        changeRequest: "Pull request",
+        checks: "Checks",
+        scripts: "Scripts",
+        diff: "Diff stats",
+        timestamp: "Last activity",
+      },
+      hostFilter: {
+        label: "Host",
+        all: "All hosts",
+      },
+    },
     pinned: {
       title: "Pinned",
     },
@@ -908,6 +970,8 @@ export const en = {
         openSettings: "Open project settings",
         openNewWindow: "Open in new window",
         openNewWindowFailed: "Couldn't open a new window",
+        openFolder: "Open in file manager",
+        openFolderFailed: "Couldn't open folder",
         remove: "Remove project",
         removing: "Removing...",
       },
@@ -1156,6 +1220,7 @@ export const en = {
         installFailed: "Unable to install orchestration skills.",
         updateFailed: "Unable to update orchestration skills.",
         uninstallFailed: "Unable to uninstall orchestration skills.",
+        saveSelectionFailed: "Unable to save the orchestration skills selection.",
       },
     },
   },
@@ -1408,9 +1473,21 @@ export const en = {
       loadingOffer: "Loading pairing offer...",
       failedToLoadOffer: "Failed to load pairing offer.",
       relayDisabled: "Relay is not enabled. Enable relay to pair a device.",
+      enableTitle: "Enable relay?",
+      enableDescription:
+        "Relay lets this device connect from anywhere. Pairing traffic is end-to-end encrypted.",
+      relayDocs: "How relay works",
+      relayDocsAccessibility: "Read how Paseo relay works",
+      enableRelay: "Enable relay",
+      enablingRelay: "Enabling...",
+      notNow: "Not now",
+      directConnectionHint:
+        "Without relay, connect directly over TCP, Tailscale, or another VPN. No QR code is created.",
+      updateRequired: "Update the host to enable relay from Paseo Desktop.",
       unavailable: "Pairing offer unavailable.",
       hint: "Scan this QR code with Paseo on your phone, or copy the link below.",
       qrUnavailable: "QR code unavailable.",
+      qrAccessibility: "Pairing QR code",
       retry: "Retry",
       copy: "Copy",
       copied: "Copied",
@@ -1488,7 +1565,9 @@ export const en = {
         cursor: "Line {{line}}, column {{column}}",
         preview: "Preview",
         source: "Source",
-        unavailableTitle: "File unavailable on disk",
+        deletedTitle: "File deleted on disk",
+        checkFailedTitle: "Couldn't check file on disk",
+        preservedDescription: "The open copy is preserved.",
         conflictDescription: "The local buffer was preserved. Choose which version to keep.",
         overwrite: "Overwrite",
         reload: "Reload",
@@ -1500,6 +1579,8 @@ export const en = {
       changesLabel: "Changes",
       changesSubtitle: "Working tree diff",
       commitSubtitle: "Commit diff",
+      uncommittedSubtitle: "Uncommitted changes",
+      baseSubtitle: "Compared with {{baseRef}}",
       directoryMissing: "Workspace directory not found.",
       empty: "No changes",
       loadError: "Failed to load diff",
@@ -1640,6 +1721,7 @@ export const en = {
       vimHint: "Applies to source files on web and desktop.",
     },
     hostSections: {
+      projects: "Projects",
       connections: "Connections",
       agents: "Agents",
       workspaces: "Workspaces",
@@ -1717,6 +1799,11 @@ export const en = {
     },
     diagnostics: {
       title: "Diagnostics",
+      legacyTerminalRenderer: {
+        label: "Use legacy terminal renderer",
+        description: "Use the previous WebView terminal after reopening a terminal",
+        accessibilityLabel: "Use legacy terminal renderer",
+      },
       testAudio: "Test audio",
       playTest: "Play test",
       playing: "Playing...",
@@ -1782,6 +1869,10 @@ export const en = {
       },
       detailLevel: {
         title: "Detail level",
+      },
+      chatOutline: {
+        title: "Chat outline",
+        description: "Show an outline for jumping between prompts",
       },
       fonts: {
         title: "Fonts",
@@ -1866,6 +1957,7 @@ export const en = {
         sendMessage: "Send message",
         queueMessage: "Queue message",
         muteUnmuteVoiceMode: "Mute/unmute voice mode",
+        switchProject: "Switch project",
       },
       helpNotes: {
         showKeyboardShortcuts: "Available when focus is not in a text field or terminal.",
@@ -1892,6 +1984,15 @@ export const en = {
         uninstallTitle: "Uninstall Paseo skills?",
         uninstallMessage:
           "Removes all Paseo orchestration skills from ~/.agents, ~/.claude, ~/.codex.",
+        choose: "Choose skills",
+        chooseAll: "All skills",
+        chooseAllHint: "Keep every bundled skill installed, including ones added later.",
+        chooseList: "Bundled skills",
+        chooseEmpty: "This build bundles no skills.",
+        removeTitle: "Remove deselected skills?",
+        removeMessage:
+          "{{skills}} will be deleted from ~/.agents, ~/.claude, and ~/.codex. Anything you added inside those skill folders is deleted too.",
+        saveFailed: "Could not save your skill selection.",
       },
       actions: {
         install: "Install",
@@ -1899,7 +2000,10 @@ export const en = {
         installed: "Installed",
         update: "Update",
         working: "Working...",
+        remove: "Remove",
         uninstall: "Uninstall",
+        save: "Save",
+        saving: "Saving...",
       },
       operations: {
         add: "Add skill",
@@ -1923,6 +2027,41 @@ export const en = {
       },
     },
     host: {
+      appearance: {
+        title: "Appearance",
+        name: {
+          label: "Name",
+        },
+        color: {
+          label: "Color",
+          accessibilityLabel: "Color, {{value}}",
+          options: {
+            none: "Default",
+            violet: "Violet",
+            sky: "Sky",
+            emerald: "Emerald",
+            orange: "Orange",
+            pink: "Pink",
+            indigo: "Indigo",
+            teal: "Teal",
+            red: "Red",
+            amber: "Amber",
+            blue: "Blue",
+          },
+        },
+        badge: {
+          label: "Sidebar badge",
+          accessibilityLabel: "Sidebar badge, {{value}}",
+          options: {
+            name: "Name",
+            icon: "Icon only",
+            hidden: "Hidden",
+          },
+        },
+        preview: {
+          workspaceName: "my-workspace",
+        },
+      },
       notFound: "Host not found",
       badges: {
         relay: "Relay",
@@ -2128,24 +2267,23 @@ export const en = {
       },
     },
     project: {
-      noEditableTarget: "We don't have an editable copy of this project on any connected host.",
+      noEditableTarget: "This project isn't editable on this host.",
       backToProjects: "Back to projects",
-      switchHost: "Switch host",
-      rename: {
-        renamedToast: "Project renamed",
-        errorFallback: "Couldn't rename project",
-        renameLabel: "Rename project",
-        resetLabel: "Reset project name to default",
-        projectNameLabel: "Project name",
-        saveLabel: "Save project name",
-        cancelLabel: "Cancel renaming",
-        reset: "Reset",
+      edit: {
+        title: "Edit project",
+        name: "Name",
+        nameLabel: "Project name",
+        icon: "Icon",
+        chooseImage: "Choose image",
+        useAutomatic: "Use automatic",
+        imageUrl: "Image or website URL",
+        save: "Save changes",
+        savedToast: "Project updated",
       },
       readFailures: {
         invalidTitle: "paseo.json couldn't be parsed",
         invalidDescription: "Fix the file on disk, then reload.",
         missingTitle: "This host doesn't have this project",
-        missingWithHosts: "Switch to another host above, or reload.",
         missingSingleHost: "The selected host has no record of this project.",
         transportTitle: "Couldn't load paseo.json",
         transportFallback: "The host didn't respond.",

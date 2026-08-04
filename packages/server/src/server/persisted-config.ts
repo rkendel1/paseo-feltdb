@@ -253,6 +253,12 @@ export const PersistedConfigSchema = z
           })
           .passthrough()
           .optional(),
+        providerUsage: z
+          .object({
+            hiddenProviders: z.array(z.string().min(1)).optional(),
+          })
+          .strict()
+          .optional(),
         git: z
           .object({
             maxProcessesPerSecond: z.number().int().positive().optional(),

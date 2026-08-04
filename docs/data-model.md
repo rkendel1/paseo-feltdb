@@ -190,6 +190,7 @@ snapshot so a mixed edit can apply its live subset and still name the paths that
     hostnames: true | string[],   // legacy alias `allowedHosts` is migrated on load
     trustedProxies: true | string[], // defaults to ["loopback"]; Express proxy names/CIDRs
     mcp: { enabled: boolean, injectIntoAgents: boolean },
+    providerUsage: { hiddenProviders: string[] }, // host-scoped provider cards hidden from Usage
     git: { maxProcessesPerSecond: number, maxProcessConcurrency: number },
     appendSystemPrompt: string,    // appended to supported provider system/developer prompts
     terminalProfiles: TerminalProfile[],  // named shell commands; omitted means DEFAULT_TERMINAL_PROFILES
@@ -254,6 +255,10 @@ defaults, so both mean none.
 rather than storing something it cannot describe. That is why the client gates the agent profiles
 UI on `server_info.features.agentProfiles` instead of letting a save appear to succeed against an
 older daemon.
+
+`daemon.providerUsage.hiddenProviders` stores provider IDs hidden from that host's Usage page. An
+empty or missing list shows every provider. This preference does not hide the active provider from
+the context-window tooltip.
 
 ### Git process limits
 

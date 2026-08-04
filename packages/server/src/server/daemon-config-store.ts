@@ -27,6 +27,7 @@ interface SupportedMutableConfigPatch {
   appendSystemPrompt?: string;
   terminalProfiles?: MutableDaemonConfig["terminalProfiles"];
   agentProfiles?: MutableDaemonConfig["agentProfiles"];
+  providerUsage?: { hiddenProviders: string[] };
   pluginsEnabled?: boolean;
   plugins?: MutableDaemonConfig["plugins"];
 }
@@ -270,6 +271,9 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
       : {}),
     ...(patch.terminalProfiles !== undefined ? { terminalProfiles: patch.terminalProfiles } : {}),
     ...(patch.agentProfiles !== undefined ? { agentProfiles: patch.agentProfiles } : {}),
+    ...(patch.providerUsage?.hiddenProviders !== undefined
+      ? { providerUsage: { hiddenProviders: patch.providerUsage.hiddenProviders } }
+      : {}),
     ...(patch.pluginsEnabled !== undefined ? { pluginsEnabled: patch.pluginsEnabled } : {}),
     ...(patch.plugins !== undefined ? { plugins: patch.plugins } : {}),
   };
@@ -631,5 +635,8 @@ function mergeMutableDaemonPatch(
   if (patch.appendSystemPrompt !== undefined) next.appendSystemPrompt = patch.appendSystemPrompt;
   if (patch.terminalProfiles !== undefined) next.terminalProfiles = patch.terminalProfiles;
   if (patch.agentProfiles !== undefined) next.agentProfiles = patch.agentProfiles;
+  if (patch.providerUsage !== undefined) {
+    next.providerUsage = { hiddenProviders: patch.providerUsage.hiddenProviders };
+  }
   return Object.keys(next).length > 0 ? next : undefined;
 }

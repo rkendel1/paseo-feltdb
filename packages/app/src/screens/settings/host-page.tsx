@@ -354,14 +354,12 @@ export function HostUsagePage({ serverId }: { serverId: string }) {
   }, [refreshProviderUsage]);
   const handleVisibilityChange = useCallback(
     async (providerId: string, visible: boolean) => {
-      const result = await patchConfig(
-        createProviderVisibilityPatch({ hiddenProviderIds, providerId, visible }),
-      );
+      const result = await patchConfig(createProviderVisibilityPatch({ providerId, visible }));
       if (!result) {
         throw new Error(providerUsageCopy.clientUnavailable);
       }
     },
-    [hiddenProviderIds, patchConfig],
+    [patchConfig],
   );
 
   if (!host) {

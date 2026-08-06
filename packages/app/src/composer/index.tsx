@@ -108,7 +108,10 @@ import { useAppSettings } from "@/hooks/use-settings";
 import { RenderProfile } from "@/utils/render-profiler";
 import { AfterPaintPublication } from "@/composer/after-paint-publication";
 import { isWeb, isNative } from "@/constants/platform";
-import { consumeComposerAutoFocus } from "@/keyboard/composer-auto-focus";
+import {
+  consumeComposerAutoFocus,
+  useComposerAutoFocusVersion,
+} from "@/keyboard/composer-auto-focus";
 import type { ForgeSearchItem } from "@getpaseo/protocol/messages";
 import type {
   AttachmentMetadata,
@@ -586,9 +589,11 @@ function ComposerKeyboardRegistration({
 }) {
   const { isActiveComposer } = useComposerKeyboardScope();
 
-  // Keyboard-driven workspace switches on native request composer focus before
-  // this composer is mounted or repointed, so consume the request once the
-  // active agent settles. rAF lets the navigation transition commit first.
+  // Keyboard-driven workspace switches (and unhandled focus shortcuts) on
+  // native request composer focus before this composer is mounted or
+  // repointed, so consume the request once the active agent settles. rAF lets
+  // the navigation transition commit first.
+  const composerAutoFocusVersion = useComposerAutoFocusVersion();
   useEffect(() => {
     if (!isNative || !isActiveComposer) return;
     if (!consumeComposerAutoFocus()) return;
@@ -596,7 +601,12 @@ function ComposerKeyboardRegistration({
       focusMessageInputForKeyboardAction();
     });
     return () => cancelAnimationFrame(frame);
-  }, [autoFocusKey, isActiveComposer, focusMessageInputForKeyboardAction]);
+  }, [
+    autoFocusKey,
+    isActiveComposer,
+    composerAutoFocusVersion,
+    focusMessageInputForKeyboardAction,
+  ]);
 
   const handleKeyboardAction = useCallback(
     (action: KeyboardActionDefinition): boolean =>

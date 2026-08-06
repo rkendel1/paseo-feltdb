@@ -2089,9 +2089,16 @@ export const ru: TranslationResources = {
       },
     },
     shortcuts: {
+      modKey: {
+        title: "Клавиша-модификатор",
+        hint: "Клавиша, используемая как модификатор сочетаний",
+        auto: "Авто",
+        cmd: "Cmd / Super",
+        ctrl: "Ctrl",
+      },
       dialogTitle: "Ярлыки",
       searchPlaceholder: "Поиск сочетаний клавиш",
-      unavailableOnMobile: "Сочетания клавиш доступны только на рабочем столе.",
+      unavailableOnMobile: "Настройка сочетаний клавиш доступна только на компьютере",
       capturePrompt: "Нажмите ярлык...",
       unassigned: "Не задано",
       actions: {

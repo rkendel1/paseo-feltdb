@@ -2220,7 +2220,7 @@ const styles = StyleSheet.create((theme: Theme) => ({
     justifyContent: "center",
   },
   contextWindowMeterCompactSlot: {
-    alignSelf: "flex-start",
+    alignSelf: "stretch",
   },
   realtimeVoiceButton: {
     width: 28,

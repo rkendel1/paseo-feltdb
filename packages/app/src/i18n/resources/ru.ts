@@ -1713,6 +1713,11 @@ export const ru: TranslationResources = {
     archiveTooltip: "Архивный субагент",
     archiveFinishedAction: "Архивировать завершенные субагенты",
     archiveFinishedRetry: "Повторить ({{failed}}/{{total}})",
+    ownership: {
+      paseo: "Paseo",
+      native: "Нативный",
+    },
+    rowAccessibilityLabel: "{{label}}, субагент {{ownership}}",
   },
   panels: {
     draft: {

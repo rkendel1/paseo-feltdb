@@ -23,7 +23,9 @@ import {
   buildSubagentPillPresentation,
   buildSubagentRowPresentationData,
   countFinishedSubagents,
+  type SubagentOwnership,
 } from "./track-presentation";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 const ThemedArchive = withUnistyles(Archive);
 const ThemedUnlink = withUnistyles(Unlink);
@@ -55,6 +57,7 @@ interface SubagentRowView {
   presentation: WorkspaceTabPresentation;
   /** Trailing muted "Model · Thinking", or null when the row reports neither. */
   meta: string | null;
+  ownership: SubagentOwnership;
 }
 
 function buildRowView(
@@ -67,6 +70,7 @@ function buildRowView(
   );
   return {
     meta: data.meta,
+    ownership: data.ownership,
     presentation: {
       key: data.key,
       kind: data.kind,
@@ -212,12 +216,14 @@ function SubagentsTrackRow({
 }: SubagentsTrackRowProps): ReactElement {
   const { t } = useTranslation();
   const isCompact = useIsCompactFormFactor();
-  const { presentation, meta } = useMemo(
+  const { presentation, meta, ownership } = useMemo(
     () => buildRowView(row, resolveModelDisplay),
     [resolveModelDisplay, row],
   );
   const displayLabel =
     presentation.titleState === "loading" ? t("common.states.loading") : presentation.label;
+  const ownershipLabel =
+    ownership === "native" ? t("subagents.ownership.native") : t("subagents.ownership.paseo");
   const handlePress = useCallback(() => {
     if (row.kind === "provider") {
       onOpenProviderSubagent(row.parentAgentId, row.id);
@@ -245,6 +251,9 @@ function SubagentsTrackRow({
             {presentation.subtitle}
           </Text>
         ) : null}
+        <View testID={`subagents-track-row-ownership-${row.id}`}>
+          <StatusBadge label={ownershipLabel} />
+        </View>
         {meta ? (
           <Text style={styles.rowMeta} numberOfLines={1} testID={`subagents-track-row-meta-${row.id}`}>
             {meta}
@@ -268,6 +277,7 @@ function SubagentsTrackRow({
       handleDetachPress,
       onDetachSubagent,
       meta,
+      ownershipLabel,
       presentation,
       row.kind,
       row.id,
@@ -276,7 +286,10 @@ function SubagentsTrackRow({
 
   return (
     <ComposerTrackRow
-      accessibilityLabel={displayLabel}
+      accessibilityLabel={t("subagents.rowAccessibilityLabel", {
+        label: displayLabel,
+        ownership: ownershipLabel,
+      })}
       testID={`subagents-track-row-${row.id}`}
       onPress={handlePress}
     >

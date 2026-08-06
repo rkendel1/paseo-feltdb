@@ -33,6 +33,7 @@ import { useKeyboardShortcutOverrides } from "@/hooks/use-keyboard-shortcut-over
 import { isNative } from "@/constants/platform";
 import { keyboardShortcutsAvailable } from "@/keyboard/availability";
 import { shortcutKeyFromCode } from "@/keyboard/shortcut-string";
+import { requestComposerAutoFocus } from "@/keyboard/composer-auto-focus";
 import {
   addHardwareKeyDownListener,
   setHardwareKeyEventsEnabled,
@@ -187,9 +188,19 @@ export function useKeyboardShortcuts({
             workspaceId: action.workspaceId,
           };
           navigateToWorkspace({ serverId: action.serverId, workspaceId: action.workspaceId });
+          // A keyboard-driven workspace switch on native should land focus in
+          // the composer so typing can continue without touching the screen.
+          if (isNative) {
+            requestComposerAutoFocus();
+          }
           return true;
-        case "navigate-last-workspace":
-          return navigateToLastWorkspace();
+        case "navigate-last-workspace": {
+          const navigated = navigateToLastWorkspace();
+          if (navigated && isNative) {
+            requestComposerAutoFocus();
+          }
+          return navigated;
+        }
         case "router-replace":
           router.replace(action.route as Parameters<typeof router.replace>[0]);
           return true;

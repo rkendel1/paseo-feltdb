@@ -14,7 +14,7 @@ import { useKeyboardActionDispatcher } from "@/keyboard/keyboard-action-dispatch
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useWorkspaceDirectory } from "@/stores/session-store-hooks";
 import { clearCommandCenterFocusRestoreElement } from "@/utils/command-center-focus-restore";
-import { getShortcutOs } from "@/utils/shortcut-platform";
+import { getShortcutOs, usesDesktopShortcutBindings } from "@/utils/shortcut-platform";
 import { getCommandCenterIcon } from "./icon";
 import type { CommandCenterIcon } from "./contributions";
 import { useCommandCenterActions } from "./provider";
@@ -40,7 +40,7 @@ function staticIcon(element: ReactElement | undefined): CommandCenterIcon | unde
 }
 
 function resolveWorkspaceShortcuts(overrides: ShortcutOverrides): WorkspaceCommandCenterShortcuts {
-  const platform = { isMac: getShortcutOs() === "mac", isDesktop: getIsElectron() };
+  const platform = { isMac: getShortcutOs() === "mac", isDesktop: usesDesktopShortcutBindings() };
   return {
     newAgent: resolveShortcutKeysForAction("workspace-tab-new", overrides, platform) ?? undefined,
     newTerminal:

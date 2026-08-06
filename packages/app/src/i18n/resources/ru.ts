@@ -2098,7 +2098,6 @@ export const ru: TranslationResources = {
       },
       dialogTitle: "Ярлыки",
       searchPlaceholder: "Поиск сочетаний клавиш",
-      unavailableOnMobile: "Настройка сочетаний клавиш доступна только на компьютере",
       capturePrompt: "Нажмите ярлык...",
       unassigned: "Не задано",
       actions: {

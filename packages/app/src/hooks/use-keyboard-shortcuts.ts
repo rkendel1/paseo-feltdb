@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { TextInput } from "react-native";
+import { AppState, TextInput } from "react-native";
 import { usePathname, useRouter } from "expo-router";
 import { getIsElectronRuntime } from "@/constants/layout";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
@@ -36,6 +36,7 @@ import { shortcutKeyFromCode } from "@/keyboard/shortcut-string";
 import { requestComposerAutoFocus } from "@/keyboard/composer-auto-focus";
 import {
   addHardwareKeyDownListener,
+  addHardwareModifierListener,
   setHardwareKeyEventsEnabled,
 } from "@/native/hardware-keyboard-events";
 import { getDesktopHost, isElectronRuntime } from "@/desktop/host";
@@ -72,6 +73,9 @@ export function useKeyboardShortcuts({
   const bindings = useMemo(() => buildEffectiveBindings(overrides), [overrides]);
   const shortcutsAvailable = keyboardShortcutsAvailable({ isNative, isCompact: isMobile });
   const isDesktopApp = getIsElectronRuntime();
+  // Native apps have no browser reserving Cmd/Ctrl combos, so they use the
+  // desktop binding variants; see usesDesktopShortcutBindings.
+  const isDesktopBindings = isDesktopApp || isNative;
   const isMac = useShortcutOs() === "mac";
   const chordStateRef = useRef<ChordState>({
     candidateIndices: [],
@@ -131,9 +135,13 @@ export function useKeyboardShortcuts({
       { isMac, isDesktop: isDesktopApp },
       bindings,
     );
+    const badgeModifierKey = getWorkspaceIndexJumpModifierKey(
+      { isMac, isDesktop: isDesktopBindings },
+      bindings,
+    );
     const setBadgeModifierDown = (down: boolean) => {
       const state = useKeyboardShortcutsStore.getState();
-      if (isDesktopApp) {
+      if (isDesktopBindings) {
         state.setCmdOrCtrlDown(down);
       } else {
         state.setAltDown(down);
@@ -277,7 +285,7 @@ export function useKeyboardShortcuts({
         event: input.event,
         context: {
           isMac,
-          isDesktop: isDesktopApp,
+          isDesktop: isDesktopBindings,
           focusScope: input.focusScope,
           commandCenterOpen: store.commandCenterOpen,
         },
@@ -356,9 +364,31 @@ export function useKeyboardShortcuts({
           domEvent: null,
         });
       });
+      // Bare modifier presses drive the workspace-number badges, mirroring the
+      // web keydown/keyup handling.
+      const modifierSubscription = addHardwareModifierListener((modifierEvent) => {
+        if (modifierEvent.key === badgeModifierKey) {
+          setBadgeModifierDown(modifierEvent.down);
+          return;
+        }
+        if (modifierEvent.key === "Shift" && modifierEvent.down) {
+          const state = useKeyboardShortcutsStore.getState();
+          if (state.altDown || state.cmdOrCtrlDown) {
+            state.resetModifiers();
+          }
+        }
+      });
+      const appStateSubscription = AppState.addEventListener("change", (state) => {
+        if (state !== "active") {
+          resetModifiers();
+        }
+      });
       return () => {
         setHardwareKeyEventsEnabled(false);
         subscription.remove();
+        modifierSubscription.remove();
+        appStateSubscription.remove();
+        resetModifiers();
         if (chordStateRef.current.timeoutId !== null) {
           clearTimeout(chordStateRef.current.timeoutId);
           chordStateRef.current = {
@@ -481,6 +511,7 @@ export function useKeyboardShortcuts({
     publishBrowserShortcutPolicy,
     resetModifiers,
     router,
+    isDesktopBindings,
     shortcutsAvailable,
     toggleAgentList,
     toggleBothSidebars,

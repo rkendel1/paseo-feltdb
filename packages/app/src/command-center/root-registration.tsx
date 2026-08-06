@@ -13,7 +13,6 @@ import {
   Settings,
 } from "lucide-react-native";
 import { withUnistyles } from "react-native-unistyles";
-import { getIsElectronRuntime } from "@/constants/layout";
 import { useKeyboardShortcutOverrides } from "@/hooks/use-keyboard-shortcut-overrides";
 import { useOpenAddProject } from "@/hooks/use-open-add-project";
 import { useKeyboardActionDispatcher } from "@/keyboard/keyboard-action-dispatcher-context";
@@ -28,7 +27,7 @@ import {
   buildSessionsRoute,
   buildSettingsRoute,
 } from "@/utils/host-routes";
-import { getShortcutOs } from "@/utils/shortcut-platform";
+import { getShortcutOs, usesDesktopShortcutBindings } from "@/utils/shortcut-platform";
 import type { CommandCenterContribution, CommandCenterIconProps } from "./contributions";
 import { useCommandCenterActions } from "./provider";
 import { buildGroupingContribution } from "./root-contributions";
@@ -107,7 +106,7 @@ export function CommandCenterRootActions() {
   const groupMode = useSidebarViewStore((state) => state.groupMode);
   const setGroupMode = useSidebarViewStore((state) => state.setGroupMode);
   const shortcutPlatform = useMemo(
-    () => ({ isMac: getShortcutOs() === "mac", isDesktop: getIsElectronRuntime() }),
+    () => ({ isMac: getShortcutOs() === "mac", isDesktop: usesDesktopShortcutBindings() }),
     [],
   );
   const actions = useMemo<CommandCenterContribution[]>(() => {

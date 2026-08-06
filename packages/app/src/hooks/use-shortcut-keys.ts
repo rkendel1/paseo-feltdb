@@ -2,13 +2,12 @@ import { useMemo } from "react";
 import type { ShortcutKey } from "@/utils/format-shortcut";
 import { resolveShortcutKeysForAction } from "@/keyboard/keyboard-shortcuts";
 import { useKeyboardShortcutOverrides } from "@/hooks/use-keyboard-shortcut-overrides";
-import { useShortcutOs } from "@/utils/shortcut-platform";
-import { getIsElectronRuntime } from "@/constants/layout";
+import { usesDesktopShortcutBindings, useShortcutOs } from "@/utils/shortcut-platform";
 
 export function useShortcutKeys(actionId: string): ShortcutKey[][] | null {
   const { overrides } = useKeyboardShortcutOverrides();
   const isMac = useShortcutOs() === "mac";
-  const isDesktopApp = getIsElectronRuntime();
+  const isDesktopApp = usesDesktopShortcutBindings();
 
   return useMemo(() => {
     return resolveShortcutKeysForAction(actionId, overrides, {

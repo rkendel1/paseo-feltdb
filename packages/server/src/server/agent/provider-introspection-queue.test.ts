@@ -15,6 +15,7 @@ import type {
 import { AgentManager } from "./agent-manager.js";
 import { ProviderIntrospectionQueue } from "./provider-introspection-queue.js";
 import { ProviderSnapshotManager } from "./provider-snapshot-manager.js";
+import { withTimeout } from "../../utils/promise-timeout.js";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -198,6 +199,17 @@ test("a failed draft session does not wedge or poison later identical requests",
   await expect(manager.listDraftFeatures(config)).rejects.toThrow("provider startup failed");
   await expect(manager.listDraftFeatures(config)).resolves.toEqual([]);
   expect(createCalls).toBe(2);
+});
+
+test("releases later introspection after a queued operation times out", async () => {
+  const queue = new ProviderIntrospectionQueue();
+  const never = new Promise<never>(() => {});
+
+  await expect(
+    queue.run("codex", () => withTimeout(never, 1, "catalog refresh timed out")),
+  ).rejects.toThrow("catalog refresh timed out");
+
+  await expect(queue.run("codex", async () => "ready")).resolves.toBe("ready");
 });
 
 test("serializes snapshot warmup with draft session creation for the same provider", async () => {

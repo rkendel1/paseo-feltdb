@@ -251,14 +251,14 @@ function SubagentsTrackRow({
             {presentation.subtitle}
           </Text>
         ) : null}
-        <View testID={`subagents-track-row-ownership-${row.id}`}>
-          <StatusBadge label={ownershipLabel} />
-        </View>
         {meta ? (
           <Text style={styles.rowMeta} numberOfLines={1} testID={`subagents-track-row-meta-${row.id}`}>
             {meta}
           </Text>
         ) : null}
+        <View testID={`subagents-track-row-ownership-${row.id}`}>
+          <StatusBadge label={ownershipLabel} />
+        </View>
         {row.kind === "paseo" ? (
           <SubagentRowActions
             rowId={row.id}
@@ -267,7 +267,12 @@ function SubagentsTrackRow({
             onDetachPress={onDetachSubagent ? handleDetachPress : undefined}
             onArchivePress={handleArchivePress}
           />
-        ) : null}
+        ) : (
+          <View
+            style={styles.actionClusterSpacer(onDetachSubagent ? 2 : 1)}
+            pointerEvents="none"
+          />
+        )}
       </>
     ),
     [
@@ -401,7 +406,7 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 1,
     minWidth: 0,
     maxWidth: "45%",
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
   },
   rowMeta: {
@@ -428,6 +433,12 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     justifyContent: "center",
   },
+  // Mirrors the geometry of `count` action buttons so rows without actions keep
+  // the trailing column, and every ownership badge lines up.
+  actionClusterSpacer: (count: number) => ({
+    width:
+      count * (ROW_ICON_SIZE + theme.spacing[1] * 2) + (count - 1) * theme.spacing[1],
+  }),
   tooltipText: {
     fontSize: theme.fontSize.sm,
     color: theme.colors.foreground,

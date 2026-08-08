@@ -9,8 +9,6 @@ import {
   type StyleProp,
   type ViewStyle,
 } from "react-native";
-import { useMutation } from "@tanstack/react-query";
-import { AdaptiveRenameModal } from "@/components/rename-modal";
 import {
   memo,
   useCallback,
@@ -35,7 +33,8 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { Theme } from "@/styles/theme";
 import { getSidebarRowBackdrop } from "@/components/sidebar/sidebar-row-backdrop";
 import { type GestureType } from "react-native-gesture-handler";
-import * as Clipboard from "expo-clipboard";
+import { WorkspaceRenameModal } from "@/components/workspace-rename-modal";
+import { useWorkspaceClipboardActions } from "@/hooks/use-workspace-clipboard-actions";
 import {
   ExternalLink,
   GitPullRequest,
@@ -134,7 +133,6 @@ import {
 } from "@/utils/sidebar-project-row-model";
 import { redirectIfArchivingActiveWorkspace } from "@/utils/sidebar-workspace-archive-redirect";
 import { openExternalUrl } from "@/utils/open-external-url";
-import { requireWorkspaceDirectory } from "@/utils/workspace-directory";
 import { useWorkspaceArchive } from "@/workspace/use-workspace-archive";
 import {
   getCurrentProjectRemoveReadiness,
@@ -1268,42 +1266,14 @@ function WorkspaceRowWithMenu({
     archiveController.archive();
   }, [archiveController, isArchiving]);
 
+  const clipboard = useWorkspaceClipboardActions();
   const handleCopyPath = useCallback(() => {
-    let copyTargetDirectory: string;
-    try {
-      copyTargetDirectory = requireWorkspaceDirectory({
-        workspaceId: workspace.workspaceId,
-        workspaceDirectory: workspace.workspaceDirectory,
-      });
-    } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : t("sidebar.workspace.toasts.workspacePathUnavailable"),
-      );
-      return;
-    }
-    void Clipboard.setStringAsync(copyTargetDirectory);
-    toast.copied(t("sidebar.workspace.toasts.pathCopied"));
-  }, [t, toast, workspace.workspaceDirectory, workspace.workspaceId]);
+    clipboard.copyPath(workspace);
+  }, [clipboard, workspace]);
 
   const handleCopyBranchName = useCallback(() => {
-    if (!workspace.currentBranch) {
-      return;
-    }
-    void Clipboard.setStringAsync(workspace.currentBranch);
-    toast.copied(t("sidebar.workspace.toasts.branchNameCopied"));
-  }, [t, toast, workspace.currentBranch]);
-
-  const renameMutation = useMutation({
-    mutationFn: async (title: string) => {
-      const client = getHostRuntimeStore().getClient(workspace.serverId);
-      if (!client) {
-        throw new Error(t("sidebar.workspace.toasts.hostDisconnected"));
-      }
-      await client.setWorkspaceTitle(workspace.workspaceId, title.length === 0 ? null : title);
-    },
-  });
+    clipboard.copyBranchName(workspace);
+  }, [clipboard, workspace]);
 
   const handleOpenRename = useCallback(() => {
     setIsRenameOpen(true);
@@ -1312,13 +1282,6 @@ function WorkspaceRowWithMenu({
   const handleCloseRename = useCallback(() => {
     setIsRenameOpen(false);
   }, []);
-
-  const handleSubmitRename = useCallback(
-    async (value: string) => {
-      await renameMutation.mutateAsync(value.trim());
-    },
-    [renameMutation],
-  );
 
   const isPinned = workspace.pinnedAt != null;
   const handleTogglePin = useCallback(() => {
@@ -1378,14 +1341,10 @@ function WorkspaceRowWithMenu({
         onTogglePin={onTogglePin}
         reserveIdleStatusIndicatorSpace={reserveIdleStatusIndicatorSpace}
       />
-      <AdaptiveRenameModal
+      <WorkspaceRenameModal
         visible={isRenameOpen}
-        title={t("sidebar.workspace.rename.title")}
-        initialValue={workspace.title ?? workspace.name}
-        placeholder={workspace.name}
-        submitLabel={t("sidebar.workspace.rename.submit")}
+        workspace={workspace}
         onClose={handleCloseRename}
-        onSubmit={handleSubmitRename}
         testID={`sidebar-workspace-rename-modal-${workspace.workspaceKey}`}
       />
     </>

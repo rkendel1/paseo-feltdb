@@ -36,6 +36,7 @@ function workspace(id: string): CommandCenterWorkspaceResult {
     title: id,
     subtitle: "host",
     searchText: id,
+    changeRequestNumber: null,
     run: () => undefined,
   };
 }

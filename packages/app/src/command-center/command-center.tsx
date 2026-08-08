@@ -49,6 +49,7 @@ import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { formatTimeAgo } from "@/utils/time";
 import { shortenPath } from "@/utils/shorten-path";
 import { useCommandCenterContributions } from "./provider";
+import { matchWorkspaceQuery } from "./workspace-search";
 import {
   buildContributionSections,
   joinSubtitleParts,
@@ -125,6 +126,7 @@ function useBuiltInSections(open: boolean, query: string): CommandCenterResultSe
             title,
             subtitle,
             searchText,
+            changeRequestNumber: workspace.changeRequestNumber,
             run: () => {
               clearCommandCenterFocusRestoreElement();
               navigateToWorkspace({ serverId: host.serverId, workspaceId: workspace.id });
@@ -143,10 +145,24 @@ function useBuiltInSections(open: boolean, query: string): CommandCenterResultSe
     const workspaceTitleByKey = new Map(
       allWorkspaces.map((workspace) => [workspace.id.slice("workspace:".length), workspace.title]),
     );
-    const workspaces = limitDefaultCategoryResults(
-      allWorkspaces.filter((workspace) => matchesQuery(workspace.searchText, query)),
-      query,
-    );
+    // Matching a PR/MR number by hand beats an incidental text hit on the same
+    // digits, so exact change-request matches sort to the top.
+    const matchedWorkspaces: CommandCenterWorkspaceResult[] = [];
+    const changeRequestHits = new Set<string>();
+    for (const workspace of allWorkspaces) {
+      const match = matchWorkspaceQuery(workspace, query);
+      if (!match.matches) continue;
+      if (match.changeRequestHit) changeRequestHits.add(workspace.id);
+      matchedWorkspaces.push(workspace);
+    }
+    if (changeRequestHits.size > 0) {
+      matchedWorkspaces.sort((left, right) => {
+        const leftHit = changeRequestHits.has(left.id) ? 1 : 0;
+        const rightHit = changeRequestHits.has(right.id) ? 1 : 0;
+        return rightHit - leftHit;
+      });
+    }
+    const workspaces = limitDefaultCategoryResults(matchedWorkspaces, query);
     const agentResults = limitDefaultCategoryResults(
       agents
         .map<CommandCenterAgentResult>((agent) => {

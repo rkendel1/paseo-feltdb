@@ -23,7 +23,7 @@ const CHANGE_REQUEST_QUERY = /^(?:(?:pr|mr)\s*)?[#!]?(\d+)$/i;
  * Returns null for anything else, including text queries that merely contain
  * digits (`fix-42-retries`), so those fall through to normal text matching.
  */
-export function parseChangeRequestQuery(query: string): number | null {
+function parseChangeRequestQuery(query: string): number | null {
   const match = CHANGE_REQUEST_QUERY.exec(query.trim());
   if (!match) return null;
   const number = Number.parseInt(match[1], 10);

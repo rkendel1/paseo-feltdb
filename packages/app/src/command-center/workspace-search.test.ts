@@ -1,23 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { matchWorkspaceQuery, parseChangeRequestQuery } from "./workspace-search";
-
-describe("parseChangeRequestQuery", () => {
-  it("accepts a bare number", () => {
-    expect(parseChangeRequestQuery("42")).toBe(42);
-  });
-
-  it("accepts every forge prefix and noun spelling", () => {
-    for (const query of ["#42", "!42", "pr 42", "mr 42", "PR #42", "mr!42", "pr42", " 42 "]) {
-      expect(parseChangeRequestQuery(query)).toBe(42);
-    }
-  });
-
-  it("rejects text that merely contains digits", () => {
-    for (const query of ["fix-42-retries", "42x", "v4.2", "", "pr"]) {
-      expect(parseChangeRequestQuery(query)).toBeNull();
-    }
-  });
-});
+import { matchWorkspaceQuery } from "./workspace-search";
 
 describe("matchWorkspaceQuery", () => {
   const workspace = {
@@ -32,11 +14,23 @@ describe("matchWorkspaceQuery", () => {
     });
   });
 
-  it("matches its own change-request number and flags the hit", () => {
-    for (const query of ["42", "#42", "!42", "pr 42", "mr 42"]) {
+  it("matches its own change-request number in every spelling and flags the hit", () => {
+    const spellings = ["42", " 42 ", "#42", "!42", "pr 42", "mr 42", "PR #42", "mr!42", "pr42"];
+    for (const query of spellings) {
       expect(matchWorkspaceQuery(workspace, query)).toEqual({
         matches: true,
         changeRequestHit: true,
+      });
+    }
+  });
+
+  it("does not take the number path for text that merely contains digits", () => {
+    // Without this, `fix-42-retries` would jump to PR 42.
+    const numbered = { searchText: "unrelated workspace", changeRequestNumber: 42 };
+    for (const query of ["fix-42-retries", "42x", "v4.2", "pr"]) {
+      expect(matchWorkspaceQuery(numbered, query)).toEqual({
+        matches: false,
+        changeRequestHit: false,
       });
     }
   });

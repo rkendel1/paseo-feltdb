@@ -27,6 +27,12 @@ import {
 
 const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const destructiveColorMapping = (theme: Theme) => ({ color: theme.colors.destructive });
+
+// Native has no filesystem download target, so the same handler is surfaced as Share.
+const downloadActionSpec = isNative
+  ? { key: "share", labelKey: "workspace.fileActions.share", icon: Share2 }
+  : { key: "download", labelKey: "workspace.fileActions.download", icon: Download };
+
 interface FileAction {
   key: string;
   label: string;
@@ -161,10 +167,9 @@ export function FileActionsContextMenuContent({
         : null,
       availableFile && onDownload
         ? {
-            // Native has no filesystem download target, so the same handler is surfaced as Share.
-            key: isNative ? "share" : "download",
-            label: t(isNative ? "workspace.fileActions.share" : "workspace.fileActions.download"),
-            icon: isNative ? Share2 : Download,
+            key: downloadActionSpec.key,
+            label: t(downloadActionSpec.labelKey),
+            icon: downloadActionSpec.icon,
             onSelect: onDownload,
           }
         : null,

@@ -786,6 +786,7 @@ export interface CheckoutStatusGitNonPaseo {
   repoRoot: string;
   mainRepoRoot: string | null;
   currentBranch: string | null;
+  headOid: string | null;
   isDirty: boolean;
   baseRef: string | null;
   aheadBehind: AheadBehind | null;
@@ -805,6 +806,7 @@ export interface CheckoutStatusGitPaseo {
   repoRoot: string;
   mainRepoRoot: string;
   currentBranch: string | null;
+  headOid: string | null;
   isDirty: boolean;
   baseRef: string;
   aheadBehind: AheadBehind | null;
@@ -2147,6 +2149,7 @@ export async function getCheckoutStatus(
   const baseRef = facts.resolvedBaseRef;
   const mainRepoRoot = facts.mainRepoRoot;
   const factsContext = { ...context, facts };
+  const headOid = await getCurrentHeadSha(cwd, factsContext);
   const aheadBehind =
     baseRef && currentBranch
       ? await getAheadBehind(cwd, baseRef, currentBranch, factsContext)
@@ -2166,6 +2169,7 @@ export async function getCheckoutStatus(
       repoRoot: worktreeRoot,
       mainRepoRoot: mainRepoRoot ?? worktreeRoot,
       currentBranch,
+      headOid,
       isDirty,
       baseRef: displayBaseRef ?? baseRef,
       aheadBehind,
@@ -2184,6 +2188,7 @@ export async function getCheckoutStatus(
     mainRepoRoot:
       mainRepoRoot && resolve(mainRepoRoot) !== resolve(worktreeRoot) ? mainRepoRoot : null,
     currentBranch,
+    headOid,
     isDirty,
     baseRef: displayBaseRef,
     aheadBehind,

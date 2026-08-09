@@ -1584,7 +1584,7 @@ export class ClaudeAgentClient implements AgentClient {
   async listImportableSessions(
     options?: ListImportableSessionsOptions,
   ): Promise<ImportableProviderSession[]> {
-    const configDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
+    const configDir = resolveClaudeSessionsConfigDir();
     const sessionsRoot = options?.cwd
       ? claudeProjectDirSync(options.cwd, { configDir })
       : path.join(configDir, "projects");
@@ -1604,11 +1604,17 @@ export class ClaudeAgentClient implements AgentClient {
   }
 
   async importSession(input: ImportProviderSessionInput, context: ImportProviderSessionContext) {
+    // Carry a `/rename` onto the imported agent so the name chosen in the CLI
+    // survives the import. Only an explicit rename counts: Paseo names agents
+    // after their first prompt line on purpose, so adopting Claude's generated
+    // `ai-title` here would put back the LLM summary that #1563 removed.
+    const renamedTitle = await readClaudeRenamedSessionTitle(input);
     return importSessionFromPersistence({
       provider: "claude",
       request: input,
       context,
       resumeSession: this.resumeSession.bind(this),
+      ...(renamedTitle ? { config: { title: renamedTitle } } : {}),
     });
   }
 
@@ -5869,16 +5875,40 @@ async function collectRecentClaudeSessions(
   return candidates.sort((a, b) => b.mtime.getTime() - a.mtime.getTime()).slice(0, limit);
 }
 
+// Claude Code persists session titles as their own transcript records: `/rename`
+// writes `custom-title`, and the titles Claude generates for itself `ai-title`.
+const CLAUDE_CUSTOM_TITLE_TYPE = "custom-title";
+const CLAUDE_AI_TITLE_TYPE = "ai-title";
+
 interface ClaudeSessionDescriptorAccumulator {
   sessionId: string | null;
   cwd: string | null;
-  title: string | null;
+  promptTitle: string | null;
   firstPromptPreview: string | null;
   lastPromptPreview: string | null;
 }
 
 function isFinishedAccumulator(acc: ClaudeSessionDescriptorAccumulator): boolean {
-  return Boolean(acc.sessionId && acc.cwd && acc.title);
+  return Boolean(acc.sessionId && acc.cwd && acc.promptTitle);
+}
+
+// `/rename` stores whatever the terminal handed it, so titles can carry stray
+// control bytes; group and file separators turn up in names that were pasted in.
+// They never surfaced before because Paseo ignored these records entirely.
+function replaceControlCharacters(value: string): string {
+  let replaced = "";
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    replaced += code < 0x20 || code === 0x7f ? " " : character;
+  }
+  return replaced;
+}
+
+function normalizeClaudeSessionTitle(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  return replaceControlCharacters(value).replace(/\s+/g, " ").trim() || null;
 }
 
 function applyClaudeSessionEntryToAccumulator(
@@ -5904,8 +5934,8 @@ function applyClaudeSessionEntryToAccumulator(
   if (entry.type === "user" && entry.message) {
     const text = extractClaudeUserText(entry.message);
     if (text) {
-      if (!acc.title) {
-        acc.title = text;
+      if (!acc.promptTitle) {
+        acc.promptTitle = text;
       }
       const preview = normalizeImportablePromptPreview(text);
       acc.firstPromptPreview ??= preview;
@@ -5913,6 +5943,69 @@ function applyClaudeSessionEntryToAccumulator(
     }
     return;
   }
+}
+
+/**
+ * Title records are re-emitted every time the session is saved, so the current
+ * title is the last usable one in the file. Searching backwards finds it without
+ * walking the transcript, which matters because sessions reach tens of megabytes
+ * and the import listing parses dozens of them per request.
+ */
+function readLastClaudeTitle(content: string, type: string, field: string): string | null {
+  const needle = `"${type}"`;
+  let at = content.lastIndexOf(needle);
+  while (at >= 0) {
+    const lineStart = content.lastIndexOf("\n", at) + 1;
+    const lineEnd = content.indexOf("\n", at);
+    const line = lineEnd === -1 ? content.slice(lineStart) : content.slice(lineStart, lineEnd);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line.trim());
+    } catch {
+      parsed = undefined;
+    }
+    const entry = toObjectRecord(parsed);
+    if (entry && !entry.isSidechain && entry.type === type) {
+      const title = normalizeClaudeSessionTitle(entry[field]);
+      if (title) {
+        return title;
+      }
+    }
+    // The needle also matches a prompt that quotes it, and a record can carry no
+    // usable name, so keep looking backwards for one that does.
+    at = at <= 0 ? -1 : content.lastIndexOf(needle, at - 1);
+  }
+  return null;
+}
+
+function resolveClaudeNativeSessionTitle(content: string): string | null {
+  // A rename wins over a title Claude generated for itself.
+  return (
+    readLastClaudeTitle(content, CLAUDE_CUSTOM_TITLE_TYPE, "customTitle") ??
+    readLastClaudeTitle(content, CLAUDE_AI_TITLE_TYPE, "aiTitle")
+  );
+}
+
+function resolveClaudeSessionsConfigDir(): string {
+  return process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
+}
+
+async function readClaudeRenamedSessionTitle(
+  input: ImportProviderSessionInput,
+): Promise<string | null> {
+  const projectDir = claudeProjectDirSync(input.cwd, {
+    configDir: resolveClaudeSessionsConfigDir(),
+  });
+  let content: string;
+  try {
+    content = await fsPromises.readFile(
+      path.join(projectDir, `${input.providerHandleId}.jsonl`),
+      "utf8",
+    );
+  } catch {
+    return null;
+  }
+  return readLastClaudeTitle(content, CLAUDE_CUSTOM_TITLE_TYPE, "customTitle");
 }
 
 async function parseClaudeSessionDescriptor(
@@ -5929,7 +6022,7 @@ async function parseClaudeSessionDescriptor(
   const acc: ClaudeSessionDescriptorAccumulator = {
     sessionId: null,
     cwd: null,
-    title: null,
+    promptTitle: null,
     firstPromptPreview: null,
     lastPromptPreview: null,
   };
@@ -5949,16 +6042,20 @@ async function parseClaudeSessionDescriptor(
     }
   }
 
-  const { sessionId, cwd, title } = acc;
+  const { sessionId, cwd } = acc;
 
   if (!sessionId || !cwd) {
     return null;
   }
 
+  const promptTitle = acc.promptTitle?.trim();
+
   return {
     providerHandleId: sessionId,
     cwd,
-    title: (title ?? "").trim() || `Claude session ${sessionId.slice(0, 8)}`,
+    title:
+      resolveClaudeNativeSessionTitle(content) ??
+      (promptTitle || `Claude session ${sessionId.slice(0, 8)}`),
     firstPromptPreview: acc.firstPromptPreview,
     lastPromptPreview: acc.lastPromptPreview,
     lastActivityAt: mtime,

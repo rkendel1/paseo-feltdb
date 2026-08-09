@@ -212,6 +212,21 @@ describe("Claude import session titles", () => {
 
     expect(imported.config.title).toBeUndefined();
   });
+  test("surfaces an unreadable transcript instead of importing it as never renamed", async () => {
+    const sessionId = "unreadable-transcript";
+    // A directory where the transcript belongs fails the read with EISDIR, the
+    // deterministic stand-in for a permissions or I/O fault.
+    const projectDir = claudeProjectDirSync(SESSION_CWD, { configDir });
+    await fs.mkdir(path.join(projectDir, `${sessionId}.jsonl`), { recursive: true });
+
+    await expect(importSessionWithStubbedResume(sessionId)).rejects.toThrow();
+  });
+
+  test("imports a session that has no transcript on disk", async () => {
+    const imported = await importSessionWithStubbedResume("no-such-session");
+
+    expect(imported.config.title).toBeUndefined();
+  });
 });
 
 async function importSessionWithStubbedResume(sessionId: string) {

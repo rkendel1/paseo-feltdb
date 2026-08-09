@@ -6002,8 +6002,13 @@ async function readClaudeRenamedSessionTitle(
       path.join(projectDir, `${input.providerHandleId}.jsonl`),
       "utf8",
     );
-  } catch {
-    return null;
+  } catch (error) {
+    // A session with no transcript on disk has no rename to carry over. Every
+    // other read failure is a real fault and stays explicit.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
   }
   return readLastClaudeTitle(content, CLAUDE_CUSTOM_TITLE_TYPE, "customTitle");
 }

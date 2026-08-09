@@ -141,6 +141,13 @@ function asInternals(session: CodexTestSession): CodexSessionTestAccess {
   return castInternals<CodexSessionTestAccess>(session);
 }
 
+function assistantMessageText(event: AgentStreamEvent | undefined): string {
+  if (event?.type !== "timeline" || event.item.type !== "assistant_message") {
+    throw new Error("Expected assistant_message timeline event");
+  }
+  return event.item.text;
+}
+
 function markdownImageSource(markdown: string): string {
   const match = markdown.match(/^!\[[^\]]*]\((.*)\)$/);
   if (!match) {
@@ -3988,14 +3995,10 @@ describe("Codex app-server provider", () => {
         status: "active",
       },
     });
-    const message = events.at(-1);
-    expect(message?.type).toBe("timeline");
-    if (message?.type !== "timeline" || message.item.type !== "assistant_message") {
-      throw new Error("Expected assistant_message timeline event");
-    }
-    expect(message.item.text).toContain("Goal set: ship feature");
-    expect(message.item.text).toContain("Plan mode");
-    expect(message.item.text).toContain("Switch to Default or Code mode");
+    const message = assistantMessageText(events.at(-1));
+    expect(message).toContain("Goal set: ship feature");
+    expect(message).toContain("Plan mode");
+    expect(message).toContain("Switch to Default or Code mode");
   });
 
   test("lists /compact and sends Codex compaction out of band", async () => {

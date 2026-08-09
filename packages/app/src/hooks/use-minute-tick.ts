@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { useAppVisible } from "@/hooks/use-app-visible";
 
 /**
  * Re-renders the subscribing component whenever the wall-clock minute changes,
@@ -44,5 +45,14 @@ function getSnapshot(): number {
 }
 
 export function useMinuteTick(): number {
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const isAppVisible = useAppVisible();
+  return useSyncExternalStore(
+    isAppVisible ? subscribe : subscribeWhileHidden,
+    getSnapshot,
+    getSnapshot,
+  );
+}
+
+function subscribeWhileHidden(): () => void {
+  return () => {};
 }

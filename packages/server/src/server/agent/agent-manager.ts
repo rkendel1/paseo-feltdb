@@ -272,6 +272,7 @@ export interface AgentManagerOptions {
   mcpBaseUrl?: string;
   mcpAuthToken?: string;
   paseoToolsEnabled?: boolean;
+  paseoToolProviderIds?: readonly string[];
   paseoToolCatalogFactory?: PaseoToolCatalogFactory;
   appendSystemPrompt?: string;
   agentStreamCoalesceWindowMs?: number;
@@ -635,6 +636,7 @@ export class AgentManager {
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
   private paseoToolsEnabled = true;
+  private paseoToolProviderIds: ReadonlySet<string> | null = null;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private appendSystemPrompt: string;
   private onAgentAttention?: AgentAttentionCallback;
@@ -677,6 +679,7 @@ export class AgentManager {
 
   private configurePaseoTools(options: AgentManagerOptions): void {
     this.paseoToolsEnabled = options.paseoToolsEnabled ?? true;
+    this.setPaseoToolProviderIds(options.paseoToolProviderIds);
     this.paseoToolCatalogFactory = options.paseoToolCatalogFactory ?? null;
   }
 
@@ -727,6 +730,10 @@ export class AgentManager {
 
   setPaseoToolsEnabled(enabled: boolean): void {
     this.paseoToolsEnabled = enabled;
+  }
+
+  setPaseoToolProviderIds(providerIds: readonly string[] | undefined): void {
+    this.paseoToolProviderIds = providerIds === undefined ? null : new Set(providerIds);
   }
 
   setPaseoToolCatalogFactory(factory: PaseoToolCatalogFactory | null): void {
@@ -1098,6 +1105,7 @@ export class AgentManager {
     const launchContext = await this.buildLaunchContext(
       resolvedAgentId,
       client,
+      storedConfig.provider,
       storedConfig.cwd,
       options?.env,
     );
@@ -1179,7 +1187,12 @@ export class AgentManager {
         `Provider '${handle.provider}' is not available. Please ensure the CLI is installed.`,
       );
     }
-    const launchContext = await this.buildLaunchContext(resolvedAgentId, client, storedConfig.cwd);
+    const launchContext = await this.buildLaunchContext(
+      resolvedAgentId,
+      client,
+      storedConfig.provider,
+      storedConfig.cwd,
+    );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const session = await client.resumeSession(
       handle,
@@ -1227,7 +1240,12 @@ export class AgentManager {
       },
       resolvedAgentId,
     );
-    const launchContext = await this.buildLaunchContext(resolvedAgentId, client, storedConfig.cwd);
+    const launchContext = await this.buildLaunchContext(
+      resolvedAgentId,
+      client,
+      storedConfig.provider,
+      storedConfig.cwd,
+    );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const imported = await client.importSession(
       {
@@ -1308,7 +1326,12 @@ export class AgentManager {
       provider,
     } as AgentSessionConfig;
     const { storedConfig, launchConfig } = await this.prepareSessionConfig(refreshConfig, agentId);
-    const launchContext = await this.buildLaunchContext(agentId, client, storedConfig.cwd);
+    const launchContext = await this.buildLaunchContext(
+      agentId,
+      client,
+      storedConfig.provider,
+      storedConfig.cwd,
+    );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
 
     const session = handle
@@ -4459,7 +4482,7 @@ export class AgentManager {
       withRuntimePaseoMcpServer({
         config: storedConfig,
         agentId,
-        mcpBaseUrl: this.mcpBaseUrl,
+        mcpBaseUrl: this.shouldInjectPaseoTools(storedConfig.provider) ? this.mcpBaseUrl : null,
         mcpAuthToken: this.mcpAuthToken,
       }),
     );
@@ -4482,6 +4505,7 @@ export class AgentManager {
   private async buildLaunchContext(
     agentId: string,
     client: AgentClient,
+    provider: AgentProvider,
     cwd: string,
     env?: Record<string, string>,
   ): Promise<AgentLaunchContext> {
@@ -4494,13 +4518,20 @@ export class AgentManager {
       },
     };
     if (
-      this.paseoToolsEnabled &&
+      this.shouldInjectPaseoTools(provider) &&
       client.capabilities.supportsNativePaseoTools &&
       this.paseoToolCatalogFactory
     ) {
       context.paseoTools = await this.paseoToolCatalogFactory({ callerAgentId: agentId });
     }
     return context;
+  }
+
+  private shouldInjectPaseoTools(provider: AgentProvider): boolean {
+    return (
+      this.paseoToolsEnabled &&
+      (this.paseoToolProviderIds === null || this.paseoToolProviderIds.has(provider))
+    );
   }
 
   private resolveProviderLaunchConfig(

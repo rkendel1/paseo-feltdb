@@ -2,9 +2,11 @@ import { useCallback, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import type { AgentGoal } from "@getpaseo/protocol/agent-types";
-import { StyleSheet } from "react-native-unistyles";
+import { Pause, Play, Target, Trash2 } from "lucide-react-native";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Button } from "@/components/ui/button";
-import { goalActions, goalStatusKey, type GoalAction } from "./presentation";
+import { ICON_SIZE, type Theme } from "@/styles/theme";
+import { formatGoalDuration, goalActions, goalStatusKey, type GoalAction } from "./presentation";
 
 export function GoalTrack({
   goal,
@@ -34,22 +36,14 @@ export function GoalTrack({
     <View style={styles.root} testID="goal-track">
       <View style={styles.row}>
         <View style={styles.summary}>
-          <View
-            style={[
-              styles.statusDot,
-              goal.status === "active" && styles.statusDotActive,
-              goal.status === "blocked" && styles.statusDotBlocked,
-              (goal.status === "usageLimited" || goal.status === "budgetLimited") &&
-                styles.statusDotLimited,
-              goal.status === "complete" && styles.statusDotComplete,
-            ]}
-          />
+          <ThemedTarget size={ICON_SIZE.xs} uniProps={iconForegroundMutedMapping} />
           <Text style={styles.status} numberOfLines={1}>
             {t(goalStatusKey(goal.status))}
           </Text>
           <Text style={styles.objective} numberOfLines={1} testID="goal-track-objective">
             {goal.objective}
           </Text>
+          <Text style={styles.duration}>· {formatGoalDuration(goal.timeUsedSeconds)}</Text>
         </View>
         <View style={styles.actions}>
           {goalActions(goal).map((action) => (
@@ -84,29 +78,29 @@ function GoalActionButton({
   onAction: (action: GoalAction) => void;
 }): ReactElement {
   const handlePress = useCallback(() => onAction(action), [action, onAction]);
+  let icon = ThemedTrash2;
+  if (action === "pause") icon = ThemedPause;
+  if (action === "resume") icon = ThemedPlay;
   return (
     <Button
       size="xs"
       variant="ghost"
+      leftIcon={icon}
       disabled={pendingAction !== null}
       loading={pendingAction === action}
+      accessibilityLabel={label}
       testID={`goal-track-${action}`}
       onPress={handlePress}
-    >
-      {label}
-    </Button>
+    />
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
   root: {
-    marginBottom: -theme.spacing[1],
-    paddingBottom: theme.spacing[1],
-    borderBottomWidth: theme.borderWidth[1],
-    borderBottomColor: theme.colors.border,
+    paddingHorizontal: theme.spacing[2],
   },
   row: {
-    minHeight: 28,
+    minHeight: 32,
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[1],
@@ -118,35 +112,21 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     gap: theme.spacing[1],
   },
-  statusDot: {
-    width: 6,
-    height: 6,
-    flexShrink: 0,
-    borderRadius: theme.borderRadius.full,
-    backgroundColor: theme.colors.foregroundMuted,
-  },
-  statusDotActive: {
-    backgroundColor: theme.colors.statusDotRunning,
-  },
-  statusDotBlocked: {
-    backgroundColor: theme.colors.statusDotDanger,
-  },
-  statusDotLimited: {
-    backgroundColor: theme.colors.statusDotWarning,
-  },
-  statusDotComplete: {
-    backgroundColor: theme.colors.statusDotSuccess,
-  },
   status: {
     flexShrink: 0,
     fontSize: theme.fontSize.xs,
-    color: theme.colors.foregroundMuted,
+    color: theme.colors.foreground,
   },
   objective: {
     flex: 1,
     minWidth: 0,
     fontSize: theme.fontSize.xs,
-    color: theme.colors.foreground,
+    color: theme.colors.foregroundMuted,
+  },
+  duration: {
+    flexShrink: 0,
+    fontSize: theme.fontSize.xs,
+    color: theme.colors.foregroundMuted,
   },
   actions: {
     flexDirection: "row",
@@ -154,7 +134,14 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 0,
   },
   error: {
+    paddingBottom: theme.spacing[1],
     fontSize: theme.fontSize.xs,
     color: theme.colors.statusDanger,
   },
 }));
+
+const ThemedTarget = withUnistyles(Target);
+const ThemedPause = withUnistyles(Pause);
+const ThemedPlay = withUnistyles(Play);
+const ThemedTrash2 = withUnistyles(Trash2);
+const iconForegroundMutedMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });

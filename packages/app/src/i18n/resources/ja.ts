@@ -124,6 +124,8 @@ export const ja: TranslationResources = {
       dropImagesHere: "ここに画像をドロップ",
       dropFilesHere: "ここにファイルをドロップ",
       editQueuedMessage: "キューに入れたメッセージを編集",
+      steerQueuedMessage: "指示",
+      removeQueuedMessage: "キューからメッセージを削除",
       sendQueuedMessageNow: "キューに入れたメッセージを今すぐ送信",
       openImage: "画像添付ファイルを開く",
       removeImage: "画像添付ファイルを削除",
@@ -1610,7 +1612,7 @@ export const ja: TranslationResources = {
   },
   goals: {
     status: {
-      active: "実行中",
+      active: "目標を追跡中",
       paused: "一時停止中",
       blocked: "ブロック中",
       usageLimited: "使用量上限",

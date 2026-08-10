@@ -124,6 +124,8 @@ export const ar: TranslationResources = {
       dropImagesHere: "إسقاط الصور هنا",
       dropFilesHere: "Drop files here",
       editQueuedMessage: "تحرير الرسالة في قائمة الانتظار",
+      steerQueuedMessage: "توجيه",
+      removeQueuedMessage: "إزالة الرسالة من قائمة الانتظار",
       sendQueuedMessageNow: "إرسال رسالة في قائمة الانتظار الآن",
       openImage: "فتح مرفق الصورة",
       removeImage: "إزالة مرفق الصورة",
@@ -1594,7 +1596,7 @@ export const ar: TranslationResources = {
   },
   goals: {
     status: {
-      active: "نشط",
+      active: "متابعة الهدف",
       paused: "متوقف مؤقتًا",
       blocked: "محظور",
       usageLimited: "تم بلوغ حد الاستخدام",

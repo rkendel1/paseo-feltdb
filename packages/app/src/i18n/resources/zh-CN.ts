@@ -124,6 +124,8 @@ export const zhCN: TranslationResources = {
       dropImagesHere: "将图片拖放到这里",
       dropFilesHere: "Drop files here",
       editQueuedMessage: "编辑排队消息",
+      steerQueuedMessage: "引导",
+      removeQueuedMessage: "移除排队消息",
       sendQueuedMessageNow: "立即发送排队消息",
       openImage: "打开图片附件",
       removeImage: "移除图片附件",
@@ -1574,7 +1576,7 @@ export const zhCN: TranslationResources = {
   },
   goals: {
     status: {
-      active: "进行中",
+      active: "正在执行目标",
       paused: "已暂停",
       blocked: "已阻塞",
       usageLimited: "已达使用上限",

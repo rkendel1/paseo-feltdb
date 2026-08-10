@@ -1520,8 +1520,8 @@ function ActiveAgentComposer({
     },
     [agentId, client],
   );
-  const goalSurfaceHeader = useMemo(
-    () => <GoalTrack goal={goal} onAction={handleGoalAction} />,
+  const goalTrayFooter = useMemo(
+    () => (goal ? <GoalTrack goal={goal} onAction={handleGoalAction} /> : null),
     [goal, handleGoalAction],
   );
   const subagentRows = useSubagentsForParent({
@@ -1666,7 +1666,7 @@ function ActiveAgentComposer({
         onMessageSent={onMessageSent}
         onClientSlashCommand={handleClientSlashCommand}
         isCompactLayout={isCompactComposerLayout}
-        surfaceHeader={goalSurfaceHeader}
+        contextTrayFooter={goalTrayFooter}
       />
     </ReanimatedAnimated.View>
   );

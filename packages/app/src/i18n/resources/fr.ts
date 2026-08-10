@@ -126,6 +126,8 @@ export const fr: TranslationResources = {
       dropImagesHere: "Déposez des images ici",
       dropFilesHere: "Drop files here",
       editQueuedMessage: "Modifier le message en file d'attente",
+      steerQueuedMessage: "Orienter",
+      removeQueuedMessage: "Supprimer le message en file d'attente",
       sendQueuedMessageNow: "Envoyer le message en file d'attente maintenant",
       openImage: "Ouvrir la pièce jointe de l'image",
       removeImage: "Supprimer l'image jointe",
@@ -1641,7 +1643,7 @@ export const fr: TranslationResources = {
   },
   goals: {
     status: {
-      active: "Actif",
+      active: "Objectif en cours",
       paused: "En pause",
       blocked: "Bloqué",
       usageLimited: "Limite d’utilisation atteinte",

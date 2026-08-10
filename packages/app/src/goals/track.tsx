@@ -4,8 +4,6 @@ import { Text, View } from "react-native";
 import type { AgentGoal } from "@getpaseo/protocol/agent-types";
 import { StyleSheet } from "react-native-unistyles";
 import { Button } from "@/components/ui/button";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { MAX_CONTENT_WIDTH } from "@/constants/layout";
 import { goalActions, goalStatusKey, type GoalAction } from "./presentation";
 
 export function GoalTrack({
@@ -33,36 +31,43 @@ export function GoalTrack({
   if (!goal) return null;
 
   return (
-    <View style={styles.outer} testID="goal-track">
-      <View style={styles.track}>
-        <View style={styles.surface}>
-          <View style={styles.summary}>
-            <StatusBadge
-              label={t(goalStatusKey(goal.status))}
-              variant={goal.status === "complete" ? "success" : undefined}
+    <View style={styles.root} testID="goal-track">
+      <View style={styles.row}>
+        <View style={styles.summary}>
+          <View
+            style={[
+              styles.statusDot,
+              goal.status === "active" && styles.statusDotActive,
+              goal.status === "blocked" && styles.statusDotBlocked,
+              (goal.status === "usageLimited" || goal.status === "budgetLimited") &&
+                styles.statusDotLimited,
+              goal.status === "complete" && styles.statusDotComplete,
+            ]}
+          />
+          <Text style={styles.status} numberOfLines={1}>
+            {t(goalStatusKey(goal.status))}
+          </Text>
+          <Text style={styles.objective} numberOfLines={1} testID="goal-track-objective">
+            {goal.objective}
+          </Text>
+        </View>
+        <View style={styles.actions}>
+          {goalActions(goal).map((action) => (
+            <GoalActionButton
+              key={action}
+              action={action}
+              label={t(`goals.actions.${action}`)}
+              pendingAction={pendingAction}
+              onAction={handleAction}
             />
-            <Text style={styles.objective} numberOfLines={2} testID="goal-track-objective">
-              {goal.objective}
-            </Text>
-          </View>
-          <View style={styles.actions}>
-            {goalActions(goal).map((action) => (
-              <GoalActionButton
-                key={action}
-                action={action}
-                label={t(`goals.actions.${action}`)}
-                pendingAction={pendingAction}
-                onAction={handleAction}
-              />
-            ))}
-          </View>
-          {error ? (
-            <Text style={styles.error} accessibilityRole="alert" testID="goal-track-error">
-              {error}
-            </Text>
-          ) : null}
+          ))}
         </View>
       </View>
+      {error ? (
+        <Text style={styles.error} accessibilityRole="alert" testID="goal-track-error">
+          {error}
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -94,48 +99,61 @@ function GoalActionButton({
 }
 
 const styles = StyleSheet.create((theme) => ({
-  outer: {
-    width: "100%",
+  root: {
+    marginBottom: -theme.spacing[1],
+    paddingBottom: theme.spacing[1],
+    borderBottomWidth: theme.borderWidth[1],
+    borderBottomColor: theme.colors.border,
+  },
+  row: {
+    minHeight: 28,
+    flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: theme.spacing[4],
-  },
-  track: {
-    width: "100%",
-    maxWidth: MAX_CONTENT_WIDTH,
-    marginBottom: -theme.spacing[4],
-  },
-  surface: {
-    alignSelf: "stretch",
-    backgroundColor: theme.colors.surface1,
-    borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.borderAccent,
-    borderBottomWidth: 0,
-    borderTopLeftRadius: theme.borderRadius["2xl"],
-    borderTopRightRadius: theme.borderRadius["2xl"],
-    paddingHorizontal: theme.spacing[3],
-    paddingTop: theme.spacing[2],
-    paddingBottom: theme.spacing[6],
+    gap: theme.spacing[1],
   },
   summary: {
+    flex: 1,
     minWidth: 0,
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[2],
+    gap: theme.spacing[1],
+  },
+  statusDot: {
+    width: 6,
+    height: 6,
+    flexShrink: 0,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.foregroundMuted,
+  },
+  statusDotActive: {
+    backgroundColor: theme.colors.statusDotRunning,
+  },
+  statusDotBlocked: {
+    backgroundColor: theme.colors.statusDotDanger,
+  },
+  statusDotLimited: {
+    backgroundColor: theme.colors.statusDotWarning,
+  },
+  statusDotComplete: {
+    backgroundColor: theme.colors.statusDotSuccess,
+  },
+  status: {
+    flexShrink: 0,
+    fontSize: theme.fontSize.xs,
+    color: theme.colors.foregroundMuted,
   },
   objective: {
     flex: 1,
     minWidth: 0,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.xs,
     color: theme.colors.foreground,
   },
   actions: {
     flexDirection: "row",
-    justifyContent: "flex-end",
     alignItems: "center",
-    marginTop: theme.spacing[1],
+    flexShrink: 0,
   },
   error: {
-    marginTop: theme.spacing[1],
     fontSize: theme.fontSize.xs,
     color: theme.colors.statusDanger,
   },

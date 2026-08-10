@@ -3311,8 +3311,16 @@ export class AgentManager {
       if (changed && options?.emit !== false) {
         this.emitState(agent);
       }
-    } catch {
-      // Keep the last projected goal when the provider cannot refresh it.
+    } catch (error) {
+      this.logger.warn(
+        { err: error, agentId: agent.id, provider: agent.provider },
+        "Failed to refresh agent goal",
+      );
+      const changed = agent.goal != null;
+      agent.goal = null;
+      if (changed && options?.emit !== false) {
+        this.emitState(agent);
+      }
     }
   }
 

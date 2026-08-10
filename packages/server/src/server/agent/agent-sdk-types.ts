@@ -1,4 +1,5 @@
 import type {
+  AgentGoal,
   AgentProviderNotice,
   ProviderOptions,
   ToolPolicy,
@@ -6,7 +7,11 @@ import type {
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
 import type { PaseoToolCatalog } from "./tools/types.js";
 
-export type { AgentProviderNotice };
+export type {
+  AgentGoal,
+  AgentGoalStatus,
+  AgentProviderNotice,
+} from "@getpaseo/protocol/agent-types";
 
 export type AgentProvider = string;
 
@@ -376,22 +381,6 @@ export interface CompactionTimelineItem {
   status: "loading" | "completed";
   trigger?: "auto" | "manual";
   preTokens?: number;
-}
-
-export type AgentGoalStatus =
-  | "active"
-  | "paused"
-  | "blocked"
-  | "usageLimited"
-  | "budgetLimited"
-  | "complete";
-
-export interface AgentGoal {
-  objective: string;
-  status: AgentGoalStatus;
-  tokenBudget: number | null;
-  tokensUsed: number;
-  timeUsedSeconds: number;
 }
 
 export type AgentTimelineItem =

@@ -3573,6 +3573,49 @@ test("session config drift events update state through the stream channel", asyn
   expect(streams.map((event) => event.type)).toEqual([]);
 });
 
+test("goal refresh failure clears a stale projection", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-goal-refresh-failure-"));
+  class GoalRefreshSession extends TestAgentSession {
+    failGoalRefresh = false;
+
+    async getGoal() {
+      if (this.failGoalRefresh) {
+        throw new Error("goal lookup unavailable");
+      }
+      return {
+        objective: "Keep this projection authoritative",
+        status: "active" as const,
+        tokenBudget: null,
+        tokensUsed: 4,
+        timeUsedSeconds: 2,
+      };
+    }
+  }
+  let session: GoalRefreshSession | null = null;
+  class GoalRefreshClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new GoalRefreshSession(config);
+      return session;
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: { codex: new GoalRefreshClient() },
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000134",
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  expect(manager.getAgent(snapshot.id)?.goal?.status).toBe("active");
+
+  if (!session) throw new Error("Expected goal refresh session");
+  session.failGoalRefresh = true;
+  await manager.respondToPermission(snapshot.id, "refresh-goal", { behavior: "allow" });
+
+  expect(manager.getAgent(snapshot.id)?.goal).toBeNull();
+});
+
 test("setLabels merges and persists labels", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-set-labels-"));
   const storagePath = join(workdir, "agents");

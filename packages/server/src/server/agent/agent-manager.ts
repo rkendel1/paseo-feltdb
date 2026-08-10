@@ -22,6 +22,7 @@ import {
   type AgentCreateSessionOptions,
   type AgentResumeSessionOptions,
   type AgentFeature,
+  type AgentGoal,
   type AgentLaunchContext,
   type AgentSlashCommand,
   type AgentMode,
@@ -318,6 +319,18 @@ interface StreamEventFlags {
   shouldNotifyWaiters: boolean;
 }
 
+function areAgentGoalsEqual(left: AgentGoal | null, right: AgentGoal | null): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return (
+    left.objective === right.objective &&
+    left.status === right.status &&
+    left.tokenBudget === right.tokenBudget &&
+    left.tokensUsed === right.tokensUsed &&
+    left.timeUsedSeconds === right.timeUsedSeconds
+  );
+}
+
 type ActiveTurnTerminalDisposition = "closed_current" | "stale" | "untracked";
 
 interface HandleStreamEventOptions {
@@ -338,6 +351,7 @@ interface ManagedAgentBase {
   capabilities: AgentCapabilityFlags;
   config: AgentSessionConfig;
   runtimeInfo?: AgentRuntimeInfo;
+  goal?: AgentGoal | null;
   createdAt: Date;
   updatedAt: Date;
   availableModes: AgentMode[];
@@ -1588,6 +1602,7 @@ export class AgentManager {
         capabilities: STORED_AGENT_CAPABILITIES,
         config: buildStoredAgentConfig(record),
         runtimeInfo: undefined,
+        goal: null,
         lifecycle: "closed",
         createdAt: new Date(record.createdAt),
         updatedAt,
@@ -2998,6 +3013,7 @@ export class AgentManager {
       capabilities: session.capabilities,
       config,
       runtimeInfo: undefined,
+      goal: null,
       lifecycle: "initializing",
       createdAt: options?.createdAt ?? now,
       updatedAt: options?.updatedAt ?? now,
@@ -3279,7 +3295,25 @@ export class AgentManager {
     }
 
     this.syncFeaturesFromSession(agent);
+    await this.refreshGoal(agent, options);
     await this.refreshRuntimeInfo(agent, options);
+  }
+
+  private async refreshGoal(
+    agent: ActiveManagedAgent,
+    options?: { emit?: boolean },
+  ): Promise<void> {
+    if (!agent.session.getGoal) return;
+    try {
+      const goal = await agent.session.getGoal();
+      const changed = !areAgentGoalsEqual(goal, agent.goal ?? null);
+      agent.goal = goal;
+      if (changed && options?.emit !== false) {
+        this.emitState(agent);
+      }
+    } catch {
+      // Keep the last projected goal when the provider cannot refresh it.
+    }
   }
 
   private async refreshRuntimeInfo(
@@ -3648,6 +3682,11 @@ export class AgentManager {
             thinkingOptionId: event.thinkingOptionId,
           };
         }
+        flags.shouldDispatchEvent = false;
+        this.emitState(agent);
+        return undefined;
+      case "goal_changed":
+        agent.goal = event.goal;
         flags.shouldDispatchEvent = false;
         this.emitState(agent);
         return undefined;

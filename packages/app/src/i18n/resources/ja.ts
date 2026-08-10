@@ -1608,6 +1608,17 @@ export const ja: TranslationResources = {
     archiveFinishedAction: "完了したサブエージェントをアーカイブ",
     archiveFinishedTooltip: "完了した項目をアーカイブ",
   },
+  goals: {
+    status: {
+      active: "実行中",
+      paused: "一時停止中",
+      blocked: "ブロック中",
+      usageLimited: "使用量上限",
+      budgetLimited: "予算上限",
+      complete: "完了",
+    },
+    actions: { pause: "一時停止", resume: "再開", clear: "クリア" },
+  },
   panels: {
     draft: {
       newAgent: "新しいエージェント",

@@ -1602,6 +1602,17 @@ export const ko: TranslationResources = {
     archiveFinishedAction: "완료된 하위 에이전트 보관",
     archiveFinishedTooltip: "아카이브 완료",
   },
+  goals: {
+    status: {
+      active: "활성",
+      paused: "일시 중지됨",
+      blocked: "차단됨",
+      usageLimited: "사용량 제한",
+      budgetLimited: "예산 제한",
+      complete: "완료",
+    },
+    actions: { pause: "일시 중지", resume: "재개", clear: "지우기" },
+  },
   panels: {
     draft: {
       newAgent: "새 에이전트",

@@ -1592,6 +1592,17 @@ export const ar: TranslationResources = {
     archiveFinishedAction: "أرشفة الوكلاء الفرعيين المكتملين",
     archiveFinishedTooltip: "أرشفة المكتملين",
   },
+  goals: {
+    status: {
+      active: "نشط",
+      paused: "متوقف مؤقتًا",
+      blocked: "محظور",
+      usageLimited: "تم بلوغ حد الاستخدام",
+      budgetLimited: "تم بلوغ حد الميزانية",
+      complete: "مكتمل",
+    },
+    actions: { pause: "إيقاف مؤقت", resume: "استئناف", clear: "مسح" },
+  },
   panels: {
     draft: {
       newAgent: "وكيل جديد",

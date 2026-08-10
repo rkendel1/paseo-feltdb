@@ -3540,6 +3540,17 @@ test("session config drift events update state through the stream channel", asyn
     provider: "codex",
     thinkingOptionId: "high",
   });
+  capturedSession?.pushEvent({
+    type: "goal_changed",
+    provider: "codex",
+    goal: {
+      objective: "Ship persistent goal controls",
+      status: "blocked",
+      tokenBudget: null,
+      tokensUsed: 12,
+      timeUsedSeconds: 5,
+    },
+  });
   await manager.flush();
 
   const agent = manager.getAgent(snapshot.id);
@@ -3554,6 +3565,11 @@ test("session config drift events update state through the stream channel", asyn
     modeId: "build",
     thinkingOptionId: "high",
   });
+  expect(agent?.goal).toMatchObject({
+    objective: "Ship persistent goal controls",
+    status: "blocked",
+  });
+  expect(agent ? toAgentPayload(agent).goal : null).toMatchObject({ status: "blocked" });
   expect(streams.map((event) => event.type)).toEqual([]);
 });
 

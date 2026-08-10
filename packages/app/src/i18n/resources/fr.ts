@@ -1639,6 +1639,17 @@ export const fr: TranslationResources = {
     archiveFinishedAction: "Archiver les sous-agents terminés",
     archiveFinishedTooltip: "Archiver les terminés",
   },
+  goals: {
+    status: {
+      active: "Actif",
+      paused: "En pause",
+      blocked: "Bloqué",
+      usageLimited: "Limite d’utilisation atteinte",
+      budgetLimited: "Limite de budget atteinte",
+      complete: "Terminé",
+    },
+    actions: { pause: "Mettre en pause", resume: "Reprendre", clear: "Effacer" },
+  },
   panels: {
     draft: {
       newAgent: "Nouvel agent",

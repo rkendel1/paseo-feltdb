@@ -3961,6 +3961,47 @@ describe("Codex app-server provider", () => {
     ]);
   });
 
+  test("restores and emits durable Codex goal state", async () => {
+    const session = createSession({}, { goalsEnabled: true });
+    const goal = {
+      objective: "Ship persistent goal controls",
+      status: "active" as const,
+      tokenBudget: null,
+      tokensUsed: 42,
+      timeUsedSeconds: 8,
+    };
+    session.client = {
+      request: vi.fn(async (method: string) => {
+        if (method === "thread/loaded/list") return { data: ["test-thread"] };
+        if (method === "thread/goal/get") return { goal };
+        return {};
+      }),
+    };
+
+    await expect(session.getGoal?.()).resolves.toEqual(goal);
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    asInternals(session).handleNotification("thread/goal/updated", {
+      threadId: "test-thread",
+      turnId: null,
+      goal: { ...goal, status: "paused" },
+    });
+    asInternals(session).handleNotification("thread/goal/cleared", {
+      threadId: "test-thread",
+    });
+
+    expect(events).toEqual([
+      {
+        type: "goal_changed",
+        provider: "codex",
+        goal: { ...goal, status: "paused" },
+        turnId: "test-turn",
+      },
+      { type: "goal_changed", provider: "codex", goal: null, turnId: "test-turn" },
+    ]);
+  });
+
   test("lists /compact and sends Codex compaction out of band", async () => {
     const requests: Array<{ method: string; params: unknown }> = [];
     const session = createSession();

@@ -1572,6 +1572,17 @@ export const zhCN: TranslationResources = {
     archiveFinishedAction: "归档已完成的 subagent",
     archiveFinishedTooltip: "归档已完成项",
   },
+  goals: {
+    status: {
+      active: "进行中",
+      paused: "已暂停",
+      blocked: "已阻塞",
+      usageLimited: "已达使用上限",
+      budgetLimited: "已达预算上限",
+      complete: "已完成",
+    },
+    actions: { pause: "暂停", resume: "继续", clear: "清除" },
+  },
   panels: {
     draft: {
       newAgent: "新建 Agent",

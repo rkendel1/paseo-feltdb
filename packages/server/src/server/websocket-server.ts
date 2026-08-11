@@ -2009,7 +2009,7 @@ export class VoiceAssistantWebSocketServer {
     resolve();
   }
 
-  private scheduleExternalDisconnectCleanup(connection: TrustedSessionConnection): void {
+  private scheduleExternalDisconnectCleanup(connection: ReconnectableSessionConnection): void {
     if (connection.externalDisconnectCleanupTimeout) {
       clearTimeout(connection.externalDisconnectCleanupTimeout);
     }

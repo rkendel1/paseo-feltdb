@@ -132,10 +132,6 @@ export function useKeyboardShortcuts({
     // rebound the jump shortcut, and no `event.key` ever equals null, so the
     // badges simply never appear.
     const badgeModifierKey = getWorkspaceIndexJumpModifierKey(
-      { isMac, isDesktop: isDesktopApp },
-      bindings,
-    );
-    const badgeModifierKey = getWorkspaceIndexJumpModifierKey(
       { isMac, isDesktop: isDesktopBindings },
       bindings,
     );

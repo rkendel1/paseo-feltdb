@@ -34,7 +34,7 @@ export interface ArchiveDependencies {
   github: ForgeService;
   workspaceGitService: Pick<WorkspaceGitService, "getSnapshot">;
   agentManager: Pick<AgentManager, "listAgents" | "getAgent" | "archiveAgent" | "archiveSnapshot">;
-  agentStorage: Pick<AgentStorage, "listByWorkspace" | "get" | "updateRecord">;
+  agentStorage: Pick<AgentStorage, "listByWorkspace" | "listDescendants" | "get" | "updateRecord">;
   // Resolves the worktree at a path to its workspaceId for archive-by-path. The
   // path uniquely identifies a worktree workspace; this is a directory lookup for
   // the archive target, not status/ownership.
@@ -451,9 +451,15 @@ export async function archiveWorkspaceContents(
     archivedAgents.add(agent.id);
   }
 
+  let matchingStoredRecords: StoredAgentRecord[] = [];
   let storedRecords: StoredAgentRecord[] = [];
   try {
-    storedRecords = await dependencies.agentStorage.listByWorkspace(workspaceId);
+    matchingStoredRecords = await dependencies.agentStorage.listByWorkspace(workspaceId);
+    const descendants = await dependencies.agentStorage.listDescendants([
+      ...liveAgents.map((agent) => agent.id),
+      ...matchingStoredRecords.map((record) => record.id),
+    ]);
+    storedRecords = [...matchingStoredRecords, ...descendants];
   } catch (error) {
     dependencies.sessionLogger?.warn(
       { err: error, workspaceId },
@@ -462,7 +468,6 @@ export async function archiveWorkspaceContents(
   }
   const liveAgentIds = new Set(liveAgents.map((agent) => agent.id));
   const storedRecordsById = new Map(storedRecords.map((record) => [record.id, record]));
-  const matchingStoredRecords = storedRecords;
   for (const record of matchingStoredRecords) {
     archivedAgents.add(record.id);
   }
@@ -584,7 +589,7 @@ async function stampCascadeArchivedAgents(
 
 export interface UnarchiveWorkspaceContentsDependencies {
   agentManager: Pick<AgentManager, "archiveSnapshot" | "unarchiveSnapshot">;
-  agentStorage: Pick<AgentStorage, "list" | "get" | "updateRecord">;
+  agentStorage: Pick<AgentStorage, "listByArchivedWorkspace" | "get" | "updateRecord">;
   sessionLogger?: Logger;
 }
 
@@ -663,7 +668,7 @@ export async function unarchiveWorkspaceContents(
 ): Promise<StoredAgentRecord[]> {
   let storedRecords: StoredAgentRecord[] = [];
   try {
-    storedRecords = await dependencies.agentStorage.list();
+    storedRecords = await dependencies.agentStorage.listByArchivedWorkspace(workspaceId);
   } catch (error) {
     dependencies.sessionLogger?.warn(
       { err: error, workspaceId },
@@ -675,9 +680,7 @@ export async function unarchiveWorkspaceContents(
   // A stamped active record means a previous rollback failed after preserving
   // its retry marker. Treat it as already restored so this attempt can converge
   // by activating the workspace or rolling the record back again.
-  const candidates = storedRecords.filter(
-    (record) => record.archivedWithWorkspaceId === workspaceId,
-  );
+  const candidates = storedRecords;
   if (candidates.length === 0) {
     return [];
   }

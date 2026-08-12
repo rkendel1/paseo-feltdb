@@ -4114,7 +4114,7 @@ describe("Codex app-server provider", () => {
     ]);
   });
 
-  test("restores and emits durable Codex goal state", async () => {
+  test("restores and emits goal state created during a normal Codex turn", async () => {
     const session = createSession({}, { goalsEnabled: true });
     const goal = {
       objective: "Ship persistent goal controls",
@@ -4132,13 +4132,18 @@ describe("Codex app-server provider", () => {
     };
 
     await expect(session.getGoal?.()).resolves.toEqual(goal);
+    expect(
+      session.tryHandleOutOfBand?.(
+        "Set up a goal, keep working on it, test end to end, and commit as you go",
+      ),
+    ).toBeNull();
 
     const events: AgentStreamEvent[] = [];
     session.subscribe((event) => events.push(event));
     asInternals(session).handleNotification("thread/goal/updated", {
       threadId: "test-thread",
       turnId: null,
-      goal: { ...goal, status: "paused" },
+      goal,
     });
     asInternals(session).handleNotification("thread/goal/cleared", {
       threadId: "test-thread",
@@ -4148,7 +4153,7 @@ describe("Codex app-server provider", () => {
       {
         type: "goal_changed",
         provider: "codex",
-        goal: { ...goal, status: "paused" },
+        goal,
         turnId: "test-turn",
       },
       { type: "goal_changed", provider: "codex", goal: null, turnId: "test-turn" },

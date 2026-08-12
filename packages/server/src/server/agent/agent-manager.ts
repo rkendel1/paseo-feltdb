@@ -3316,11 +3316,8 @@ export class AgentManager {
         { err: error, agentId: agent.id, provider: agent.provider },
         "Failed to refresh agent goal",
       );
-      const changed = agent.goal != null;
-      agent.goal = null;
-      if (changed && options?.emit !== false) {
-        this.emitState(agent);
-      }
+      // A failed lookup is not an authoritative clear. Keep the last provider
+      // projection until getGoal succeeds or a goal_changed(null) event arrives.
     }
   }
 

@@ -23,6 +23,7 @@ import type {
   AgentClient,
   AgentCreateSessionOptions,
   AgentFeature,
+  AgentGoal,
   AgentLaunchContext,
   AgentPromptInput,
   AgentProvider,
@@ -3573,22 +3574,23 @@ test("session config drift events update state through the stream channel", asyn
   expect(streams.map((event) => event.type)).toEqual([]);
 });
 
-test("goal refresh failure clears a stale projection", async () => {
+test("goal refresh failure preserves the last authoritative projection", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-goal-refresh-failure-"));
   class GoalRefreshSession extends TestAgentSession {
     failGoalRefresh = false;
+    goal: AgentGoal | null = {
+      objective: "Keep this projection authoritative",
+      status: "active",
+      tokenBudget: null,
+      tokensUsed: 4,
+      timeUsedSeconds: 2,
+    };
 
     async getGoal() {
       if (this.failGoalRefresh) {
         throw new Error("goal lookup unavailable");
       }
-      return {
-        objective: "Keep this projection authoritative",
-        status: "active" as const,
-        tokenBudget: null,
-        tokensUsed: 4,
-        timeUsedSeconds: 2,
-      };
+      return this.goal;
     }
   }
   let session: GoalRefreshSession | null = null;
@@ -3611,6 +3613,15 @@ test("goal refresh failure clears a stale projection", async () => {
 
   if (!session) throw new Error("Expected goal refresh session");
   session.failGoalRefresh = true;
+  await manager.respondToPermission(snapshot.id, "refresh-goal", { behavior: "allow" });
+
+  expect(manager.getAgent(snapshot.id)?.goal).toMatchObject({
+    objective: "Keep this projection authoritative",
+    status: "active",
+  });
+
+  session.failGoalRefresh = false;
+  session.goal = null;
   await manager.respondToPermission(snapshot.id, "refresh-goal", { behavior: "allow" });
 
   expect(manager.getAgent(snapshot.id)?.goal).toBeNull();

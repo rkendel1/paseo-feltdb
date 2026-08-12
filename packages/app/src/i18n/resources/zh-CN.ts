@@ -1815,6 +1815,10 @@ export const zhCN: TranslationResources = {
         description: "内置终端缓冲区保留的行数",
         accessibilityLabel: "终端回滚行数",
       },
+      alwaysOpenChangesInTab: {
+        label: "始终在标签页中打开“更改”",
+        description: "点击已更改的文件时打开“更改”标签页，而不是在侧边栏中展开差异。",
+      },
       autoExpandReasoning: {
         label: "始终展开推理过程",
         description: "默认情况下完全展开 AI 的思考和推理过程",

@@ -1837,6 +1837,11 @@ export const ar: TranslationResources = {
         description: "يتم الاحتفاظ بالخطوط في المخزن المؤقت الطرفي المدمج",
         accessibilityLabel: "خطوط التمرير Terminal",
       },
+      alwaysOpenChangesInTab: {
+        label: "فتح التغييرات دائمًا في علامة تبويب",
+        description:
+          "النقر على ملف معدَّل يفتح علامة تبويب التغييرات بدلاً من عرض الفروق في الشريط الجانبي.",
+      },
       autoExpandReasoning: {
         label: "عرض التفكير دائماً",
         description: "إظهار تفكير الوكيل وخطوات الاستدلال بشكل كامل بشكل افتراضي",

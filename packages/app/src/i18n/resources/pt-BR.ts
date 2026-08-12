@@ -1867,6 +1867,11 @@ export const ptBR: TranslationResources = {
         description: "Linhas mantidas no buffer do terminal integrado",
         accessibilityLabel: "Linhas do scrollback do terminal",
       },
+      alwaysOpenChangesInTab: {
+        label: "Sempre abrir Alterações em uma aba",
+        description:
+          "Clicar em um arquivo alterado abre a aba Alterações em vez de expandir o diff na barra lateral.",
+      },
       autoExpandReasoning: {
         label: "Sempre expandir raciocínio",
         description:

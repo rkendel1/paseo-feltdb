@@ -1848,6 +1848,11 @@ export const ko: TranslationResources = {
         description: "내장 터미널 버퍼에 보관되는 줄 수",
         accessibilityLabel: "터미널 스크롤백 줄 수",
       },
+      alwaysOpenChangesInTab: {
+        label: "항상 탭에서 변경사항 열기",
+        description:
+          "변경된 파일을 클릭하면 사이드바에서 차이를 펼치는 대신 변경사항 탭이 열립니다.",
+      },
       autoExpandReasoning: {
         label: "추론 항상 펼치기",
         description: "에이전트의 사고 및 추론 블록을 기본적으로 모두 펼쳐 표시합니다.",

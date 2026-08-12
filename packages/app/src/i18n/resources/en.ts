@@ -1847,6 +1847,11 @@ export const en = {
         description: "Lines kept in the built-in terminal buffer",
         accessibilityLabel: "Terminal scrollback lines",
       },
+      alwaysOpenChangesInTab: {
+        label: "Always open Changes in a tab",
+        description:
+          "Clicking a changed file opens the Changes tab instead of expanding the diff in the sidebar.",
+      },
       autoExpandReasoning: {
         label: "Always expand reasoning",
         description: "Show agent thinking and chain-of-thought blocks fully expanded by default",

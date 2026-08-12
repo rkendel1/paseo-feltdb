@@ -1871,6 +1871,11 @@ export const ru: TranslationResources = {
         description: "Строки, хранящиеся во встроенном буфере терминала.",
         accessibilityLabel: "Линии прокрутки Terminal",
       },
+      alwaysOpenChangesInTab: {
+        label: "Всегда открывать «Изменения» во вкладке",
+        description:
+          "Клик по изменённому файлу открывает вкладку «Изменения» вместо разворачивания различий в боковой панели.",
+      },
       autoExpandReasoning: {
         label: "Всегда разворачивать размышления",
         description:

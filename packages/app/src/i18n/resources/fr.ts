@@ -1886,6 +1886,11 @@ export const fr: TranslationResources = {
         description: "Lignes conservées dans le tampon du terminal intégré",
         accessibilityLabel: "Lignes de défilementTerminal",
       },
+      alwaysOpenChangesInTab: {
+        label: "Toujours ouvrir Modifications dans un onglet",
+        description:
+          "Cliquer sur un fichier modifié ouvre l'onglet Modifications au lieu d'afficher le diff dans la barre latérale.",
+      },
       autoExpandReasoning: {
         label: "Toujours afficher le raisonnement",
         description: "Afficher le raisonnement de l'agent entièrement développé par défaut",

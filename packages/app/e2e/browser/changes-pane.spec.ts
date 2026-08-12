@@ -5,6 +5,7 @@ import { type Locator, type Page } from "@playwright/test";
 import { buildHostWorkspaceRoute, buildSettingsSectionRoute } from "../../src/utils/host-routes";
 import { test, expect } from "../support/fixtures";
 import { daemonWsRoutePattern } from "../support/helpers/daemon-port";
+import { addInlineReviewComment } from "../support/helpers/review";
 import { getServerId } from "../support/helpers/server-id";
 import { connectSeedClient } from "../support/helpers/seed-client";
 import { createTempGitRepo } from "../support/helpers/workspace";
@@ -62,6 +63,7 @@ async function failNextDiscardRequest(page: Page): Promise<void> {
 }
 
 const CHANGES_PREFERENCES_KEY = "@paseo:changes-preferences";
+const CHANGES_PREFERENCES_SEEDED_KEY = "@paseo:e2e-changes-preferences-seeded";
 
 function diffGroups(scope: Page | Locator, fileIndex = 0): Locator {
   return scope.getByTestId(new RegExp(`^diff-file-${fileIndex}-group-\\d+$`));
@@ -523,6 +525,89 @@ test("Changes switches between inline and full-tab navigation", async ({ page })
   await expect(diffGroups(page.getByTestId("explorer-content-area"))).toHaveCount(0);
 });
 
+test("Changes always-open preference sends file presses to the tab", async ({ page }) => {
+  const workspace = await createWorkspaceWithMountedTabDiff({ includeDeletedFile: true });
+  await resetChangesPreferencesOnce(page);
+  await openWorkspaceChanges(page, workspace);
+
+  const explorer = page.getByTestId("explorer-content-area");
+  const changesTabClose = page.getByTestId(/^workspace-working-diff-close-/);
+  await expect(diffGroups(explorer).first()).toBeVisible();
+  await expect(page.getByTestId("changes-toggle-expand-all")).toBeVisible();
+  await expect(page.getByTestId("changes-toggle-layout")).toBeVisible();
+
+  await toggleAlwaysOpenChangesInTab(page);
+
+  // Inline bodies and the controls that produce them are gone, along with the toolbar tab toggle
+  // the preference has made redundant. No tab has opened yet.
+  await expect(diffGroups(explorer)).toHaveCount(0);
+  await expect(page.getByTestId("changes-toggle-expand-all")).toHaveCount(0);
+  await expect(page.getByTestId("changes-toggle-layout")).toHaveCount(0);
+  await expect(page.getByTestId("changes-open-tab")).toHaveCount(0);
+  await expect(changesTabClose).toHaveCount(0);
+
+  await explorer.getByTestId("diff-file-0-toggle").click();
+  const visiblePanel = page.getByTestId("working-diff-panel").filter({ visible: true });
+  await expect(visiblePanel).toBeVisible();
+  await expect(diffGroups(visiblePanel).first()).toBeVisible();
+  await expect(diffGroups(explorer)).toHaveCount(0);
+  await expect(changesTabClose).toHaveCount(1);
+
+  await page.reload();
+  await waitForWorkspaceTabsVisible(page);
+  await expect(page.getByTestId("explorer-tab-changes")).toBeVisible({ timeout: 30_000 });
+  await expect(explorer.getByText("use-mounted-tab-set.ts").first()).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(changesTabClose).toHaveCount(1);
+
+  // The preference survived the reload: closing the tab does not bring inline diffs back, and
+  // the next press reopens the tab. Closing goes through the tab's own button because the
+  // toolbar toggle is hidden while the preference routes every press.
+  await expect(page.getByTestId("changes-open-tab")).toHaveCount(0);
+  await changesTabClose.click();
+  await expect(changesTabClose).toHaveCount(0);
+  await expect(diffGroups(explorer)).toHaveCount(0);
+  await explorer.getByTestId("diff-file-0-toggle").click();
+  await expect(changesTabClose).toHaveCount(1);
+
+  await changesTabClose.click();
+  await expect(changesTabClose).toHaveCount(0);
+  await toggleAlwaysOpenChangesInTab(page);
+
+  // Turning it off restores the expansion the sidebar had before, not a blank list.
+  await expect(diffGroups(explorer).first()).toBeVisible();
+  await expect(page.getByTestId("changes-toggle-expand-all")).toBeVisible();
+  await expect(page.getByTestId("changes-toggle-layout")).toBeVisible();
+});
+
+test("Changes keeps the review attachment across the sidebar-to-tab handoff", async ({ page }) => {
+  const workspace = await createWorkspaceWithMountedTabDiff();
+  await resetChangesPreferencesOnce(page);
+  await openWorkspaceChanges(page, workspace);
+
+  const explorer = page.getByTestId("explorer-content-area");
+  const reviewPill = page.getByTestId("composer-review-attachment-pill");
+  await addInlineReviewComment(page, { root: explorer, rowIndex: 1, body: "Needs a guard" });
+  await expect(reviewPill).toBeVisible();
+
+  // The sidebar is still the publisher here: the preference is on but no tab exists yet.
+  await toggleAlwaysOpenChangesInTab(page);
+  await expect(diffGroups(explorer)).toHaveCount(0);
+  await expect(reviewPill).toBeVisible();
+
+  // The publisher swaps from the sidebar to the tab panel on this press. Sample through the
+  // handoff rather than after it — a gap would leave the composer silently without the changes.
+  await explorer.getByTestId("diff-file-0-toggle").click();
+  await expectAttachmentPillStaysMounted(page, reviewPill);
+  await expect(page.getByTestId("working-diff-panel").filter({ visible: true })).toBeVisible();
+  await expect(reviewPill).toHaveCount(1);
+
+  // Closing the tab hands publishing back to the sidebar with the draft intact.
+  await page.getByTestId(/^workspace-working-diff-close-/).click();
+  await expect(reviewPill).toBeVisible();
+});
+
 test("changes diff switches between flat and tree file lists", async ({ page }) => {
   const workspace = await createWorkspaceWithMountedTabDiff();
   await useUnwrappedDiffLines(page);
@@ -737,6 +822,74 @@ async function useUnwrappedDiffLines(page: Page): Promise<void> {
     },
     { preferencesKey: CHANGES_PREFERENCES_KEY },
   );
+}
+
+/**
+ * Resets the diff preferences once per browser context, in setup rather than teardown so a
+ * failing test cannot leak `alwaysOpenInTab` into the next one. Later loads keep whatever the
+ * app itself stored, which is what makes the across-reload assertions meaningful.
+ */
+async function resetChangesPreferencesOnce(page: Page): Promise<void> {
+  await page.addInitScript(
+    ({ preferencesKey, seededKey }) => {
+      if (localStorage.getItem(seededKey)) {
+        return;
+      }
+      localStorage.setItem(seededKey, "1");
+      localStorage.setItem(
+        preferencesKey,
+        JSON.stringify({
+          layout: "unified",
+          viewMode: "flat",
+          wrapLines: false,
+          hideWhitespace: false,
+          alwaysOpenInTab: false,
+        }),
+      );
+    },
+    { preferencesKey: CHANGES_PREFERENCES_KEY, seededKey: CHANGES_PREFERENCES_SEEDED_KEY },
+  );
+}
+
+async function readStoredAlwaysOpenInTab(page: Page): Promise<boolean> {
+  const raw = await page.evaluate(
+    (preferencesKey) => localStorage.getItem(preferencesKey),
+    CHANGES_PREFERENCES_KEY,
+  );
+  return raw ? Boolean(JSON.parse(raw).alwaysOpenInTab) : false;
+}
+
+/**
+ * Flips the preference where it actually lives — Settings → General — and walks back to the
+ * workspace. The round trip is the point: the setting is global, so the Changes pane has to pick
+ * the new value up from the shared store rather than from local state it owns.
+ */
+async function toggleAlwaysOpenChangesInTab(page: Page): Promise<void> {
+  const before = await readStoredAlwaysOpenInTab(page);
+  await page.getByTestId("sidebar-settings").click();
+  await expect(page).toHaveURL(new RegExp(`${buildSettingsSectionRoute("general")}|/settings$`));
+
+  const toggle = page.getByTestId("always-open-changes-in-tab-toggle");
+  await expect(toggle).toBeVisible();
+  await toggle.click();
+  await expect.poll(() => readStoredAlwaysOpenInTab(page)).toBe(!before);
+
+  await page.getByTestId("settings-back-to-workspace").click();
+  await waitForWorkspaceTabsVisible(page);
+  await openChangesInVisibleExplorer(page);
+}
+
+/**
+ * Samples the pill repeatedly instead of asserting once, so a publisher gap during the handoff
+ * fails instead of being papered over by Playwright's retry. Mounted, not visible: opening a tab
+ * hides the launcher composer in a workspace with no agent, which is #2298's layout, not a lost
+ * attachment.
+ */
+async function expectAttachmentPillStaysMounted(page: Page, pill: Locator): Promise<void> {
+  for (let sample = 0; sample < 20; sample += 1) {
+    expect(await pill.count(), `review attachment disappeared on sample ${sample}`).toBe(1);
+    await page.waitForTimeout(50);
+  }
 }
 
 async function expectFlatFileList(page: Page): Promise<void> {

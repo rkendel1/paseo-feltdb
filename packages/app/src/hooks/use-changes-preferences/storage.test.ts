@@ -32,6 +32,7 @@ describe("loadChangesPreferencesFromStorage", () => {
       wrapLines: true,
       hideWhitespace: false,
       commitsCollapsed: true,
+      alwaysOpenInTab: false,
     });
     expect(storage.entries.get(CHANGES_PREFERENCES_STORAGE_KEY)).toBe(JSON.stringify(result));
   });
@@ -55,6 +56,7 @@ describe("loadChangesPreferencesFromStorage", () => {
       hideWhitespace: true,
       wrapLines: false,
       commitsCollapsed: true,
+      alwaysOpenInTab: false,
     });
     expect(storage.entries.get(CHANGES_PREFERENCES_STORAGE_KEY)).toBe(persisted);
     expect(storage.entries.size).toBe(1);
@@ -84,6 +86,44 @@ describe("changes preferences commitsCollapsed", () => {
     const prefs = await loadChangesPreferencesFromStorage(storage);
 
     expect(prefs.commitsCollapsed).toBe(true);
+  });
+});
+
+describe("changes preferences alwaysOpenInTab", () => {
+  it("expands diffs inline by default", () => {
+    expect(DEFAULT_CHANGES_PREFERENCES.alwaysOpenInTab).toBe(false);
+  });
+
+  it("round-trips alwaysOpenInTab: true", async () => {
+    const storage = createInMemoryKeyValueStorage({
+      [CHANGES_PREFERENCES_STORAGE_KEY]: JSON.stringify({ alwaysOpenInTab: true }),
+    });
+
+    const prefs = await loadChangesPreferencesFromStorage(storage);
+
+    expect(prefs.alwaysOpenInTab).toBe(true);
+  });
+
+  it("falls back to inline for invalid alwaysOpenInTab", async () => {
+    const storage = createInMemoryKeyValueStorage({
+      [CHANGES_PREFERENCES_STORAGE_KEY]: JSON.stringify({ alwaysOpenInTab: "nope" }),
+    });
+
+    const prefs = await loadChangesPreferencesFromStorage(storage);
+
+    expect(prefs.alwaysOpenInTab).toBe(false);
+  });
+
+  it("keeps stored preferences that predate the field", async () => {
+    const storage = createInMemoryKeyValueStorage({
+      [CHANGES_PREFERENCES_STORAGE_KEY]: JSON.stringify({ layout: "split", wrapLines: true }),
+    });
+
+    const prefs = await loadChangesPreferencesFromStorage(storage);
+
+    expect(prefs.layout).toBe("split");
+    expect(prefs.wrapLines).toBe(true);
+    expect(prefs.alwaysOpenInTab).toBe(false);
   });
 });
 

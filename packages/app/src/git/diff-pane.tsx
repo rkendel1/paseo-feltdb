@@ -97,7 +97,11 @@ import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { useOverlayFlatListScrollbar } from "@/components/ui/overlay-scrollbar/use-overlay-flat-list-scrollbar";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { usePanelStore } from "@/stores/panel-store";
-import { collectAllTabs, useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import {
+  collectAllTabs,
+  useWorkspaceLayoutStore,
+  useWorkspaceLayoutStoreHydrated,
+} from "@/stores/workspace-layout-store";
 import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 import { buildWorkspaceExplorerStateKey } from "@/hooks/use-file-explorer-actions";
 import {
@@ -129,6 +133,7 @@ import {
   type UnifiedRowGroupItem,
 } from "@/git/diff-rows/model";
 import { DiffHorizontalContent, DiffHorizontalSurface } from "@/git/diff-horizontal-surface";
+import { shouldRouteDiffsToChangesTab } from "@/git/changes-tab-navigation";
 
 export type { GitActionId, GitAction, GitActions } from "@/git/policy";
 
@@ -1618,6 +1623,8 @@ export function DiffLayoutToggle({
 
 interface ChangesTabToggleProps {
   isMobile: boolean;
+  /** False once the always-open preference routes every press, which leaves this nothing to do. */
+  visible: boolean;
   selected: boolean;
   onPress: () => void;
 }
@@ -1676,7 +1683,7 @@ export function DiffModeMenu({
   );
 }
 
-function ChangesTabToggle({ isMobile, selected, onPress }: ChangesTabToggleProps) {
+function ChangesTabToggle({ isMobile, visible, selected, onPress }: ChangesTabToggleProps) {
   const { t } = useTranslation();
   const buttonStyle = useMemo(
     () => buildToggleButtonStyle(selected, styles.expandAllButton),
@@ -1685,7 +1692,7 @@ function ChangesTabToggle({ isMobile, selected, onPress }: ChangesTabToggleProps
   const label = t(
     selected ? "workspace.git.diff.closeChangesTab" : "workspace.git.diff.openChangesTab",
   );
-  if (isMobile) {
+  if (isMobile || !visible) {
     return null;
   }
   return (
@@ -2812,14 +2819,15 @@ function useChangesTreeState({
   cwd,
   files,
   viewMode,
-  changesTabOpen,
+  inlineDiffsSuppressed,
   onViewModeChange,
 }: {
   workspaceId?: string | null;
   cwd: string;
   files: ParsedDiffFile[];
   viewMode: "flat" | "tree";
-  changesTabOpen: boolean;
+  /** The Changes tab owns the diff bodies, so the sidebar renders rows only. */
+  inlineDiffsSuppressed: boolean;
   onViewModeChange: (viewMode: "flat" | "tree") => void;
 }) {
   const workspaceStateKey = useMemo(
@@ -2846,7 +2854,7 @@ function useChangesTreeState({
   );
   const folderPathSet = useMemo(() => new Set(folderPaths), [folderPaths]);
   const allExpanded = useMemo(() => {
-    if (files.length === 0 || changesTabOpen) {
+    if (files.length === 0 || inlineDiffsSuppressed) {
       return false;
     }
     const everyFileExpanded = files.every((file) => stableExpandedPaths.includes(file.path));
@@ -2854,7 +2862,14 @@ function useChangesTreeState({
       viewMode !== "tree" ||
       stableCollapsedFolders.every((folderPath) => !folderPathSet.has(folderPath));
     return everyFileExpanded && everyFolderExpanded;
-  }, [changesTabOpen, files, folderPathSet, stableCollapsedFolders, stableExpandedPaths, viewMode]);
+  }, [
+    files,
+    folderPathSet,
+    inlineDiffsSuppressed,
+    stableCollapsedFolders,
+    stableExpandedPaths,
+    viewMode,
+  ]);
   const toggleViewMode = useCallback(() => {
     const nextViewMode = viewMode === "flat" ? "tree" : "flat";
     if (nextViewMode === "tree" && workspaceStateKey) {
@@ -2907,7 +2922,8 @@ function useChangesTreeState({
   );
 
   return {
-    expandedPaths: changesTabOpen ? EMPTY_PATH_LIST : stableExpandedPaths,
+    // Swapped, not cleared: turning the tab or the preference off restores what was expanded.
+    expandedPaths: inlineDiffsSuppressed ? EMPTY_PATH_LIST : stableExpandedPaths,
     collapsedFolders: stableCollapsedFolders,
     allExpanded,
     toggleViewMode,
@@ -2922,14 +2938,19 @@ function useDiffTabNavigation({
   workspaceId,
   cwd,
   isMobile,
+  alwaysOpenInTab,
+  preferencesLoaded,
 }: {
   serverId: string;
   workspaceId?: string | null;
   cwd: string;
   isMobile: boolean;
+  alwaysOpenInTab: boolean;
+  preferencesLoaded: boolean;
 }) {
   const openWorkspaceTabFocused = useWorkspaceLayoutStore((state) => state.openTabFocused);
   const closeWorkspaceTab = useWorkspaceLayoutStore((state) => state.closeTab);
+  const layoutHydrated = useWorkspaceLayoutStoreHydrated();
   const persistenceKey = useMemo(
     () => buildWorkspaceTabPersistenceKey({ serverId, workspaceId: workspaceId ?? cwd }),
     [cwd, serverId, workspaceId],
@@ -2944,6 +2965,14 @@ function useDiffTabNavigation({
     );
   });
   const changesTabOpen = !isMobile && Boolean(changesTabId);
+  const routeToTab = shouldRouteDiffsToChangesTab({
+    isMobile,
+    canOpenTab: Boolean(persistenceKey),
+    layoutHydrated,
+    preferencesLoaded,
+    changesTabOpen,
+    alwaysOpenInTab,
+  });
   const openChanges = useCallback(
     (path?: string) => {
       if (!persistenceKey || isMobile) {
@@ -2957,7 +2986,8 @@ function useDiffTabNavigation({
     [isMobile, openWorkspaceTabFocused, persistenceKey],
   );
   const toggleChanges = useCallback(() => {
-    if (!persistenceKey || isMobile) {
+    // Rehydration shallow-replaces layoutByWorkspace, so a tab opened before it lands is lost.
+    if (!persistenceKey || isMobile || !layoutHydrated) {
       return;
     }
     if (changesTabId) {
@@ -2965,7 +2995,7 @@ function useDiffTabNavigation({
       return;
     }
     openChanges();
-  }, [changesTabId, closeWorkspaceTab, isMobile, openChanges, persistenceKey]);
+  }, [changesTabId, closeWorkspaceTab, isMobile, layoutHydrated, openChanges, persistenceKey]);
   const openCommit = useCallback(
     (sha: string) => {
       if (persistenceKey) {
@@ -2976,10 +3006,15 @@ function useDiffTabNavigation({
   );
   return {
     changesTabOpen,
+    routeToTab,
+    // The toolbar toggle has nothing left to do once the preference routes every press: opening
+    // is what the next press does anyway, and closing is undone by it. The tab keeps its own
+    // close button in the tab bar, so hiding this does not strand an open tab.
+    changesTabToggleVisible: !(routeToTab && alwaysOpenInTab),
     openChanges,
     toggleChanges,
     openCommit,
-    onChangesFilePress: changesTabOpen ? openChanges : undefined,
+    onChangesFilePress: routeToTab ? openChanges : undefined,
   };
 }
 
@@ -2995,8 +3030,11 @@ export function GitDiffPane({
   const { t } = useTranslation();
   const isMobile = useIsCompactFormFactor();
   const canUseSplitLayout = isWeb && !isMobile;
-  const { preferences: changesPreferences, updatePreferences: updateChangesPreferences } =
-    useChangesPreferences();
+  const {
+    preferences: changesPreferences,
+    isLoading: changesPreferencesLoading,
+    updatePreferences: updateChangesPreferences,
+  } = useChangesPreferences();
   const wrapLines = changesPreferences.wrapLines;
   const viewMode = changesPreferences.viewMode;
   const effectiveLayout = resolveDiffLayout(changesPreferences.layout, canUseSplitLayout);
@@ -3038,10 +3076,19 @@ export function GitDiffPane({
   const fileManagerTarget = desktopOpenTargets.find((target) => target.kind === "file-manager");
   const {
     changesTabOpen,
+    routeToTab,
+    changesTabToggleVisible,
     toggleChanges: handleToggleChangesTab,
     openCommit: handleCommitPress,
     onChangesFilePress,
-  } = useDiffTabNavigation({ serverId, workspaceId, cwd, isMobile });
+  } = useDiffTabNavigation({
+    serverId,
+    workspaceId,
+    cwd,
+    isMobile,
+    alwaysOpenInTab: changesPreferences.alwaysOpenInTab,
+    preferencesLoaded: !changesPreferencesLoading,
+  });
   const refreshSupported = useSessionStore(
     (s) => s.sessions[serverId]?.serverInfo?.features?.checkoutRefresh === true,
   );
@@ -3093,6 +3140,9 @@ export function GitDiffPane({
     workspaceId: workspaceId ?? undefined,
     cwd,
     attachment: reviewAttachment,
+    // Keyed on the tab existing, NOT on routeToTab: the tab panel publishes only while it is
+    // mounted, so handing this to the preference would leave preference-on/tab-closed with no
+    // publisher at all and silently drop the composer's changes attachment.
     enabled: !changesTabOpen,
   });
   const {
@@ -3134,7 +3184,7 @@ export function GitDiffPane({
     cwd,
     files,
     viewMode,
-    changesTabOpen,
+    inlineDiffsSuppressed: routeToTab,
     onViewModeChange: handleViewModeChange,
   });
   const sharedDisplayPreferences = useMemo(
@@ -3325,10 +3375,11 @@ export function GitDiffPane({
             <View style={styles.diffStatusButtons}>
               <ChangesTabToggle
                 isMobile={isMobile}
+                visible={changesTabToggleVisible}
                 selected={changesTabOpen}
                 onPress={handleToggleChangesTab}
               />
-              {canUseSplitLayout && !changesTabOpen ? (
+              {canUseSplitLayout && !routeToTab ? (
                 <DiffLayoutToggle
                   layout={changesPreferences.layout}
                   isMobile={isMobile}
@@ -3344,10 +3395,11 @@ export function GitDiffPane({
                   onToggle={changesTree.toggleViewMode}
                 />
               ) : null}
-              {files.length > 0 && !changesTabOpen ? (
+              {files.length > 0 && !routeToTab ? (
                 <DiffFilesToolbar
                   allFileDiffsExpanded={changesTree.allExpanded}
                   isMobile={isMobile}
+                  testID="changes-toggle-expand-all"
                   expandAllToggleStyle={expandAllToggleStyle}
                   onToggleExpandAll={changesTree.toggleExpandAll}
                 />

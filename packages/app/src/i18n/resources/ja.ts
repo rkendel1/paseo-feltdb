@@ -1852,6 +1852,11 @@ export const ja: TranslationResources = {
         description: "組み込みターミナルバッファに保持する行数",
         accessibilityLabel: "ターミナルスクロールバック行数",
       },
+      alwaysOpenChangesInTab: {
+        label: "変更を常にタブで開く",
+        description:
+          "変更されたファイルをクリックすると、サイドバーで差分を展開する代わりに変更タブが開きます。",
+      },
       autoExpandReasoning: {
         label: "常に思考プロセスを展開",
         description: "デフォルトでAIのエージェント思考・推論ブロックを完全に展開して表示します",

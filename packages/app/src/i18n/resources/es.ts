@@ -1883,6 +1883,11 @@ export const es: TranslationResources = {
         description: "Líneas mantenidas en el búfer de terminal incorporado",
         accessibilityLabel: "Líneas del historial de terminal",
       },
+      alwaysOpenChangesInTab: {
+        label: "Abrir siempre Cambios en una pestaña",
+        description:
+          "Al hacer clic en un archivo modificado se abre la pestaña Cambios en lugar de expandir el diff en la barra lateral.",
+      },
       autoExpandReasoning: {
         label: "Siempre expandir razonamiento",
         description:

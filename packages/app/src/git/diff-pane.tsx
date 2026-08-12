@@ -1195,11 +1195,9 @@ const DiffFileHeader = memo(function DiffFileHeader({
         style={showDir ? styles.fileHeaderLeft : [styles.fileHeaderLeft, styles.fileHeaderLeftTree]}
       >
         {showDir ? null : <View style={styles.fileChevronSpacer} />}
-        {showDir ? null : (
-          <View style={styles.fileIcon}>
-            <MaterialFileIcon fileName={fileName} size={WORKSPACE_TREE_ICON_SIZE} />
-          </View>
-        )}
+        <View style={styles.fileIcon}>
+          <MaterialFileIcon fileName={fileName} size={WORKSPACE_TREE_ICON_SIZE} />
+        </View>
         <Text style={styles.fileName} numberOfLines={1}>
           {fileName}
         </Text>

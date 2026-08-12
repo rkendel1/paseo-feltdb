@@ -75,12 +75,13 @@ describe("wire schema compatibility", () => {
     ]);
   });
 
-  test("server info strips unknown legacy features while accepting former turn identity", () => {
+  test("server info accepts steering while old clients strip it", () => {
     const parsed = ServerInfoStatusPayloadSchema.parse({
       status: "server_info",
       serverId: "legacy-server",
       features: {
         workspaceGithubClone: true,
+        agentSteering: true,
         agentTurnIdentity: true,
       },
     });
@@ -90,7 +91,7 @@ describe("wire schema compatibility", () => {
       serverId: "legacy-server",
       hostname: null,
       version: null,
-      features: { agentTurnIdentity: true },
+      features: { agentSteering: true, agentTurnIdentity: true },
     });
   });
 
@@ -190,6 +191,7 @@ describe("wire schema compatibility", () => {
         supportsMcpServers: true,
         supportsReasoningStream: true,
         supportsToolInvocations: true,
+        supportsSteering: true,
         supportsRewindConversation: true,
         supportsRewindFiles: true,
         supportsRewindBoth: true,

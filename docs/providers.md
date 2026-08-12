@@ -64,6 +64,11 @@ and daemons remain wire-compatible; the provider remains the source of truth aft
 resume. A failed `getGoal()` refresh preserves the last provider projection because only a successful
 null lookup or `goal_changed(null)` is an authoritative clear.
 
+Mid-turn steering is an explicit optional `AgentSession.steer()` capability. Codex maps it to
+`turn/steer` with the active native turn ID as `expectedTurnId`; it must never fall back to
+interrupting or replacing the foreground turn. Clients gate the action on both the daemon's
+`agentSteering` server-info feature and the provider's `supportsSteering` capability.
+
 Claude first-party model metadata lives in `packages/server/src/server/agent/providers/claude/model-manifest.ts`. When adding or updating a Claude model, update that manifest only; the model picker thinking options and Claude-specific feature gates are derived from the manifest. Do not add model-specific Claude capability lists in feature code.
 
 Paseo tools are not implemented as MCP tools internally. They live in a shared tool catalog under `packages/server/src/server/agent/tools/`; MCP is only the fallback adapter. A provider that can register runtime tools directly should set `supportsNativePaseoTools: true` and consume `launchContext.paseoTools` in `createSession`/`resumeSession`. When native tools are present, `AgentManager` strips the internal Paseo MCP server from the provider launch config so the provider does not receive the same tools twice. Providers that only know MCP should keep `supportsMcpServers: true` and let the daemon inject `/mcp/agents`.

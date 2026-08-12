@@ -182,6 +182,7 @@ interface FakeSendCall {
     messageId: string;
     images: Array<{ data: string; mimeType: string }>;
     attachments: AgentAttachment[];
+    busyBehavior?: "replace" | "steer";
   };
 }
 
@@ -418,6 +419,27 @@ describe("pickAndPersistImages", () => {
 });
 
 describe("dispatchComposerAgentMessage", () => {
+  it("forwards explicit steering without changing the submitted message", async () => {
+    const client = createFakeSendClient();
+    const stream = createFakeStream();
+
+    await dispatchComposerAgentMessage({
+      client,
+      agentId: "agent",
+      text: "add this after the next tool call",
+      attachments: [],
+      busyBehavior: "steer",
+      encodeImages: passthroughEncodeImages,
+      submission: stream,
+    });
+
+    expect(client.calls[0]).toMatchObject({
+      agentId: "agent",
+      text: "add this after the next tool call",
+      options: { busyBehavior: "steer" },
+    });
+  });
+
   it("removes the submitted prompt when the host rejects it", async () => {
     const rejection = new Error("Host rejected prompt");
     const client = createFakeSendClient({ rejection });

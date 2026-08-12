@@ -4879,6 +4879,116 @@ test("waitForAgentRunStart resolves while a foreground run is still only pending
   expect(manager.getAgent(snapshot.id)?.lifecycle).toBe("idle");
 });
 
+test("steerAgent keeps the active run and records the steered prompt", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-steer-run-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const allowTurnToEnd = deferred<void>();
+
+  class SteeringSession extends TestAgentSession {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsSteering: true,
+    };
+    readonly steeredPrompts: Array<{
+      prompt: AgentPromptInput;
+      options: AgentRunOptions | undefined;
+    }> = [];
+    interruptCalls = 0;
+
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "turn-steer-1";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+        void allowTurnToEnd.promise.then(() => {
+          this.pushEvent({ type: "turn_completed", provider: this.provider, turnId });
+          return undefined;
+        });
+      }, 0);
+      return { turnId };
+    }
+
+    override async steer(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<void> {
+      this.steeredPrompts.push({ prompt, options });
+      this.pushEvent({
+        type: "timeline",
+        provider: this.provider,
+        turnId: "turn-steer-1",
+        item: {
+          type: "user_message",
+          text: typeof prompt === "string" ? prompt : "structured steer",
+          messageId: "provider-steer-message",
+          ...(options?.clientMessageId ? { clientMessageId: options.clientMessageId } : {}),
+        },
+      });
+    }
+
+    override async interrupt(): Promise<void> {
+      this.interruptCalls += 1;
+    }
+  }
+
+  const session = new SteeringSession({ provider: "codex", cwd: workdir });
+  const client = new (class extends TestAgentClient {
+    override async createSession(): Promise<AgentSession> {
+      return session;
+    }
+  })();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000131",
+  });
+
+  try {
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    const run = manager.streamAgent(snapshot.id, "original task");
+    const drainRun = (async () => {
+      for await (const _event of run) {
+        // Keep the foreground stream subscribed until its terminal event.
+      }
+    })();
+    await manager.waitForAgentRunStart(snapshot.id);
+
+    await manager.steerAgent(snapshot.id, "follow this after the next tool call", {
+      clientMessageId: "steer-client-message",
+    });
+
+    expect(session.steeredPrompts).toEqual([
+      {
+        prompt: "follow this after the next tool call",
+        options: { clientMessageId: "steer-client-message" },
+      },
+    ]);
+    expect(session.interruptCalls).toBe(0);
+    expect(manager.getAgent(snapshot.id)?.lifecycle).toBe("running");
+    const timelineRows = manager.fetchTimeline(snapshot.id, {
+      direction: "tail",
+      limit: 20,
+    }).rows;
+    expect(timelineRows).toHaveLength(1);
+    expect(timelineRows.at(-1)).toMatchObject({
+      providerMessageId: "provider-steer-message",
+      item: {
+        type: "user_message",
+        text: "follow this after the next tool call",
+        clientMessageId: "steer-client-message",
+        messageId: "steer-client-message",
+      },
+    });
+
+    allowTurnToEnd.resolve();
+    await drainRun;
+  } finally {
+    allowTurnToEnd.resolve();
+    await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("replaceAgentRun does not emit idle or resolve waiters between interrupted and replacement runs", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-replace-run-"));
   const storagePath = join(workdir, "agents");

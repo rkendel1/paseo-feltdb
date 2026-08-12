@@ -1349,6 +1349,79 @@ describe("Codex app-server provider", () => {
     await session.close();
   });
 
+  test("steers the active Codex turn without interrupting or starting a replacement", async () => {
+    const steeredTurns: unknown[] = [];
+    const interruptedTurns: unknown[] = [];
+    const startedTurns: unknown[] = [];
+    const appServer = createFakeCodexAppServer({
+      "turn/start": async (params) => {
+        startedTurns.push(params);
+        return {};
+      },
+      "turn/steer": async (params) => {
+        steeredTurns.push(params);
+        return {};
+      },
+      "turn/interrupt": async (params) => {
+        interruptedTurns.push(params);
+        return {};
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    try {
+      expect(session.capabilities.supportsSteering).toBe(true);
+      const resultPromise = session.run("Keep working on the original task.");
+      await appServer.waitForTurnStart();
+
+      const steerPromise = session.steer?.("Apply this after the next tool call.", {
+        clientMessageId: "client-steer-message",
+      });
+      appServer.startsTurn({ threadId: "thread-1", turnId: "turn-steered" });
+      await steerPromise;
+
+      expect(steeredTurns).toEqual([
+        {
+          threadId: "thread-1",
+          input: [
+            {
+              type: "text",
+              text: "Apply this after the next tool call.",
+              text_elements: [],
+            },
+          ],
+          expectedTurnId: "turn-steered",
+        },
+      ]);
+      expect(interruptedTurns).toEqual([]);
+      expect(startedTurns).toHaveLength(1);
+
+      const userMessage = waitForNextTimelineItem(session, "user_message");
+      emitCodexUserMessage(appServer, {
+        id: "codex-steer-message",
+        text: "Apply this after the next tool call.",
+      });
+      await expect(userMessage).resolves.toMatchObject({
+        item: {
+          type: "user_message",
+          messageId: "codex-steer-message",
+          clientMessageId: "client-steer-message",
+        },
+      });
+
+      appServer.completeTurn();
+      await resultPromise;
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
   test("configures Codex app-server to use a custom provider base URL", async () => {
     const capturedRequests = await runCustomCodexProviderTurn(
       "codex-iisb",

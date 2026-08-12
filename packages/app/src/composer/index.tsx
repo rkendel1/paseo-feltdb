@@ -250,6 +250,7 @@ function buildAgentStateSelector(serverId: string, agentId: string) {
       totalCostUsd: agent?.lastUsage?.totalCostUsd ?? null,
       model: agent?.model ?? null,
       provider: agent?.provider ?? null,
+      supportsSteering: agent?.capabilities.supportsSteering === true,
     };
   };
 }
@@ -359,9 +360,8 @@ interface RenderQueueTrackArgs {
   queuedMessages: readonly QueuedMessage[];
   handleSendQueuedNow: (id: string) => Promise<void>;
   handleRemoveQueuedMessage: (id: string) => void;
-  steerLabel: string;
+  actionLabel: string;
   removeLabel: string;
-  sendNowLabel: string;
 }
 
 function renderQueueTrack(args: RenderQueueTrackArgs): ReactElement | null {
@@ -369,9 +369,8 @@ function renderQueueTrack(args: RenderQueueTrackArgs): ReactElement | null {
     queuedMessages,
     handleSendQueuedNow,
     handleRemoveQueuedMessage,
-    steerLabel,
+    actionLabel,
     removeLabel,
-    sendNowLabel,
   } = args;
   if (queuedMessages.length === 0) return null;
   return (
@@ -383,9 +382,8 @@ function renderQueueTrack(args: RenderQueueTrackArgs): ReactElement | null {
           isLast={index === queuedMessages.length - 1}
           onSendNow={handleSendQueuedNow}
           onRemove={handleRemoveQueuedMessage}
-          steerLabel={steerLabel}
+          actionLabel={actionLabel}
           removeLabel={removeLabel}
-          sendNowLabel={sendNowLabel}
         />
       ))}
     </View>
@@ -581,9 +579,8 @@ interface QueuedMessageRowProps {
   isLast: boolean;
   onSendNow: (id: string) => void;
   onRemove: (id: string) => void;
-  steerLabel: string;
+  actionLabel: string;
   removeLabel: string;
-  sendNowLabel: string;
 }
 
 function QueuedMessageRow({
@@ -591,9 +588,8 @@ function QueuedMessageRow({
   isLast,
   onSendNow,
   onRemove,
-  steerLabel,
+  actionLabel,
   removeLabel,
-  sendNowLabel,
 }: QueuedMessageRowProps) {
   const handleSendNow = useCallback(() => {
     onSendNow(item.id);
@@ -613,11 +609,11 @@ function QueuedMessageRow({
         <Pressable
           onPress={handleSendNow}
           style={[styles.queueActionButton, styles.queueSteerButton]}
-          accessibilityLabel={sendNowLabel}
+          accessibilityLabel={actionLabel}
           accessibilityRole="button"
         >
           <ThemedCornerDownRight size={ICON_SIZE.xs} uniProps={iconForegroundMutedMapping} />
-          <Text style={styles.queueSteerText}>{steerLabel}</Text>
+          <Text style={styles.queueSteerText}>{actionLabel}</Text>
         </Pressable>
         <Pressable
           onPress={handleRemove}
@@ -1156,6 +1152,9 @@ export function Composer({
   const supportsForgeSearch = useSessionStore(
     (state) => state.sessions[serverId]?.serverInfo?.features?.forgeSearch === true,
   );
+  const supportsAgentSteeringProtocol = useSessionStore(
+    (state) => state.sessions[serverId]?.serverInfo?.features?.agentSteering === true,
+  );
   const githubAutoAttach = useComposerGithubAutoAttach({
     text: userInput,
     remoteUrl: resolveCheckoutRemoteUrl(checkoutStatusQuery.status),
@@ -1250,7 +1249,13 @@ export function Composer({
   const { pickFiles } = useFilePicker();
   const agentIdRef = useRef(agentId);
   const sendAgentMessageRef = useRef<
-    ((agentId: string, text: string, attachments: ComposerAttachment[]) => Promise<void>) | null
+    | ((
+        agentId: string,
+        text: string,
+        attachments: ComposerAttachment[],
+        busyBehavior?: "replace" | "steer",
+      ) => Promise<void>)
+    | null
   >(null);
   const onSubmitMessageRef = useRef(onSubmitMessage);
 
@@ -1302,16 +1307,25 @@ export function Composer({
   }, [focusInput, onFocusInput]);
 
   const submitMessage = useCallback(
-    async (text: string, submitAttachments: ComposerAttachment[]) => {
+    async (
+      text: string,
+      submitAttachments: ComposerAttachment[],
+      busyBehavior?: "replace" | "steer",
+    ) => {
       onMessageSent?.();
       if (onSubmitMessageRef.current) {
-        await onSubmitMessageRef.current({ text, attachments: submitAttachments, cwd });
+        await onSubmitMessageRef.current({
+          text,
+          attachments: submitAttachments,
+          cwd,
+          busyBehavior,
+        });
         return;
       }
       if (!sendAgentMessageRef.current) {
         throw new Error(t("workspace.terminal.hostDisconnected"));
       }
-      await sendAgentMessageRef.current(agentIdRef.current, text, submitAttachments);
+      await sendAgentMessageRef.current(agentIdRef.current, text, submitAttachments, busyBehavior);
     },
     [cwd, onMessageSent, t],
   );
@@ -1325,6 +1339,7 @@ export function Composer({
       targetAgentId: string,
       text: string,
       sendAttachments: ComposerAttachment[],
+      busyBehavior?: "replace" | "steer",
     ) => {
       if (!client) {
         throw new Error(t("workspace.terminal.hostDisconnected"));
@@ -1334,6 +1349,7 @@ export function Composer({
         agentId: targetAgentId,
         text,
         attachments: sendAttachments,
+        busyBehavior,
         attachmentSubmitFormat: resolveComposerAttachmentSubmitFormat({
           supportsForgeAttachments: supportsForgeSearch,
         }),
@@ -1358,6 +1374,8 @@ export function Composer({
   const settleAgentCancellation = useSessionStore((state) => state.settleAgentCancellation);
   const isAgentRunning = hasActiveTurn;
   const hasAgent = agentState.status !== null;
+  const canSteerQueuedMessage =
+    supportsAgentSteeringProtocol && agentState.supportsSteering && isAgentRunning;
 
   const queueWriter = useMemo<QueueWriter>(
     () => ({
@@ -1702,20 +1720,19 @@ export function Composer({
   const handleSendQueuedNow = useCallback(
     async (id: string) => {
       if (!sendAgentMessageRef.current && !onSubmitMessageRef.current) return;
-      // Reuse the regular send path; server-side send atomically interrupts any active run.
       const result = await sendQueuedComposerMessageNow({
         agentId,
         messageId: id,
         queue: queueWriter,
         submitMessage: ({ text, attachments: queuedAttachments }) =>
-          submitMessage(text, queuedAttachments),
+          submitMessage(text, queuedAttachments, canSteerQueuedMessage ? "steer" : "replace"),
         failedToSendMessage: t("composer.errors.failedToSend"),
       });
       if (result.status === "failed") {
         setSendError(result.errorMessage);
       }
     },
-    [agentId, queueWriter, submitMessage, t],
+    [agentId, canSteerQueuedMessage, queueWriter, submitMessage, t],
   );
 
   const handleRemoveQueuedMessage = useCallback(
@@ -2089,11 +2106,12 @@ export function Composer({
         queuedMessages,
         handleSendQueuedNow,
         handleRemoveQueuedMessage,
-        steerLabel: t("composer.attachments.steerQueuedMessage"),
+        actionLabel: canSteerQueuedMessage
+          ? t("composer.attachments.steerQueuedMessage")
+          : t("composer.attachments.sendQueuedMessageNow"),
         removeLabel: t("composer.attachments.removeQueuedMessage"),
-        sendNowLabel: t("composer.attachments.sendQueuedMessageNow"),
       }),
-    [handleRemoveQueuedMessage, handleSendQueuedNow, queuedMessages, t],
+    [canSteerQueuedMessage, handleRemoveQueuedMessage, handleSendQueuedNow, queuedMessages, t],
   );
   const contextTray = useMemo(
     () =>

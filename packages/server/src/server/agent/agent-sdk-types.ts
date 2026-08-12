@@ -1,6 +1,7 @@
 import type {
   AgentGoal,
   AgentProviderNotice,
+  AgentTaskItem,
   ProviderOptions,
   ToolPolicy,
 } from "@getpaseo/protocol/agent-types";
@@ -11,6 +12,7 @@ export type {
   AgentGoal,
   AgentGoalStatus,
   AgentProviderNotice,
+  AgentTaskItem,
 } from "@getpaseo/protocol/agent-types";
 
 export type AgentProvider = string;
@@ -388,7 +390,7 @@ export type AgentTimelineItem =
   | { type: "assistant_message"; text: string; messageId?: string }
   | { type: "reasoning"; text: string }
   | ToolCallTimelineItem
-  | { type: "todo"; items: { text: string; completed: boolean }[] }
+  | { type: "todo"; items: AgentTaskItem[] }
   | { type: "error"; message: string }
   | CompactionTimelineItem;
 

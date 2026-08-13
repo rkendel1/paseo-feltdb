@@ -94,8 +94,10 @@ import {
   useSubagentsForParent,
 } from "@/subagents";
 import { SubagentsTrack } from "@/subagents/track";
+import { GoalTrack } from "@/goals/track";
+import type { GoalAction } from "@/goals/presentation";
 import type { PendingPermission } from "@/types/shared";
-import type { StreamItem } from "@/types/stream";
+import { generateMessageId, type StreamItem } from "@/types/stream";
 import { getInitDeferred, getInitKey } from "@/utils/agent-initialization";
 import { derivePendingPermissionKey, normalizeAgentSnapshot } from "@/utils/agent-snapshots";
 import { applyLegacyDaemonWorkspaceOwnership } from "@/workspace/legacy-daemon-workspaces";
@@ -1502,6 +1504,27 @@ function ActiveAgentComposer({
   const closeWorkspaceTab = useWorkspaceLayoutStore((state) => state.closeTab);
   const hideWorkspaceAgent = useWorkspaceLayoutStore((state) => state.hideAgent);
   const unpinWorkspaceAgent = useWorkspaceLayoutStore((state) => state.unpinAgent);
+  const client = useHostRuntimeClient(serverId);
+  const goal = useSessionStore(
+    (state) => resolveChatAgentFromSession(state, serverId, agentId)?.goal ?? null,
+  );
+  const handleGoalAction = useCallback(
+    async (action: GoalAction) => {
+      if (!client) {
+        throw new Error("Host disconnected");
+      }
+      await client.sendAgentMessage(agentId, `/goal ${action}`, {
+        messageId: generateMessageId(),
+        images: [],
+        attachments: [],
+      });
+    },
+    [agentId, client],
+  );
+  const goalTrayFooter = useMemo(
+    () => (goal ? <GoalTrack goal={goal} onAction={handleGoalAction} /> : null),
+    [goal, handleGoalAction],
+  );
   const subagentRows = useSubagentsForParent({
     serverId,
     parentAgentId: agentId,
@@ -1645,6 +1668,7 @@ function ActiveAgentComposer({
         onMessageSent={onMessageSent}
         onClientSlashCommand={handleClientSlashCommand}
         isCompactLayout={isCompactComposerLayout}
+        contextTrayFooter={goalTrayFooter}
       />
     </ReanimatedAnimated.View>
   );

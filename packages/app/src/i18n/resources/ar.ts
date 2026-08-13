@@ -126,6 +126,8 @@ export const ar: TranslationResources = {
       dropImagesHere: "إسقاط الصور هنا",
       dropFilesHere: "Drop files here",
       editQueuedMessage: "تحرير الرسالة في قائمة الانتظار",
+      steerQueuedMessage: "توجيه",
+      removeQueuedMessage: "إزالة الرسالة من قائمة الانتظار",
       sendQueuedMessageNow: "إرسال رسالة في قائمة الانتظار الآن",
       openImage: "فتح مرفق الصورة",
       removeImage: "إزالة مرفق الصورة",
@@ -1615,6 +1617,17 @@ export const ar: TranslationResources = {
     archiveTooltip: "أرشفة الوكيل الفرعي",
     archiveFinishedAction: "أرشفة الوكلاء الفرعيين المكتملين",
     archiveFinishedTooltip: "أرشفة المكتملين",
+  },
+  goals: {
+    status: {
+      active: "متابعة الهدف",
+      paused: "متوقف مؤقتًا",
+      blocked: "محظور",
+      usageLimited: "تم بلوغ حد الاستخدام",
+      budgetLimited: "تم بلوغ حد الميزانية",
+      complete: "مكتمل",
+    },
+    actions: { pause: "إيقاف مؤقت", resume: "استئناف", clear: "مسح" },
   },
   panels: {
     draft: {

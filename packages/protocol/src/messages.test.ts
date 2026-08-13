@@ -53,6 +53,23 @@ describe("project icon message security", () => {
   });
 });
 
+describe("agent message steering contract", () => {
+  test("accepts explicit steering while preserving legacy requests", () => {
+    const baseRequest = {
+      type: "send_agent_message_request",
+      requestId: "request-1",
+      agentId: "agent-1",
+      text: "continue after the next tool call",
+      attachments: [],
+    };
+
+    expect(SessionInboundMessageSchema.parse(baseRequest)).not.toHaveProperty("busyBehavior");
+    expect(
+      SessionInboundMessageSchema.parse({ ...baseRequest, busyBehavior: "steer" }),
+    ).toMatchObject({ busyBehavior: "steer" });
+  });
+});
+
 describe("workspace descriptor message compatibility", () => {
   test("old-shaped fetch_workspaces_response without project still parses", () => {
     const parsed = SessionOutboundMessageSchema.parse(

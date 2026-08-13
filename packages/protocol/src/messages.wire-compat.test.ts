@@ -75,12 +75,13 @@ describe("wire schema compatibility", () => {
     ]);
   });
 
-  test("server info strips unknown legacy features while accepting former turn identity", () => {
+  test("server info accepts steering while old clients strip it", () => {
     const parsed = ServerInfoStatusPayloadSchema.parse({
       status: "server_info",
       serverId: "legacy-server",
       features: {
         workspaceGithubClone: true,
+        agentSteering: true,
         agentTurnIdentity: true,
       },
     });
@@ -90,7 +91,7 @@ describe("wire schema compatibility", () => {
       serverId: "legacy-server",
       hostname: null,
       version: null,
-      features: { agentTurnIdentity: true },
+      features: { agentSteering: true, agentTurnIdentity: true },
     });
   });
 
@@ -190,6 +191,7 @@ describe("wire schema compatibility", () => {
         supportsMcpServers: true,
         supportsReasoningStream: true,
         supportsToolInvocations: true,
+        supportsSteering: true,
         supportsRewindConversation: true,
         supportsRewindFiles: true,
         supportsRewindBoth: true,
@@ -243,5 +245,42 @@ describe("wire schema compatibility", () => {
     expect(parsed.capabilities.supportsRewindConversation).toBe(false);
     expect(parsed.capabilities.supportsRewindFiles).toBe(false);
     expect(parsed.capabilities.supportsRewindBoth).toBe(false);
+    expect(parsed.goal).toBeUndefined();
+  });
+
+  test("goal state is optional and preserves non-color-only status", () => {
+    const parsed = AgentSnapshotPayloadSchema.parse({
+      id: "agent-1",
+      provider: "codex",
+      cwd: "/tmp/project",
+      model: null,
+      createdAt: "2026-08-10T00:00:00.000Z",
+      updatedAt: "2026-08-10T00:00:00.000Z",
+      lastUserMessageAt: null,
+      status: "idle",
+      capabilities: {
+        supportsStreaming: true,
+        supportsSessionPersistence: true,
+        supportsDynamicModes: false,
+        supportsMcpServers: true,
+        supportsReasoningStream: true,
+        supportsToolInvocations: true,
+      },
+      currentModeId: null,
+      availableModes: [],
+      pendingPermissions: [],
+      persistence: null,
+      title: null,
+      labels: {},
+      goal: {
+        objective: "Ship persistent goal controls",
+        status: "blocked",
+        tokenBudget: null,
+        tokensUsed: 12,
+        timeUsedSeconds: 5,
+      },
+    });
+
+    expect(parsed.goal).toMatchObject({ status: "blocked" });
   });
 });

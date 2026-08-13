@@ -48,6 +48,7 @@ export interface ComposerSendClient {
     text: string,
     options: {
       messageId: string;
+      busyBehavior?: "replace" | "steer";
       images: Array<{ data: string; mimeType: string }>;
       attachments: ReturnType<typeof splitComposerAttachmentsForSubmit>["attachments"];
     },
@@ -171,6 +172,7 @@ export interface DispatchComposerAgentMessageInput {
   agentId: string;
   text: string;
   attachments: ComposerAttachment[];
+  busyBehavior?: "replace" | "steer";
   attachmentSubmitFormat?: ComposerAttachmentSubmitFormat;
   encodeImages: (
     images: AttachmentMetadata[],
@@ -197,6 +199,7 @@ export async function dispatchComposerAgentMessage(
     const imagesData = await input.encodeImages(wirePayload.images);
     await input.client.sendAgentMessage(input.agentId, input.text, {
       messageId: clientMessageId,
+      ...(input.busyBehavior ? { busyBehavior: input.busyBehavior } : {}),
       images: imagesData ?? [],
       attachments: wirePayload.attachments,
     });
@@ -265,6 +268,24 @@ export function editQueuedComposerMessage(
     text: item.text,
     attachments: userAttachmentsOnly(item.attachments),
   };
+}
+
+export function removeQueuedComposerMessage(input: {
+  agentId: string;
+  messageId: string;
+  queue: QueueWriter;
+}): QueuedComposerMessage | null {
+  const item = input.queue.read(input.agentId).find((queued) => queued.id === input.messageId);
+  if (!item) return null;
+  input.queue.write((prev) => {
+    const next = new Map(prev);
+    next.set(
+      input.agentId,
+      (prev.get(input.agentId) ?? []).filter((queued) => queued.id !== input.messageId),
+    );
+    return next;
+  });
+  return item;
 }
 
 export interface SendQueuedComposerMessageNowInput {

@@ -5,6 +5,7 @@ import {
   type AgentClient,
   type AgentCreateSessionOptions,
   type AgentFeature,
+  type AgentGoal,
   type AgentLaunchContext,
   type AgentResumeSessionOptions,
   type AgentMode,
@@ -211,6 +212,7 @@ const CODEX_APP_SERVER_CAPABILITIES: AgentCapabilityFlags = {
   supportsMcpServers: true,
   supportsReasoningStream: true,
   supportsToolInvocations: true,
+  supportsSteering: true,
   supportsRewindConversation: true,
   supportsRewindFiles: false,
   supportsRewindBoth: false,
@@ -2048,6 +2050,25 @@ const ThreadStartedNotificationSchema = z
   })
   .passthrough();
 
+const CodexGoalSchema = z.object({
+  objective: z.string(),
+  status: z.enum(["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"]),
+  tokenBudget: z.number().nullable(),
+  tokensUsed: z.number(),
+  timeUsedSeconds: z.number(),
+});
+
+const ThreadGoalUpdatedNotificationSchema = z
+  .object({
+    threadId: z.string(),
+    goal: CodexGoalSchema,
+  })
+  .passthrough();
+
+const ThreadGoalClearedNotificationSchema = z.object({ threadId: z.string() }).passthrough();
+
+const ThreadGoalGetResponseSchema = z.object({ goal: CodexGoalSchema.nullable() }).passthrough();
+
 const TurnStartedNotificationSchema = z
   .object({
     threadId: z.string().optional(),
@@ -2333,6 +2354,8 @@ const CodexEventThreadRolledBackNotificationSchema = z
 
 type ParsedCodexNotification =
   | { kind: "thread_started"; threadId: string }
+  | { kind: "goal_updated"; threadId: string; goal: AgentGoal }
+  | { kind: "goal_cleared"; threadId: string }
   | { kind: "turn_started"; turnId: string; threadId: string | null }
   | {
       kind: "turn_completed";
@@ -2461,6 +2484,43 @@ const CodexNotificationSchema = z.union([
       }),
     ),
   z.object({ method: z.literal("thread/started"), params: z.unknown() }).transform(
+    ({ method, params }): ParsedCodexNotification => ({
+      kind: "invalid_payload",
+      method,
+      params,
+    }),
+  ),
+  z
+    .object({
+      method: z.literal("thread/goal/updated"),
+      params: ThreadGoalUpdatedNotificationSchema,
+    })
+    .transform(
+      ({ params }): ParsedCodexNotification => ({
+        kind: "goal_updated",
+        threadId: params.threadId,
+        goal: params.goal,
+      }),
+    ),
+  z.object({ method: z.literal("thread/goal/updated"), params: z.unknown() }).transform(
+    ({ method, params }): ParsedCodexNotification => ({
+      kind: "invalid_payload",
+      method,
+      params,
+    }),
+  ),
+  z
+    .object({
+      method: z.literal("thread/goal/cleared"),
+      params: ThreadGoalClearedNotificationSchema,
+    })
+    .transform(
+      ({ params }): ParsedCodexNotification => ({
+        kind: "goal_cleared",
+        threadId: params.threadId,
+      }),
+    ),
+  z.object({ method: z.literal("thread/goal/cleared"), params: z.unknown() }).transform(
     ({ method, params }): ParsedCodexNotification => ({
       kind: "invalid_payload",
       method,
@@ -3201,6 +3261,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   private nextTurnOrdinal = 0;
   private activeForegroundTurnId: string | null = null;
   private activeClientMessageId: string | null = null;
+  private pendingSteerClientMessageIds: string[] = [];
   private cachedRuntimeInfo: AgentRuntimeInfo | null = null;
   private serviceTier: "fast" | null = null;
   private planModeEnabled = false;
@@ -3437,6 +3498,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     this.activeForegroundTurnId = null;
     this.activeClientMessageId = null;
+    this.pendingSteerClientMessageIds.length = 0;
     this.currentTurnId = null;
     this.pendingForegroundTurnIdentification?.resolve(null);
     this.pendingForegroundTurnIdentification = null;
@@ -4030,6 +4092,13 @@ export class CodexAppServerAgentSession implements AgentSession {
     });
   }
 
+  private async buildEffectivePromptInput(prompt: AgentPromptInput): Promise<CodexPromptInput> {
+    const slashCommand = await this.resolveSlashCommandInvocation(prompt);
+    return slashCommand
+      ? await this.buildCommandPromptInput(slashCommand.commandName, slashCommand.args)
+      : prompt;
+  }
+
   async startTurn(
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
@@ -4046,10 +4115,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         throw new Error("Codex client not initialized");
       }
 
-      const slashCommand = await this.resolveSlashCommandInvocation(prompt);
-      const effectivePrompt = slashCommand
-        ? await this.buildCommandPromptInput(slashCommand.commandName, slashCommand.args)
-        : prompt;
+      const effectivePrompt = await this.buildEffectivePromptInput(prompt);
 
       if (this.currentThreadId) {
         await this.ensureThreadLoaded();
@@ -4089,6 +4155,52 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.pendingForegroundTurnIdentification = null;
       this.activeForegroundTurnId = null;
       this.activeClientMessageId = null;
+      throw error;
+    }
+  }
+
+  async steer(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<void> {
+    await this.connect();
+    if (!this.client) {
+      throw new Error("Codex client not initialized");
+    }
+    if (!this.currentThreadId) {
+      throw new Error("Cannot steer Codex without an active thread");
+    }
+
+    const foregroundTurnId = this.activeForegroundTurnId;
+    if (!foregroundTurnId) {
+      throw new Error("Cannot steer Codex without an active foreground turn");
+    }
+
+    let turnId = this.currentTurnId;
+    const pendingIdentification = this.pendingForegroundTurnIdentification;
+    if (!turnId && pendingIdentification?.foregroundTurnId === foregroundTurnId) {
+      turnId = await pendingIdentification.promise;
+    }
+    if (!turnId || this.activeForegroundTurnId !== foregroundTurnId) {
+      throw new Error("Cannot steer Codex before turn/started identifies the active turn");
+    }
+
+    const effectivePrompt = await this.buildEffectivePromptInput(prompt);
+    const input = await this.buildUserInput(effectivePrompt);
+    const clientMessageId = options?.clientMessageId ?? null;
+    if (clientMessageId) {
+      this.pendingSteerClientMessageIds.push(clientMessageId);
+    }
+    try {
+      await this.client.request("turn/steer", {
+        threadId: this.currentThreadId,
+        input,
+        expectedTurnId: turnId,
+      });
+    } catch (error) {
+      if (clientMessageId) {
+        const pendingIndex = this.pendingSteerClientMessageIds.indexOf(clientMessageId);
+        if (pendingIndex >= 0) {
+          this.pendingSteerClientMessageIds.splice(pendingIndex, 1);
+        }
+      }
       throw error;
     }
   }
@@ -4180,6 +4292,23 @@ export class CodexAppServerAgentSession implements AgentSession {
     };
     this.cachedRuntimeInfo = info;
     return { ...info };
+  }
+
+  async getGoal(): Promise<AgentGoal | null> {
+    if (!this.goalsEnabled) return null;
+    await this.connect();
+    if (this.currentThreadId) {
+      await this.ensureThreadLoaded();
+    } else {
+      await this.ensureThread();
+    }
+    if (!this.client || !this.currentThreadId) {
+      throw new Error("Codex thread is not available");
+    }
+    const response = await this.client.request("thread/goal/get", {
+      threadId: this.currentThreadId,
+    });
+    return ThreadGoalGetResponseSchema.parse(response).goal;
   }
 
   async getAvailableModes(): Promise<AgentMode[]> {
@@ -4511,6 +4640,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.subscribers.clear();
     this.activeForegroundTurnId = null;
     this.activeClientMessageId = null;
+    this.pendingSteerClientMessageIds.length = 0;
     this.pendingForegroundTurnIdentification?.resolve(null);
     this.pendingForegroundTurnIdentification = null;
     await this.disposeClient();
@@ -4950,6 +5080,12 @@ export class CodexAppServerAgentSession implements AgentSession {
       return;
     }
     switch (parsed.kind) {
+      case "goal_updated":
+        this.emitEvent({ type: "goal_changed", provider: CODEX_PROVIDER, goal: parsed.goal });
+        return;
+      case "goal_cleared":
+        this.emitEvent({ type: "goal_changed", provider: CODEX_PROVIDER, goal: null });
+        return;
       case "thread_started":
         this.handleThreadStartedNotification(parsed);
         return;
@@ -5624,6 +5760,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     this.activeForegroundTurnId = null;
     this.activeClientMessageId = null;
+    this.pendingSteerClientMessageIds.length = 0;
     this.currentTurnId = null;
     this.pendingForegroundTurnIdentification?.resolve(null);
     this.pendingForegroundTurnIdentification = null;
@@ -6228,10 +6365,11 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (!this.rememberCodexUserMessageTurn(timelineItem.messageId)) {
       return;
     }
-    const item = this.activeClientMessageId
-      ? { ...timelineItem, clientMessageId: this.activeClientMessageId }
-      : timelineItem;
-    this.activeClientMessageId = null;
+    const clientMessageId = this.activeClientMessageId ?? this.pendingSteerClientMessageIds.shift();
+    const item = clientMessageId ? { ...timelineItem, clientMessageId } : timelineItem;
+    if (this.activeClientMessageId) {
+      this.activeClientMessageId = null;
+    }
     this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item });
   }
 

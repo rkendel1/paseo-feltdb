@@ -24,6 +24,7 @@ import {
   type AgentCreateSessionOptions,
   type AgentResumeSessionOptions,
   type AgentFeature,
+  type AgentGoal,
   type AgentLaunchContext,
   type AgentSlashCommand,
   type AgentMode,
@@ -320,6 +321,18 @@ interface StreamEventFlags {
   shouldNotifyWaiters: boolean;
 }
 
+function areAgentGoalsEqual(left: AgentGoal | null, right: AgentGoal | null): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return (
+    left.objective === right.objective &&
+    left.status === right.status &&
+    left.tokenBudget === right.tokenBudget &&
+    left.tokensUsed === right.tokensUsed &&
+    left.timeUsedSeconds === right.timeUsedSeconds
+  );
+}
+
 type ActiveTurnTerminalDisposition = "closed_current" | "stale" | "untracked";
 
 interface HandleStreamEventOptions {
@@ -340,6 +353,7 @@ interface ManagedAgentBase {
   capabilities: AgentCapabilityFlags;
   config: AgentSessionConfig;
   runtimeInfo?: AgentRuntimeInfo;
+  goal?: AgentGoal | null;
   createdAt: Date;
   updatedAt: Date;
   availableModes: AgentMode[];
@@ -645,6 +659,10 @@ export class AgentManager {
   private readonly providerSubagents = new ProviderSubagentStore();
   private readonly agentsAwaitingInitialSnapshotPersist = new Set<string>();
   private readonly sessionEventTails = new Map<string, Promise<void>>();
+  private readonly pendingSteerEchoes = new Map<
+    string,
+    Map<string, Array<Extract<AgentStreamEvent, { type: "timeline" }>>>
+  >();
   private readonly runs = new AgentRunState();
   private readonly subscribers = new Set<SubscriptionRecord>();
   private readonly idFactory: () => string;
@@ -1636,6 +1654,7 @@ export class AgentManager {
         capabilities: STORED_AGENT_CAPABILITIES,
         config: buildStoredAgentConfig(record),
         runtimeInfo: undefined,
+        goal: null,
         lifecycle: "closed",
         createdAt: new Date(record.createdAt),
         updatedAt,
@@ -2077,6 +2096,46 @@ export class AgentManager {
       }
     })();
     return true;
+  }
+
+  async steerAgent(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+  ): Promise<void> {
+    const agent = this.requireSessionAgent(agentId);
+    if (!this.hasInFlightRun(agentId) || !agent.activeForegroundTurnId) {
+      throw new Error(`Agent ${agentId} has no active foreground turn to steer`);
+    }
+    if (!agent.session.steer || agent.capabilities.supportsSteering !== true) {
+      throw new Error(`Agent provider ${agent.provider} does not support steering`);
+    }
+
+    const clientMessageId = options?.clientMessageId;
+    if (clientMessageId) {
+      this.beginPendingSteerEcho(agentId, clientMessageId);
+    }
+    try {
+      await agent.session.steer(prompt, options);
+      if (clientMessageId) {
+        const stagedEchoes = this.takePendingSteerEchoes(agentId, clientMessageId);
+        const providerMessageId = stagedEchoes
+          .map((event) => (event.item.type === "user_message" ? event.item.messageId : undefined))
+          .find((messageId) => messageId !== undefined);
+        this.recordSubmittedPrompt(agent, prompt, clientMessageId, {
+          messageId: clientMessageId,
+          providerMessageId,
+        });
+        this.emitState(agent);
+      }
+    } catch (error) {
+      if (clientMessageId) {
+        for (const event of this.takePendingSteerEchoes(agentId, clientMessageId)) {
+          this.enqueueSessionEvent(agentId, event);
+        }
+      }
+      throw error;
+    }
   }
 
   async appendTimelineItem(agentId: string, item: AgentTimelineItem): Promise<void> {
@@ -3086,6 +3145,7 @@ export class AgentManager {
       capabilities: session.capabilities,
       config,
       runtimeInfo: undefined,
+      goal: null,
       lifecycle: "initializing",
       createdAt: options?.createdAt ?? now,
       updatedAt: options?.updatedAt ?? now,
@@ -3134,6 +3194,7 @@ export class AgentManager {
     cancelReason: string,
   ): ManagedAgentClosed {
     this.agentStreamCoalescer.flushAndDiscard(agent.id);
+    this.pendingSteerEchoes.delete(agent.id);
     this.agents.delete(agent.id);
     this.previousStatuses.delete(agent.id);
     if (agent.unsubscribeSession) {
@@ -3165,6 +3226,7 @@ export class AgentManager {
   }
 
   private discardRetainedAgentState(agentId: string): void {
+    this.pendingSteerEchoes.delete(agentId);
     this.timelineStore.delete(agentId);
     for (const event of this.providerSubagents.deleteParent(agentId)) {
       this.dispatch({ type: "provider_subagent", event });
@@ -3200,6 +3262,17 @@ export class AgentManager {
     if (pendingRun && !pendingRun.started) {
       pendingRun.stagedEvents.push(event);
       return;
+    }
+    if (
+      event.type === "timeline" &&
+      event.item.type === "user_message" &&
+      event.item.clientMessageId
+    ) {
+      const stagedEchoes = this.pendingSteerEchoes.get(agentId)?.get(event.item.clientMessageId);
+      if (stagedEchoes) {
+        stagedEchoes.push(event);
+        return;
+      }
     }
     const previous = this.sessionEventTails.get(agentId) ?? Promise.resolve();
     const next = previous
@@ -3239,6 +3312,28 @@ export class AgentManager {
         this.sessionEventTails.delete(agentId);
       }
     });
+  }
+
+  private beginPendingSteerEcho(agentId: string, clientMessageId: string): void {
+    const byClientMessageId = this.pendingSteerEchoes.get(agentId) ?? new Map();
+    if (byClientMessageId.has(clientMessageId)) {
+      throw new Error(`Steer message ${clientMessageId} is already pending for agent ${agentId}`);
+    }
+    byClientMessageId.set(clientMessageId, []);
+    this.pendingSteerEchoes.set(agentId, byClientMessageId);
+  }
+
+  private takePendingSteerEchoes(
+    agentId: string,
+    clientMessageId: string,
+  ): Array<Extract<AgentStreamEvent, { type: "timeline" }>> {
+    const byClientMessageId = this.pendingSteerEchoes.get(agentId);
+    const events = byClientMessageId?.get(clientMessageId) ?? [];
+    byClientMessageId?.delete(clientMessageId);
+    if (byClientMessageId?.size === 0) {
+      this.pendingSteerEchoes.delete(agentId);
+    }
+    return events;
   }
 
   /**
@@ -3367,7 +3462,30 @@ export class AgentManager {
     }
 
     this.syncFeaturesFromSession(agent);
+    await this.refreshGoal(agent, options);
     await this.refreshRuntimeInfo(agent, options);
+  }
+
+  private async refreshGoal(
+    agent: ActiveManagedAgent,
+    options?: { emit?: boolean },
+  ): Promise<void> {
+    if (!agent.session.getGoal) return;
+    try {
+      const goal = await agent.session.getGoal();
+      const changed = !areAgentGoalsEqual(goal, agent.goal ?? null);
+      agent.goal = goal;
+      if (changed && options?.emit !== false) {
+        this.emitState(agent);
+      }
+    } catch (error) {
+      this.logger.warn(
+        { err: error, agentId: agent.id, provider: agent.provider },
+        "Failed to refresh agent goal",
+      );
+      // A failed lookup is not an authoritative clear. Keep the last provider
+      // projection until getGoal succeeds or a goal_changed(null) event arrives.
+    }
   }
 
   private async refreshRuntimeInfo(
@@ -3736,6 +3854,11 @@ export class AgentManager {
             thinkingOptionId: event.thinkingOptionId,
           };
         }
+        flags.shouldDispatchEvent = false;
+        this.emitState(agent);
+        return undefined;
+      case "goal_changed":
+        agent.goal = event.goal;
         flags.shouldDispatchEvent = false;
         this.emitState(agent);
         return undefined;

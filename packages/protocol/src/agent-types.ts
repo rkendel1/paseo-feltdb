@@ -339,6 +339,22 @@ export interface CompactionTimelineItem {
   preTokens?: number;
 }
 
+export type AgentGoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usageLimited"
+  | "budgetLimited"
+  | "complete";
+
+export interface AgentGoal {
+  objective: string;
+  status: AgentGoalStatus;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+}
+
 export interface AgentTaskItem {
   text: string;
   completed: boolean;
@@ -373,6 +389,7 @@ export type AgentStreamEvent =
       provider: AgentProvider;
       thinkingOptionId: string | null;
     }
+  | { type: "goal_changed"; provider: AgentProvider; goal: AgentGoal | null }
   | {
       type: "turn_failed";
       provider: AgentProvider;

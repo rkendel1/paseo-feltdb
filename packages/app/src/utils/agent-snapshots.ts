@@ -63,6 +63,7 @@ export function normalizeAgentSnapshot(snapshot: AgentSnapshotPayload, serverId:
     pendingPermissions: snapshot.pendingPermissions ?? [],
     persistence: snapshot.persistence ?? null,
     runtimeInfo: snapshot.runtimeInfo,
+    goal: snapshot.goal ?? null,
     lastUsage: snapshot.lastUsage,
     lastError: snapshot.lastError ?? null,
     title: snapshot.title ?? null,

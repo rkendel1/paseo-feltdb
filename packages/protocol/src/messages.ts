@@ -347,6 +347,8 @@ const AgentCapabilityFlagsSchema: z.ZodType<AgentCapabilityFlags> = z
     supportsMcpServers: z.boolean(),
     supportsReasoningStream: z.boolean(),
     supportsToolInvocations: z.boolean(),
+    // COMPAT(agentSteering): added in v0.3.2, remove after 2027-02-12.
+    supportsSteering: z.boolean().optional(),
     // COMPAT(rewind): added in v0.1.X, drop when floor >= v0.1.X.
     supportsRewindConversation: z.boolean().optional().default(false),
     // COMPAT(rewind): added in v0.1.X, drop when floor >= v0.1.X.
@@ -677,6 +679,14 @@ export const AgentTimelineItemPayloadSchema: z.ZodType<AgentTimelineItem, unknow
   }),
 ]);
 
+export const AgentGoalPayloadSchema = z.object({
+  objective: z.string(),
+  status: z.enum(["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"]),
+  tokenBudget: z.number().nullable(),
+  tokensUsed: z.number(),
+  timeUsedSeconds: z.number(),
+});
+
 export const AgentStreamEventPayloadSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("thread_started"),
@@ -707,6 +717,11 @@ export const AgentStreamEventPayloadSchema = z.discriminatedUnion("type", [
     provider: AgentProviderSchema,
     turnId: z.string().optional(),
     reason: z.string(),
+  }),
+  z.object({
+    type: z.literal("goal_changed"),
+    provider: AgentProviderSchema,
+    goal: AgentGoalPayloadSchema.nullable(),
   }),
   z.object({
     type: z.literal("timeline"),
@@ -782,6 +797,7 @@ export const AgentSnapshotPayloadSchema = z.object({
   lastUserMessageAt: z.string().nullable(),
   status: AgentStatusSchema,
   activeTurn: AgentActiveTurnPayloadSchema.nullable().optional(),
+  goal: AgentGoalPayloadSchema.nullable().optional(),
   capabilities: AgentCapabilityFlagsSchema,
   currentModeId: z.string().nullable(),
   availableModes: z.array(AgentModeSchema),
@@ -1221,6 +1237,7 @@ export const SendAgentMessageRequestSchema = z.object({
   /** Accepts full ID, unique prefix, or exact full title (server resolves). */
   agentId: z.string(),
   text: z.string(),
+  busyBehavior: z.enum(["replace", "steer"]).optional(),
   messageId: z.string().optional(), // Client-provided ID for deduplication
   images: z.array(ImageAttachmentSchema).optional(),
   attachments: AgentAttachmentsSchema,
@@ -3124,6 +3141,8 @@ export const ServerInfoStatusPayloadSchema = z
         selectiveAgentTimeline: z.boolean().optional(),
         // COMPAT(canonicalSubmittedPrompts): added in v0.2.6, remove gate after 2027-01-30.
         canonicalSubmittedPrompts: z.boolean().optional(),
+        // COMPAT(agentSteering): added in v0.3.2, remove after 2027-02-12.
+        agentSteering: z.boolean().optional(),
         // COMPAT(agentTurnIdentity): accept peers that observed pre-release v0.2.6 through 2027-01-31.
         agentTurnIdentity: z.boolean().optional(),
         // COMPAT(stableProjectIdentity): added in v0.1.109, remove gate after 2027-01-15.

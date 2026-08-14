@@ -388,6 +388,23 @@ export type AgentTimelineItem =
   | { type: "error"; message: string }
   | CompactionTimelineItem;
 
+export interface AgentHistoryPageEntry {
+  item: AgentTimelineItem;
+  timestamp?: string;
+  /** Provider-private identity used only to reconcile a page with live events. */
+  nativeItemId?: string;
+  /** Additional provider-private identities for alternate live event representations. */
+  nativeItemAliases?: string[];
+}
+
+export type AgentHistoryPage =
+  | {
+      kind: "page";
+      entries: AgentHistoryPageEntry[];
+      hasOlder: boolean;
+    }
+  | { kind: "unsupported" };
+
 export type AgentStreamEvent =
   | { type: "thread_started"; sessionId: string; provider: AgentProvider }
   | { type: "turn_started"; provider: AgentProvider; turnId?: string }
@@ -420,6 +437,8 @@ export type AgentStreamEvent =
       provider: AgentProvider;
       turnId?: string;
       timestamp?: string;
+      /** Provider-private identity; never serialize this outside the manager. */
+      nativeItemId?: string;
     }
   | {
       type: "permission_requested";
@@ -631,6 +650,10 @@ export interface AgentSession {
   startTurn(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<{ turnId: string }>;
   subscribe(callback: (event: AgentStreamEvent) => void): () => void;
   streamHistory(): AsyncGenerator<AgentStreamEvent>;
+  loadHistoryPage?(input: { limit: number }): Promise<AgentHistoryPage>;
+  /** Provider-private: retain native item identities until the initial history page is installed. */
+  setHistoryReconciliationActive?(active: boolean): void;
+  loadProviderSubagentHistory?(input: { id: string }): Promise<void>;
   getRuntimeInfo(): Promise<AgentRuntimeInfo>;
   getAvailableModes(): Promise<AgentMode[]>;
   getCurrentMode(): Promise<string | null>;

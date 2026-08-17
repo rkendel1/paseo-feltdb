@@ -63,7 +63,6 @@ import {
 } from "./agent-stream-coalescer.js";
 import { limitAgentTimelineItemContent } from "./agent-timeline-content.js";
 import { AgentRunState, type ForegroundTurnWaiter } from "./agent-run-state.js";
-import { getAgentProviderDefinition } from "@getpaseo/protocol/provider-manifest";
 import { invokeNativeForkCapability } from "./fork/native-fork.js";
 import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { isSystemInjectedEnvelope } from "./agent-prompt.js";

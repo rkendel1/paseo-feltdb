@@ -3297,6 +3297,11 @@ function WorkspaceScreenContent({
     ],
   );
 
+  // Shared by every handler below: these actions only exist on a focused workspace route.
+  const workspaceActionsEnabled = Boolean(
+    isRouteFocused && normalizedServerId && normalizedWorkspaceId,
+  );
+
   useKeyboardActionHandler({
     handlerId: `workspace-tab-actions:${normalizedServerId}:${normalizedWorkspaceId}`,
     actions: [
@@ -3307,7 +3312,7 @@ function WorkspaceScreenContent({
       "workspace.terminal.new",
       "workspace.browser.new",
     ] as const,
-    enabled: Boolean(isRouteFocused && normalizedServerId && normalizedWorkspaceId),
+    enabled: workspaceActionsEnabled,
     priority: 100,
     isActive: () => true,
     handle: handleWorkspaceTabAction,
@@ -3329,7 +3334,7 @@ function WorkspaceScreenContent({
       "workspace.pane.close",
       "workspace.focus.toggle",
     ] as const,
-    enabled: Boolean(isRouteFocused && normalizedServerId && normalizedWorkspaceId),
+    enabled: workspaceActionsEnabled,
     priority: 100,
     isActive: () => true,
     handle: handleWorkspacePaneAction,
@@ -3338,10 +3343,24 @@ function WorkspaceScreenContent({
   useKeyboardActionHandler({
     handlerId: `workspace-sidebar-actions:${normalizedServerId}:${normalizedWorkspaceId}`,
     actions: ["sidebar.toggle.right"] as const,
-    enabled: Boolean(isRouteFocused && normalizedServerId && normalizedWorkspaceId),
+    enabled: workspaceActionsEnabled,
     priority: 100,
     isActive: () => true,
     handle: handleWorkspaceSidebarAction,
+  });
+
+  // Gated on the same predicate as the header menu item, so the command center never lists a
+  // Show setup entry the menu would hide.
+  useKeyboardActionHandler({
+    handlerId: `workspace-setup-show:${normalizedServerId}:${normalizedWorkspaceId}`,
+    actions: ["workspace.setup.show"] as const,
+    enabled: workspaceActionsEnabled && showWorkspaceSetup,
+    priority: 100,
+    isActive: () => true,
+    handle: () => {
+      handleOpenSetupTab();
+      return true;
+    },
   });
 
   const activeTabDescriptor = useMemo(() => activeTab?.descriptor ?? null, [activeTab]);

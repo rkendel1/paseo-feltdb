@@ -124,6 +124,7 @@ const StoredAppSettingsSchema = z.strictObject({
   toolCallDetailLevel: z.enum(["overview", "detailed"]).optional(),
   compactToolCalls: z.boolean().optional(),
   chatOutlineEnabled: z.boolean().optional(),
+  alwaysShowHostLabels: z.boolean().optional(),
   vimKeybindings: z.boolean().optional(),
   // COMPAT(rendererDesktopSettings): these fields used to share this renderer-owned key.
   manageBuiltInDaemon: z.boolean().optional(),

@@ -3,7 +3,6 @@ import {
   DEFAULT_SIDEBAR_ROW_ITEMS,
   isChecksHiddenByLegacyRowItem,
   parseSidebarRowItems,
-  SIDEBAR_ROW_ITEMS,
 } from "./row-items";
 
 describe("parseSidebarRowItems", () => {
@@ -79,4 +78,3 @@ describe("isChecksHiddenByLegacyRowItem", () => {
     },
   );
 });
- 

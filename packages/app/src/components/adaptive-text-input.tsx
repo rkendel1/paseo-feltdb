@@ -8,6 +8,7 @@ import {
   type EditingTextInputHandle,
   type EditingTextInputProps,
 } from "@/components/ui/text-input";
+import { useBottomSheetInternal } from "@gorhom/bottom-sheet";
 
 export type AdaptiveTextInputProps = EditingTextInputProps & {
   initialValue?: string;
@@ -30,6 +31,7 @@ const ThemedTextInput = withUnistyles(EditingTextInput, (theme) => ({
 export const AdaptiveTextInput = forwardRef<EditingTextInputHandle, AdaptiveTextInputProps>(
   function AdaptiveTextInputInner(props, ref) {
     const isMobile = useIsCompactFormFactor();
+    const bottomSheetInternal = useBottomSheetInternal(true);
     const { initialValue, resetKey, style, onChangeText, ...inputProps } = props;
     const inputRef = useRef<EditingTextInputHandle | null>(null);
     const replacementTextRef = useRef(initialValue ?? "");
@@ -57,7 +59,7 @@ export const AdaptiveTextInput = forwardRef<EditingTextInputHandle, AdaptiveText
         initialValue={initialValue}
         onChangeText={onChangeText}
         style={[styles.outline, style, styles.text]}
-        variant={isMobile && isNative ? "bottom-sheet" : "default"}
+        variant={isMobile && isNative && bottomSheetInternal !== null ? "bottom-sheet" : "default"}
       />
     );
   },

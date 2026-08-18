@@ -1109,7 +1109,11 @@ function SettingsSidebar({
               testID="settings-back-to-workspace"
             />
           </View>
-          <ScrollView style={sidebarStyles.scrollBody} showsVerticalScrollIndicator={false}>
+          <ScrollView
+            style={sidebarStyles.scrollBody}
+            showsVerticalScrollIndicator={false}
+            testID="settings-sidebar-scroll-body"
+          >
             {sidebarBody}
           </ScrollView>
         </View>
@@ -1582,7 +1586,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   loadingText: {
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.lg,
+    fontSize: theme.fontSize.base,
   },
   container: {
     flex: 1,
@@ -1600,14 +1604,14 @@ const styles = StyleSheet.create((theme) => ({
   },
   aboutValue: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
   },
   aboutVersionMismatch: {
     color: theme.colors.palette.amber[500],
   },
   aboutErrorText: {
     color: theme.colors.palette.red[300],
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     marginTop: theme.spacing[1],
   },
   aboutCommunity: {
@@ -1630,7 +1634,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   themeTriggerText: {
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
   },
   terminalScrollbackInput: {
     width: 112,
@@ -1642,7 +1646,7 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.surface2,
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     textAlign: "right",
   },
   placeholder: {
@@ -1653,7 +1657,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   placeholderText: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
   },
 }));
 
@@ -1693,7 +1697,7 @@ const sidebarStyles = StyleSheet.create((theme) => ({
     gap: theme.spacing[1],
   },
   groupLabel: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foregroundMuted,
     paddingHorizontal: theme.spacing[2],

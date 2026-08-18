@@ -196,6 +196,7 @@ export const SHORTCUT_HELP_ROW_ORDER: Record<ShortcutSectionId, readonly string[
   layout: ["toggle-left-sidebar", "toggle-right-sidebar", "toggle-both-sidebars", "toggle-focus"],
   "agent-input": [
     "focus-message-input",
+    "find-in-conversation",
     "cycle-agent-mode",
     "voice-toggle",
     "dictation-toggle",
@@ -1169,7 +1170,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "find-in-conversation",
       section: "agent-input",
       label: "Find in conversation",
-      keys: ["mod", "F"],
     },
   },
   {
@@ -1181,7 +1181,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "find-in-conversation",
       section: "agent-input",
       label: "Find in conversation",
-      keys: ["mod", "F"],
     },
   },
   {

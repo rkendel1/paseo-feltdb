@@ -2055,7 +2055,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   tooltipAgentSubtitle: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
   },
   tooltipAgentId: {
     color: theme.colors.foregroundMuted,

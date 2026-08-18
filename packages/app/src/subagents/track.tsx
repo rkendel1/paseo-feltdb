@@ -252,7 +252,11 @@ function SubagentsTrackRow({
           </Text>
         ) : null}
         {meta ? (
-          <Text style={styles.rowMeta} numberOfLines={1} testID={`subagents-track-row-meta-${row.id}`}>
+          <Text
+            style={styles.rowMeta}
+            numberOfLines={1}
+            testID={`subagents-track-row-meta-${row.id}`}
+          >
             {meta}
           </Text>
         ) : null}
@@ -268,10 +272,7 @@ function SubagentsTrackRow({
             onArchivePress={handleArchivePress}
           />
         ) : (
-          <View
-            style={styles.actionClusterSpacer(onDetachSubagent ? 2 : 1)}
-            pointerEvents="none"
-          />
+          <View style={styles.actionClusterSpacer(onDetachSubagent ? 2 : 1)} pointerEvents="none" />
         )}
       </>
     ),
@@ -416,6 +417,12 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
   },
+  rowTrailing: {
+    flexShrink: 1,
+    minWidth: 0,
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
+  },
   actionClusterVisible: {
     flexDirection: "row",
     alignItems: "center",
@@ -436,8 +443,7 @@ const styles = StyleSheet.create((theme) => ({
   // Mirrors the geometry of `count` action buttons so rows without actions keep
   // the trailing column, and every ownership badge lines up.
   actionClusterSpacer: (count: number) => ({
-    width:
-      count * (ROW_ICON_SIZE + theme.spacing[1] * 2) + (count - 1) * theme.spacing[1],
+    width: count * (ROW_ICON_SIZE + theme.spacing[1] * 2) + (count - 1) * theme.spacing[1],
   }),
   tooltipText: {
     fontSize: theme.fontSize.sm,

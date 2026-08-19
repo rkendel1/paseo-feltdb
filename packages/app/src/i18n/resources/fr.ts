@@ -1738,6 +1738,9 @@ export const fr: TranslationResources = {
       binaryPreviewUnavailable: "Aperçu binaire indisponible",
       failedToLoad: "Échec du chargement du fichier",
       failedToLoadPreview: "Échec du chargement de l'aperçu du fichier",
+      zoomIn: "Zoom avant",
+      zoomOut: "Zoom arrière",
+      fitToView: "Ajuster à la vue",
       editor: {
         fileSize: "Taille {{size}}",
         lines: "{{count}} lignes",

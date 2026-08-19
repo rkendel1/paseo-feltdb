@@ -41,6 +41,7 @@ export type KeyboardActionId =
   | "workspace.explorer.maximize.toggle"
   | "workspace.navigate.index"
   | "workspace.navigate.relative"
+  | "workspace.navigate.ready-waiting.next"
   | "sidebar.toggle.left"
   | "sidebar.toggle.right"
   | "sidebar.toggle.both"

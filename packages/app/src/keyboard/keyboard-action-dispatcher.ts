@@ -38,9 +38,17 @@ export type KeyboardActionId =
   | "sidebar.toggle.both"
   | "workspace.new"
   | "workspace.project.pick"
+  | "workspace.isolation.toggle"
+  | "workspace.ref.pick"
+  | "workspace.host.pick"
   | "worktree.new"
   | "workspace.archive"
-  | "workspace.pin";
+  | "workspace.pin"
+  | "message-input.model.pick"
+  | "message-input.thinking.pick"
+  | "message-input.mode.pick"
+  | "message-input.fast-mode.toggle"
+  | "message-input.plan-mode.toggle";
 
 export type KeyboardActionDefinition =
   | { id: "agent.interrupt"; scope: KeyboardActionScope }
@@ -80,9 +88,17 @@ export type KeyboardActionDefinition =
   | { id: "sidebar.toggle.both"; scope: KeyboardActionScope }
   | { id: "workspace.new"; scope: KeyboardActionScope }
   | { id: "workspace.project.pick"; scope: KeyboardActionScope }
+  | { id: "workspace.isolation.toggle"; scope: KeyboardActionScope }
+  | { id: "workspace.ref.pick"; scope: KeyboardActionScope }
+  | { id: "workspace.host.pick"; scope: KeyboardActionScope }
   | { id: "worktree.new"; scope: KeyboardActionScope }
   | { id: "workspace.archive"; scope: KeyboardActionScope }
-  | { id: "workspace.pin"; scope: KeyboardActionScope };
+  | { id: "workspace.pin"; scope: KeyboardActionScope }
+  | { id: "message-input.model.pick"; scope: KeyboardActionScope }
+  | { id: "message-input.thinking.pick"; scope: KeyboardActionScope }
+  | { id: "message-input.mode.pick"; scope: KeyboardActionScope }
+  | { id: "message-input.fast-mode.toggle"; scope: KeyboardActionScope }
+  | { id: "message-input.plan-mode.toggle"; scope: KeyboardActionScope };
 
 export interface KeyboardActionHandler {
   handlerId: string;

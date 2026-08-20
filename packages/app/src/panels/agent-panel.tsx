@@ -27,6 +27,9 @@ import { useRetainedPanelActive } from "@/components/retained-panel";
 import { Composer } from "@/composer";
 import { resolveComposerTrackTailClearance } from "@/composer/pill-styles";
 import { getActiveMessageSubmissions } from "@/composer/submission/model";
+import { pickAgentModelDisplaySource } from "@/composer/agent-controls/utils";
+import { buildAgentPanelSubtitle } from "@/panels/agent-panel-subtitle";
+import { useAgentModelDisplay } from "@/hooks/use-agent-model-display";
 import { RewindComposerRestoreProvider } from "@/components/rewind/composer-restore";
 import { getProviderIcon } from "@/components/provider-icons";
 import {
@@ -113,6 +116,7 @@ interface ChatAgentStateShape {
   currentModeId?: Agent["currentModeId"];
   model?: Agent["model"];
   thinkingOptionId?: Agent["thinkingOptionId"];
+  effectiveThinkingOptionId?: Agent["effectiveThinkingOptionId"];
   runtimeInfo?: Agent["runtimeInfo"];
   features?: Agent["features"];
   lastError?: Agent["lastError"] | null;
@@ -167,6 +171,7 @@ function selectChatAgentState(
     currentModeId: agent.currentModeId,
     model: agent.model,
     thinkingOptionId: agent.thinkingOptionId,
+    effectiveThinkingOptionId: agent.effectiveThinkingOptionId,
     runtimeInfo: agent.runtimeInfo,
     features: agent.features,
     lastError: agent.lastError ?? null,
@@ -194,6 +199,7 @@ function buildChatAgentFromState(
     currentModeId: state.currentModeId,
     model: state.model,
     thinkingOptionId: state.thinkingOptionId,
+    effectiveThinkingOptionId: state.effectiveThinkingOptionId,
     runtimeInfo: state.runtimeInfo,
     features: state.features,
     lastError: state.lastError ?? null,
@@ -247,17 +253,6 @@ function renderChatAgentNonReadyView(args: {
     );
   }
   return null;
-}
-
-function formatProviderLabel(provider: Agent["provider"]): string {
-  if (!provider) {
-    return "Agent";
-  }
-  return provider
-    .split(/[-_\s]+/)
-    .filter((part) => part.length > 0)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
 }
 
 function resolveWorkspaceAgentTabLabel(title: string | null | undefined): string | null {
@@ -325,6 +320,15 @@ function storeFetchedAgentDetail(input: {
   return hydrated;
 }
 
+function findPanelAgent(
+  state: ReturnType<typeof useSessionStore.getState>,
+  serverId: string,
+  agentId: string,
+) {
+  const session = state.sessions[serverId];
+  return session?.agents?.get(agentId) ?? session?.agentDetails?.get(agentId) ?? null;
+}
+
 function useAgentPanelDescriptor(
   target: { kind: "agent"; agentId: string },
   context: { serverId: string },
@@ -332,8 +336,7 @@ function useAgentPanelDescriptor(
   const descriptorState = useSessionStore(
     useShallow((state) => {
       const session = state.sessions[context.serverId];
-      const agent =
-        session?.agents?.get(target.agentId) ?? session?.agentDetails?.get(target.agentId) ?? null;
+      const agent = findPanelAgent(state, context.serverId, target.agentId);
       return {
         provider: agent?.provider ?? "codex",
         title: agent?.title ?? null,
@@ -342,17 +345,29 @@ function useAgentPanelDescriptor(
         requiresAttention: agent?.requiresAttention ?? false,
         attentionReason: agent?.attentionReason ?? null,
         isTurnActive: selectAgentTurnPresentation(session, target.agentId).isActive,
+        cwd: agent?.cwd ?? null,
+        ...pickAgentModelDisplaySource(agent),
       };
     }),
   );
   const provider = descriptorState.provider;
   const label = resolveWorkspaceAgentTabLabel(descriptorState.title);
   const icon = getProviderIcon(provider);
+  const modelDisplay = useAgentModelDisplay({
+    serverId: context.serverId,
+    cwd: descriptorState.cwd,
+    provider,
+    model: descriptorState.model,
+    runtimeModelId: descriptorState.runtimeModelId,
+    thinkingOptionId: descriptorState.thinkingOptionId,
+    effectiveThinkingOptionId: descriptorState.effectiveThinkingOptionId,
+  });
+  const subtitle = buildAgentPanelSubtitle(provider, modelDisplay);
 
   return {
     label: label ?? "",
-    subtitle: `${formatProviderLabel(provider)} agent`,
-    tooltip: label ?? `${formatProviderLabel(provider)} agent`,
+    subtitle,
+    tooltip: label ?? subtitle,
     titleState: label ? "ready" : "loading",
     icon,
     statusBucket: descriptorState.status
@@ -1340,6 +1355,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
       {showAgentTracks ? (
         <AgentTracks
           serverId={serverId}
+          cwd={cwd}
           subagentRows={subagentRows}
           tasks={tasks}
           archiveFinishedStatus={archiveFinishedSubagents.status}

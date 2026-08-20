@@ -1713,6 +1713,11 @@ export const ru: TranslationResources = {
     archiveTooltip: "Архивный субагент",
     archiveFinishedAction: "Архивировать завершенные субагенты",
     archiveFinishedRetry: "Повторить ({{failed}}/{{total}})",
+    ownership: {
+      paseo: "Paseo",
+      native: "Нативный",
+    },
+    rowAccessibilityLabel: "{{label}}, субагент {{ownership}}",
   },
   panels: {
     draft: {
@@ -1818,6 +1823,8 @@ export const ru: TranslationResources = {
     used: "{{percentage}}% использовано",
     tokens: "Токены{{used}}/{{max}}",
     sessionCost: "Стоимость сеанса{{cost}}",
+    model: "Модель {{model}}",
+    thinking: "Мышление {{thinking}}",
     accessibility: "Контекстное окно{{percentage}}% использовано",
   },
   review: {

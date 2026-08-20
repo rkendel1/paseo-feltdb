@@ -2056,6 +2056,14 @@ export const ru: TranslationResources = {
           auto: "Система",
         },
       },
+      sidebar: {
+        title: "Боковая панель",
+        alwaysShowHostLabels: {
+          title: "Всегда показывать метки хоста",
+          description:
+            "Показывает метки хоста, даже когда все видимые рабочие области находятся на этом устройстве",
+        },
+      },
       detailLevel: {
         title: "Уровень детализации",
       },
@@ -2197,6 +2205,15 @@ export const ru: TranslationResources = {
         color: {
           label: "Цвет",
           accessibilityLabel: "Цвет, {{value}}",
+          custom: {
+            action: "Другой…",
+            title: "Пользовательский цвет",
+            submit: "Применить",
+            invalid: "Введите цвет в шестнадцатеричном формате, например #368080.",
+            panelAccessibility: "Насыщенность и яркость",
+            hueAccessibility: "Оттенок",
+            hexAccessibility: "Цвет в шестнадцатеричном формате",
+          },
           options: {
             none: "По умолчанию",
             violet: "Фиолетовый",

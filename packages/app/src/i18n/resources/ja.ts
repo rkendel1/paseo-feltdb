@@ -2035,6 +2035,14 @@ export const ja: TranslationResources = {
           auto: "システム",
         },
       },
+      sidebar: {
+        title: "サイドバー",
+        alwaysShowHostLabels: {
+          title: "ホストラベルを常に表示",
+          description:
+            "表示中のすべてのワークスペースがこのデバイス上にある場合もホストラベルを表示します",
+        },
+      },
       detailLevel: {
         title: "詳細レベル",
       },
@@ -2176,6 +2184,15 @@ export const ja: TranslationResources = {
         color: {
           label: "色",
           accessibilityLabel: "色、{{value}}",
+          custom: {
+            action: "カスタム…",
+            title: "カスタムカラー",
+            submit: "適用",
+            invalid: "#368080 のような16進カラーコードを入力してください。",
+            panelAccessibility: "彩度と明るさ",
+            hueAccessibility: "色相",
+            hexAccessibility: "16進カラー",
+          },
           options: {
             none: "デフォルト",
             violet: "バイオレット",

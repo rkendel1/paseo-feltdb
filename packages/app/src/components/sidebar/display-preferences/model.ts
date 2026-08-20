@@ -24,6 +24,8 @@ export interface SidebarDisplayPreferences {
   toggleRowItem: (item: SidebarRowItem) => void;
   checksDisplay: SidebarChecksDisplay;
   setChecksDisplay: (display: SidebarChecksDisplay) => void;
+  alwaysShowHostLabels: boolean;
+  toggleAlwaysShowHostLabels: () => void;
   trailing: SidebarWorkspaceTrailing;
   /** Picking the choice that is already showing clears the slot. */
   toggleTrailing: (choice: SidebarTrailingChoice) => void;
@@ -59,6 +61,7 @@ export function useSidebarDisplayPreferences(): SidebarDisplayPreferences {
       sidebarWorkspaceTrailing,
       sidebarRowItems,
       sidebarChecksDisplay,
+      alwaysShowHostLabels,
     },
     updateSettings,
   } = useAppSettings();
@@ -86,6 +89,10 @@ export function useSidebarDisplayPreferences(): SidebarDisplayPreferences {
     [updateSettings],
   );
 
+  const toggleAlwaysShowHostLabels = useCallback(() => {
+    void updateSettings({ alwaysShowHostLabels: !alwaysShowHostLabels });
+  }, [alwaysShowHostLabels, updateSettings]);
+
   const toggleTrailing = useCallback(
     (choice: SidebarTrailingChoice) => {
       void updateSettings({
@@ -105,6 +112,8 @@ export function useSidebarDisplayPreferences(): SidebarDisplayPreferences {
       toggleRowItem,
       checksDisplay: sidebarChecksDisplay,
       setChecksDisplay,
+      alwaysShowHostLabels,
+      toggleAlwaysShowHostLabels,
       trailing: sidebarWorkspaceTrailing,
       toggleTrailing,
       hostFilters,
@@ -123,6 +132,8 @@ export function useSidebarDisplayPreferences(): SidebarDisplayPreferences {
       toggleRowItem,
       sidebarChecksDisplay,
       setChecksDisplay,
+      alwaysShowHostLabels,
+      toggleAlwaysShowHostLabels,
       sidebarWorkspaceTrailing,
       toggleTrailing,
       hostFilters,

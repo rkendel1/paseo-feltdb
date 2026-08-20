@@ -582,6 +582,7 @@ function createSessionForWorkspaceTests(
     archiveSnapshot: async () => ({}),
     unarchiveSnapshot: async () => true,
     clearAgentAttention: async () => {},
+    markAgentUnread: async () => {},
     notifyAgentState: () => {},
     ...options.agentManager,
   });
@@ -1765,7 +1766,7 @@ test("workspace clear attention responds with an error instead of timing out", a
   });
 });
 
-test("workspace mark unread restores finished attention on the newest workspace root", async () => {
+test("workspace mark unread selects the newest finished workspace root", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const workspace = createPersistedWorkspaceRecord({
     workspaceId: REPO_CWD,
@@ -1805,18 +1806,21 @@ test("workspace mark unread restores finished attention on the newest workspace 
       }),
     ],
   ]);
-  const session = createSessionForWorkspaceTests({ onMessage: (message) => emitted.push(message) });
+  const markedAgentIds: string[] = [];
+  const session = createSessionForWorkspaceTests({
+    onMessage: (message) => emitted.push(message),
+    agentManager: {
+      markAgentUnread: async (agentId: string) => {
+        markedAgentIds.push(agentId);
+      },
+    },
+  });
 
   session.workspaceRegistry.list = async () => [workspace];
   session.workspaceRegistry.get = async (id: string) =>
     id === workspace.workspaceId ? workspace : null;
   session.projectRegistry.list = async () => [project];
   session.projectRegistry.get = async (id: string) => (id === project.projectId ? project : null);
-  session.agentStorage.get = async (agentId: string) => storedRecords.get(agentId) ?? null;
-  session.agentStorage.upsert = async (record: unknown) => {
-    const storedRecord = record as StoredAgentRecord;
-    storedRecords.set(storedRecord.id, storedRecord);
-  };
   session.listAgentPayloads = async () =>
     Array.from(storedRecords.values()).map((record) =>
       makeAgent({
@@ -1838,26 +1842,13 @@ test("workspace mark unread restores finished attention on the newest workspace 
     requestId: "req-mark-unread",
   });
 
-  expect(storedRecords.get("root-agent")).toMatchObject({
-    requiresAttention: true,
-    attentionReason: "finished",
-    attentionTimestamp: expect.any(String),
-  });
-  expect(storedRecords.get("newer-child")?.requiresAttention).toBe(false);
+  expect(markedAgentIds).toEqual(["root-agent"]);
   expect(findByType(emitted, "workspace.mark_unread.response").payload).toEqual({
     requestId: "req-mark-unread",
     workspaceId: workspace.workspaceId,
     markedAgentId: "root-agent",
     success: true,
     error: null,
-  });
-  expect(findByType(emitted, "agent_update").payload).toMatchObject({
-    kind: "upsert",
-    agent: {
-      id: "root-agent",
-      requiresAttention: true,
-      attentionReason: "finished",
-    },
   });
 });
 

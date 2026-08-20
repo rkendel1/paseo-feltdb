@@ -49,6 +49,20 @@ async function waitForSidebarWorkspace(page: import("@playwright/test").Page, wo
   return row;
 }
 
+async function openWorkspaceReadAction(
+  page: import("@playwright/test").Page,
+  workspaceId: string,
+  action: "read" | "unread",
+) {
+  const workspaceKey = `${getServerId()}:${workspaceId}`;
+  const row = await waitForSidebarWorkspace(page, workspaceId);
+  await row.hover();
+  await page.getByTestId(`sidebar-workspace-kebab-${workspaceKey}`).click();
+  const item = page.getByTestId(`sidebar-workspace-menu-mark-as-${action}-${workspaceKey}`);
+  await expect(item).toBeVisible({ timeout: 30_000 });
+  return item;
+}
+
 async function openWorkspaceHoverCard(page: import("@playwright/test").Page, workspaceId: string) {
   const row = await waitForSidebarWorkspace(page, workspaceId);
   await row.hover();
@@ -214,26 +228,14 @@ test.describe("Sidebar workspace list", () => {
       expect(workspace.client.getLastServerInfoMessage()?.features?.workspaceMarkUnread).toBe(true);
       await gotoAppShell(page);
 
-      const workspaceKey = `${getServerId()}:${workspace.workspaceId}`;
       const row = await waitForSidebarWorkspace(page, workspace.workspaceId);
       await expect(row.getByTestId("workspace-status-indicator-done")).toBeVisible();
-      await row.hover();
-      await page.getByTestId(`sidebar-workspace-kebab-${workspaceKey}`).click();
-      await page.getByTestId(`sidebar-workspace-menu-mark-as-unread-${workspaceKey}`).click();
-
-      await row.hover();
-      await page.getByTestId(`sidebar-workspace-kebab-${workspaceKey}`).click();
-      await expect(
-        page.getByTestId(`sidebar-workspace-menu-mark-as-read-${workspaceKey}`),
-      ).toBeVisible({ timeout: 30_000 });
+      await (await openWorkspaceReadAction(page, workspace.workspaceId, "unread")).click();
+      await openWorkspaceReadAction(page, workspace.workspaceId, "read");
 
       await page.keyboard.press("Escape");
       await openWorkspaceFromSidebar(page, workspace.workspaceId);
-      await row.hover();
-      await page.getByTestId(`sidebar-workspace-kebab-${workspaceKey}`).click();
-      await expect(
-        page.getByTestId(`sidebar-workspace-menu-mark-as-unread-${workspaceKey}`),
-      ).toBeVisible({ timeout: 30_000 });
+      await openWorkspaceReadAction(page, workspace.workspaceId, "unread");
     } finally {
       await workspace.cleanup();
     }

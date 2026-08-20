@@ -6733,39 +6733,8 @@ export class Session {
         throw new Error(`Workspace has no finished agent to mark unread: ${workspaceId}`);
       }
 
-      const now = new Date().toISOString();
-      const liveAgent = this.agentManager.getAgent(candidate.id);
-      if (liveAgent) {
-        await this.agentManager.markAgentUnread(candidate.id);
-      } else {
-        const record = await this.agentStorage.get(candidate.id);
-        const isFinishedAndRead = record?.lastStatus === "idle" || record?.lastStatus === "closed";
-        if (
-          !record ||
-          record.internal ||
-          record.archivedAt ||
-          record.requiresAttention === true ||
-          !isFinishedAndRead
-        ) {
-          throw new Error(`Finished agent is no longer available: ${candidate.id}`);
-        }
-        const nextRecord: StoredAgentRecord = {
-          ...record,
-          updatedAt: now,
-          requiresAttention: true,
-          attentionReason: "finished",
-          attentionTimestamp: now,
-        };
-        await this.agentStorage.upsert(nextRecord);
-        const agent = this.buildStoredAgentPayload(nextRecord);
-        const project = await this.buildProjectPlacementForWorkspace(workspace);
-        this.emit({
-          type: "agent_update",
-          payload: { kind: "upsert", agent, project },
-        });
-      }
+      await this.agentManager.markAgentUnread(candidate.id);
       markedAgentId = candidate.id;
-      await this.emitWorkspaceUpdateForWorkspaceId(workspace.workspaceId);
       this.emit({
         type: "workspace.mark_unread.response",
         payload: {

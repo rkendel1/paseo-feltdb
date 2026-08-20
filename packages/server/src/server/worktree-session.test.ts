@@ -49,6 +49,7 @@ import { WorkspaceGitServiceImpl } from "./workspace-git-service.js";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import { isPlatform } from "../test-utils/platform.js";
 import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
+import { WorkspaceSetupReadiness } from "./workspace-setup-readiness.js";
 
 interface LegacyCreateWorktreeTestOptions {
   branchName: string;
@@ -108,6 +109,7 @@ function createWorkflowForRequestTest(options: {
         createPaseoWorktree,
         warmWorkspaceGitData: options.warmWorkspaceGitData ?? (async () => {}),
         autoNameWorkspaceBranchForFirstAgent: () => {},
+        workspaceSetupReadiness: new WorkspaceSetupReadiness(),
         emitWorkspaceUpdateForWorkspaceId: async () => {},
         cacheWorkspaceSetupSnapshot: () => {},
         emit: () => {},
@@ -451,7 +453,7 @@ describe("resolveGitCreateBaseBranch", () => {
 });
 
 describe("create-agent worktree setup boundary", () => {
-  test("agent setup continuation starts setup for the created agent timeline", async () => {
+  test("workspace setup completes before the agent continuation starts", async () => {
     const { tempDir, repoDir } = createGitRepo();
     const paseoHome = path.join(tempDir, ".paseo");
     const appendedItems: Array<{ name: string; status: string }> = [];
@@ -465,6 +467,7 @@ describe("create-agent worktree setup boundary", () => {
           createPaseoWorktree: createPaseoWorktreeForTest({ paseoHome }),
           warmWorkspaceGitData: async () => {},
           autoNameWorkspaceBranchForFirstAgent: () => {},
+          workspaceSetupReadiness: new WorkspaceSetupReadiness(),
           emitWorkspaceUpdateForWorkspaceId: async () => {},
           cacheWorkspaceSetupSnapshot: () => {},
           emit: (message) => workspaceSetupEvents.push(message),
@@ -509,16 +512,18 @@ describe("create-agent worktree setup boundary", () => {
       );
 
       expect(result.setupContinuation?.kind).toBe("agent");
-      expect(workspaceSetupEvents).toEqual([]);
+      await vi.waitFor(() => {
+        expect(workspaceSetupEvents).toContainEqual(
+          expect.objectContaining({
+            type: "workspace_setup_progress",
+            payload: expect.objectContaining({ status: "completed" }),
+          }),
+        );
+      });
 
       result.setupContinuation?.startAfterAgentCreate({ agentId: "agent-after-create" });
-
-      await vi.waitFor(() => {
-        expect(appendedItems).toContainEqual({
-          name: "paseo_worktree_setup",
-          status: "completed",
-        });
-      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(appendedItems).toEqual([]);
       expect(liveItems).toEqual([]);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
@@ -790,30 +795,32 @@ describe("runWorktreeSetupInBackground", () => {
     const archiveWorkspaceRecord = vi.fn(async () => {});
     const workspaceId = "ws-broken-feature";
 
-    await runWorktreeSetupInBackground(
-      {
-        paseoHome,
-        emitWorkspaceUpdateForWorkspaceId,
-        cacheWorkspaceSetupSnapshot: (snapshotWorkspaceId, snapshot) =>
-          snapshots.set(snapshotWorkspaceId, snapshot),
-        emit: (message) => emitted.push(message),
-        sessionLogger: logger,
-        terminalManager: null,
-        archiveWorkspaceRecord,
-      },
-      {
-        requestCwd: repoDir,
-        repoRoot: repoDir,
-        workspaceId,
-        worktree: {
-          branchName: "broken-feature",
+    await expect(
+      runWorktreeSetupInBackground(
+        {
+          paseoHome,
+          emitWorkspaceUpdateForWorkspaceId,
+          cacheWorkspaceSetupSnapshot: (snapshotWorkspaceId, snapshot) =>
+            snapshots.set(snapshotWorkspaceId, snapshot),
+          emit: (message) => emitted.push(message),
+          sessionLogger: logger,
+          terminalManager: null,
+          archiveWorkspaceRecord,
+        },
+        {
+          requestCwd: repoDir,
+          repoRoot: repoDir,
+          workspaceId,
+          worktree: {
+            branchName: "broken-feature",
+            worktreePath,
+          },
+          shouldBootstrap: true,
+          slug: "broken-feature",
           worktreePath,
         },
-        shouldBootstrap: true,
-        slug: "broken-feature",
-        worktreePath,
-      },
-    );
+      ),
+    ).rejects.toThrow(/Failed to parse paseo\.json/);
 
     const progressMessages = emitted.filter(
       (message): message is Extract<SessionOutboundMessage, { type: "workspace_setup_progress" }> =>
@@ -953,6 +960,70 @@ describe("runWorktreeSetupInBackground", () => {
         status: "completed",
         error: null,
       });
+    },
+  );
+
+  test.skipIf(isPlatform("win32"))(
+    "coalesces bursty setup output and flushes the complete final snapshot",
+    async () => {
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+      try {
+        const { tempDir, repoDir } = createGitRepo({
+          paseoConfig: {
+            worktree: {
+              setup: [
+                "node -e \"for (let i = 0; i < 200; i++) process.stdout.write('line-' + i + '\\\\n')\"",
+              ],
+            },
+          },
+        });
+        cleanupPaths.push(tempDir);
+
+        const paseoHome = path.join(tempDir, ".paseo");
+        const createdWorktree = await createLegacyWorktreeForTest({
+          branchName: "feature-bursty-setup",
+          cwd: repoDir,
+          baseBranch: "main",
+          worktreeSlug: "feature-bursty-setup",
+          runSetup: false,
+          paseoHome,
+        });
+        const emitted: SessionOutboundMessage[] = [];
+
+        await runWorktreeSetupInBackground(
+          {
+            paseoHome,
+            emitWorkspaceUpdateForWorkspaceId: async () => {},
+            cacheWorkspaceSetupSnapshot: () => {},
+            emit: (message) => emitted.push(message),
+            sessionLogger: createLogger(),
+            terminalManager: null,
+            archiveWorkspaceRecord: async () => {},
+          },
+          {
+            requestCwd: repoDir,
+            repoRoot: repoDir,
+            workspaceId: "ws-bursty-setup",
+            worktree: createdWorktree,
+            shouldBootstrap: true,
+            slug: "feature-bursty-setup",
+            worktreePath: createdWorktree.worktreePath,
+          },
+        );
+
+        const progressMessages = emitted.filter(
+          (
+            message,
+          ): message is Extract<SessionOutboundMessage, { type: "workspace_setup_progress" }> =>
+            message.type === "workspace_setup_progress",
+        );
+        expect(progressMessages).toHaveLength(2);
+        expect(progressMessages[0]?.payload.status).toBe("running");
+        expect(progressMessages[1]?.payload.status).toBe("completed");
+        expect(progressMessages[1]?.payload.detail.log).toContain("line-199");
+      } finally {
+        vi.useRealTimers();
+      }
     },
   );
 
@@ -1201,27 +1272,23 @@ describe("runWorktreeSetupInBackground", () => {
 
   test("returns the cached workspace setup snapshot for status requests", async () => {
     const emitted: SessionOutboundMessage[] = [];
-    const snapshots = new Map([
-      [
-        "ws-feature-a",
-        {
-          status: "completed",
-          detail: {
-            type: "worktree_setup",
-            worktreePath: "/repo/.paseo/worktrees/feature-a",
-            branchName: "feature-a",
-            log: "done",
-            commands: [],
-          },
-          error: null,
-        },
-      ],
-    ]);
+    const workspaceSetupReadiness = new WorkspaceSetupReadiness();
+    workspaceSetupReadiness.setSnapshot("ws-feature-a", {
+      status: "completed",
+      detail: {
+        type: "worktree_setup",
+        worktreePath: "/repo/.paseo/worktrees/feature-a",
+        branchName: "feature-a",
+        log: "done",
+        commands: [],
+      },
+      error: null,
+    });
 
     await handleWorkspaceSetupStatusRequest(
       {
         emit: (message) => emitted.push(message),
-        workspaceSetupSnapshots: snapshots,
+        workspaceSetupReadiness,
       },
       {
         type: "workspace_setup_status_request",
@@ -1256,7 +1323,7 @@ describe("runWorktreeSetupInBackground", () => {
     await handleWorkspaceSetupStatusRequest(
       {
         emit: (message) => emitted.push(message),
-        workspaceSetupSnapshots: new Map(),
+        workspaceSetupReadiness: new WorkspaceSetupReadiness(),
       },
       {
         type: "workspace_setup_status_request",

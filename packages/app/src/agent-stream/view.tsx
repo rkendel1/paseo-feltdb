@@ -260,6 +260,7 @@ export interface AgentStreamViewProps {
   /** Tail space required by a transparent overlay rendered at the bottom edge. */
   bottomOverlayTailClearance?: number;
   toast?: ToastApi | null;
+  runningStatusLabel?: string;
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
   readOnly?: boolean;
   historyPagination?: {
@@ -309,6 +310,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       isAuthoritativeHistoryReady = true,
       bottomOverlayTailClearance = 0,
       toast,
+      runningStatusLabel,
       onOpenWorkspaceFile,
       readOnly = false,
       historyPagination,
@@ -873,6 +875,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         isTurnActive || bottomTurnFooterHost ? (
           <TurnFooter
             isRunning={isTurnActive}
+            runningStatusLabel={runningStatusLabel}
             inFlightTurnStartedAt={baseRenderModel.turnTiming.runningStartedAt}
             host={bottomTurnFooterHost}
             strategy={streamRenderStrategy}
@@ -886,6 +889,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         handleForkInFlightTurn,
         readOnly,
         isTurnActive,
+        runningStatusLabel,
         baseRenderModel.turnTiming.runningStartedAt,
         bottomTurnFooterHost,
         streamRenderStrategy,
@@ -1166,6 +1170,7 @@ function agentStreamViewPropsEqual(
     reasons.push("isAuthoritativeHistoryReady");
   }
   if (left.toast !== right.toast) reasons.push("toast");
+  if (left.runningStatusLabel !== right.runningStatusLabel) reasons.push("runningStatusLabel");
   if (left.onOpenWorkspaceFile !== right.onOpenWorkspaceFile) reasons.push("onOpenWorkspaceFile");
   if (left.readOnly !== right.readOnly) reasons.push("readOnly");
   if (!historyPaginationPropsEqual(left.historyPagination, right.historyPagination)) {

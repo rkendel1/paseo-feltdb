@@ -571,6 +571,8 @@ interface AssistantTurnFooterProps {
   completedAt?: Date;
   durationMs?: number;
   onFork?: (target: AssistantForkTarget) => Promise<void> | void;
+  /** The source agent can branch its provider session at this turn. */
+  canForkNatively?: boolean;
 }
 
 const assistantTurnFooterStylesheet = StyleSheet.create((theme) => ({
@@ -616,6 +618,7 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
   completedAt,
   durationMs,
   onFork,
+  canForkNatively,
 }: AssistantTurnFooterProps) {
   const [hovered, setHovered] = useState(false);
   const [pressedReveal, setPressedReveal] = useState(false);
@@ -669,7 +672,7 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
         getContent={getContent}
         containerStyle={assistantTurnFooterStylesheet.copyButton}
       />
-      {canFork ? <AssistantForkMenu onFork={handleFork} /> : null}
+      {canFork ? <AssistantForkMenu canForkNatively={canForkNatively} onFork={handleFork} /> : null}
       {durationLabel ? (
         <Pressable
           onPress={handlePress}

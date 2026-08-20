@@ -1911,6 +1911,24 @@ export class AgentManager {
     }
   }
 
+  async markAgentUnread(agentId: string): Promise<void> {
+    const agent = this.requireAgent(agentId);
+    const isFinished = agent.lifecycle === "idle";
+    const hasPendingPermissions = agent.pendingPermissions.size > 0;
+    const canMarkUnread =
+      isFinished && !agent.attention.requiresAttention && !hasPendingPermissions;
+    if (!canMarkUnread) {
+      throw new Error(`Agent is no longer finished and read: ${agentId}`);
+    }
+    agent.attention = {
+      requiresAttention: true,
+      attentionReason: "finished",
+      attentionTimestamp: new Date(),
+    };
+    await this.persistSnapshot(agent);
+    this.emitState(agent, { persist: false });
+  }
+
   async archiveSnapshot(agentId: string, archivedAt: string): Promise<StoredAgentRecord> {
     const registry = this.requireRegistry();
     const liveAgent = this.getAgent(agentId);

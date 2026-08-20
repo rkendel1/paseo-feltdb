@@ -167,6 +167,63 @@ describe("loadAppSettingsFromStorage", () => {
     expect(result.useLegacyTerminalRenderer).toBe(true);
   });
 
+  it("defaults the composer trigger sigils to / and $", async () => {
+    const deps = makeDeps();
+
+    const result = await loadAppSettingsFromStorage(deps);
+
+    expect(result.commandTriggerSigil).toBe("/");
+    expect(result.skillTriggerSigil).toBe("$");
+  });
+
+  it("loads remapped composer trigger sigils", async () => {
+    const deps = makeDeps({
+      storage: createInMemoryKeyValueStorage({
+        [APP_SETTINGS_KEY]: JSON.stringify({
+          commandTriggerSigil: "!",
+          skillTriggerSigil: "#",
+        }),
+      }),
+    });
+
+    const result = await loadAppSettingsFromStorage(deps);
+
+    expect(result.commandTriggerSigil).toBe("!");
+    expect(result.skillTriggerSigil).toBe("#");
+  });
+
+  it("falls back to the default sigil when a stored value is off the allowlist", async () => {
+    const deps = makeDeps({
+      storage: createInMemoryKeyValueStorage({
+        [APP_SETTINGS_KEY]: JSON.stringify({
+          commandTriggerSigil: "@",
+          skillTriggerSigil: "abc",
+        }),
+      }),
+    });
+
+    const result = await loadAppSettingsFromStorage(deps);
+
+    expect(result.commandTriggerSigil).toBe("/");
+    expect(result.skillTriggerSigil).toBe("$");
+  });
+
+  it("resolves colliding stored composer trigger sigils", async () => {
+    const deps = makeDeps({
+      storage: createInMemoryKeyValueStorage({
+        [APP_SETTINGS_KEY]: JSON.stringify({
+          commandTriggerSigil: "$",
+          skillTriggerSigil: "$",
+        }),
+      }),
+    });
+
+    const result = await loadAppSettingsFromStorage(deps);
+
+    expect(result.commandTriggerSigil).toBe("$");
+    expect(result.skillTriggerSigil).toBe("/");
+  });
+
   it("loads configured terminal scrollback lines from app settings", async () => {
     const deps = makeDeps({
       storage: createInMemoryKeyValueStorage({
@@ -402,7 +459,6 @@ describe("saveAppSettings", () => {
       toolCallDetailLevel: "overview",
     });
   });
-
   // The row items are written as one object through one strict schema, so an item the schema
   // does not know does not just fail to persist itself — it takes every sibling toggle with it.
   it.each(SIDEBAR_ROW_ITEMS)("persists the %s row item being switched off", async (item) => {
@@ -413,6 +469,22 @@ describe("saveAppSettings", () => {
     await saveAppSettings({ queryClient, updates: { sidebarRowItems }, deps });
 
     expect((await loadAppSettingsFromStorage(deps)).sidebarRowItems).toEqual(sidebarRowItems);
+  });
+
+  it("keeps saved composer trigger sigils distinct", async () => {
+    const deps = makeDeps();
+    const queryClient = new QueryClient();
+
+    await saveAppSettings({
+      queryClient,
+      updates: { commandTriggerSigil: "$" },
+      deps,
+    });
+
+    expect(JSON.parse(deps.storage.entries.get(APP_SETTINGS_KEY) ?? "null")).toMatchObject({
+      commandTriggerSigil: "$",
+      skillTriggerSigil: "/",
+    });
   });
 });
 

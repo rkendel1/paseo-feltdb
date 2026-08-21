@@ -1217,6 +1217,14 @@ export const en = {
     },
   },
   desktop: {
+    quitConfirm: {
+      title: "Quit Paseo?",
+      message:
+        "Quitting stops the local daemon, along with any agents it is running. Their work will be interrupted.",
+      quit: "Quit",
+      cancel: "Cancel",
+      keepDaemonRunning: "Leave the daemon running",
+    },
     quitting: {
       title: "Quitting Paseo...",
       detail: "Stopping the local daemon.",

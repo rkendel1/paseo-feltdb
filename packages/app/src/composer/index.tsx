@@ -83,6 +83,7 @@ import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { AutocompletePopover } from "@/components/ui/autocomplete-popover";
 import type { AutocompleteOption } from "@/components/ui/autocomplete";
 import { useAgentAutocomplete } from "@/hooks/use-agent-autocomplete";
+import { useListSearchHandler } from "@/keyboard/list-search-dispatcher";
 import {
   useHostRuntimeAgentDirectoryStatus,
   useHostRuntimeClient,
@@ -2234,6 +2235,19 @@ function ComposerContentImpl({
     ? t("composer.github.searching")
     : t("composer.github.noResults");
   const autocompleteVisible = autocomplete.isVisible && mode.showAutocomplete;
+  useListSearchHandler({
+    active: isNative && autocompleteVisible,
+    priority: 80,
+    handle: (_action, event) =>
+      autocompleteOnKeyPressRef.current({
+        ...event,
+        preventDefault: () => {},
+        input: messageInputRef.current?.getInputSnapshot() ?? {
+          text: userInput,
+          selection: { start: cursorIndex, end: cursorIndex },
+        },
+      }),
+  });
 
   return (
     <>
@@ -2306,6 +2320,7 @@ function ComposerContentImpl({
                   onQueue={handleQueue}
                   onSubmitLoadingPress={submitLoadingPressHandler}
                   onKeyPress={handleCommandKeyPress}
+                  ownsListNavigation={autocompleteVisible}
                   onSelectionChange={handleSelectionChange}
                   onFocusChange={handleFocusChange}
                   onHeightChange={onComposerHeightChange}

@@ -2154,8 +2154,7 @@ export class HostRuntimeStore {
         new DirectorySync(
           host.serverId,
           {
-            onAgentStoppedRunning: (agentId) =>
-              this.onAgentStoppedRunning(host.serverId, agentId),
+            onAgentStoppedRunning: (agentId) => this.onAgentStoppedRunning(host.serverId, agentId),
             markAgentLoading: () => controller.markAgentDirectorySyncLoading(),
             markAgentReady: () => controller.markAgentDirectorySyncReady(),
             markAgentError: (error) => controller.markAgentDirectorySyncError(error),

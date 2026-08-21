@@ -126,6 +126,7 @@ import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import type { OpenAiSpeechProviderConfig } from "./speech/providers/openai/config.js";
 import type { LocalSpeechProviderConfig } from "./speech/providers/local/config.js";
+import type { MiniMaxSpeechProviderConfig } from "./speech/providers/minimax/config.js";
 import type { RequestedSpeechProviders } from "./speech/speech-types.js";
 import { createSpeechService } from "./speech/speech-runtime.js";
 import { AgentManager } from "./agent/agent-manager.js";
@@ -359,6 +360,7 @@ function summarizeAgentMcpDebugBody(body: unknown): Record<string, unknown> {
 }
 
 export type PaseoOpenAIConfig = OpenAiSpeechProviderConfig;
+export type PaseoMiniMaxConfig = MiniMaxSpeechProviderConfig;
 export type PaseoLocalSpeechConfig = LocalSpeechProviderConfig;
 
 export interface PaseoSpeechSttLanguages {
@@ -432,6 +434,7 @@ export interface PaseoDaemonConfig {
   };
   appBaseUrl?: string;
   auth?: DaemonAuthConfig;
+  minimax?: PaseoMiniMaxConfig;
   openai?: PaseoOpenAIConfig;
   speech?: PaseoSpeechConfig;
   voiceLlmProvider?: AgentProvider | null;
@@ -1502,6 +1505,7 @@ export async function createPaseoDaemon(
 
   const speechService = createSpeechService({
     logger,
+    minimaxConfig: config.minimax,
     openaiConfig: config.openai,
     speechConfig: config.speech,
   });

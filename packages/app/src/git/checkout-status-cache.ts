@@ -7,6 +7,7 @@ import {
   checkoutStatusQueryKey,
   invalidatePrPaneTimelineForCheckout,
 } from "@/git/query-keys";
+import { invalidateDraftAgentCommandsForCwd } from "@/hooks/agent-commands-query";
 import { type CheckoutPrStatusPayload, normalizeCheckoutPrStatusPayload } from "@/git/pr-status";
 import { expireStaleDiffModeOverrides } from "@/review/store";
 
@@ -67,9 +68,26 @@ export function applyCheckoutStatusUpdateFromEvent({
     ? normalizeCheckoutPrStatusPayload(payload.prStatus)
     : undefined;
   const cachePayload = prStatus ? { ...payload, prStatus } : payload;
-  queryClient.setQueryData(checkoutStatusQueryKey(serverId, payload.cwd), cachePayload);
+  const statusQueryKey = checkoutStatusQueryKey(serverId, payload.cwd);
+  const previousStatus = queryClient.getQueryData<CheckoutStatusPayload>(statusQueryKey);
+  const checkoutIdentityChanged =
+    previousStatus !== undefined &&
+    (previousStatus.isGit !== payload.isGit ||
+      previousStatus.currentBranch !== payload.currentBranch ||
+      previousStatus.headOid !== payload.headOid);
+  queryClient.setQueryData(statusQueryKey, cachePayload);
   void queryClient.invalidateQueries({
     queryKey: checkoutCommitsQueryKey(serverId, payload.cwd),
+  });
+  // Draft command results are long-lived, but project skills are checkout-scoped and an external
+  // tool can add or remove an uncommitted one without moving Git identity. Every push therefore
+  // marks the cache stale; only an identity change refetches on the spot, so working-tree churn
+  // cannot make active autocomplete rediscover skills mid-typing.
+  void invalidateDraftAgentCommandsForCwd({
+    queryClient,
+    serverId,
+    cwd: payload.cwd,
+    timing: checkoutIdentityChanged ? "now" : "next-open",
   });
   expireStaleDiffModeOverrides({
     serverId,

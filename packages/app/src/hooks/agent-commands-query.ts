@@ -1,4 +1,5 @@
 import type { AgentProvider } from "@getpaseo/protocol/agent-types";
+import type { QueryClient } from "@tanstack/react-query";
 import { normalizeWorkspacePath } from "@/utils/workspace-identity";
 
 export const AGENT_COMMANDS_QUERY_ROOT = "agentCommands";
@@ -44,6 +45,42 @@ export function draftAgentCommandsQueryKey(input: {
     "features",
     draftConfig.featureValues ?? null,
   ] as const;
+}
+
+export function isDraftAgentCommandsQueryForCwd(input: {
+  queryKey: readonly unknown[];
+  serverId: string;
+  cwd: string;
+}): boolean {
+  return (
+    input.queryKey[0] === AGENT_COMMANDS_QUERY_ROOT &&
+    input.queryKey[1] === input.serverId &&
+    input.queryKey[2] === "draft" &&
+    input.queryKey[5] === normalizeAgentCommandsCwd(input.cwd)
+  );
+}
+
+// Draft command queries are only enabled while the command menu is open, so timing decides who
+// pays for rediscovery. "now" refetches an open menu on the spot. "next-open" marks the cache
+// stale and stops there, so a burst of updates cannot restart provider discovery while the user
+// is typing; the menu picks up the new commands the next time it opens.
+export type DraftAgentCommandsRefreshTiming = "now" | "next-open";
+
+export async function invalidateDraftAgentCommandsForCwd(input: {
+  queryClient: QueryClient;
+  serverId: string;
+  cwd: string;
+  timing: DraftAgentCommandsRefreshTiming;
+}): Promise<void> {
+  await input.queryClient.invalidateQueries({
+    refetchType: input.timing === "next-open" ? "none" : undefined,
+    predicate: (query) =>
+      isDraftAgentCommandsQueryForCwd({
+        queryKey: query.queryKey,
+        serverId: input.serverId,
+        cwd: input.cwd,
+      }),
+  });
 }
 
 export function agentCommandsQueryKey(input: {

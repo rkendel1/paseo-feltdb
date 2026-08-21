@@ -149,7 +149,7 @@ export function shouldBypassBearerAuth(method: string, path: string): boolean {
   if (method === "OPTIONS") {
     return true;
   }
-  return BEARER_AUTH_BYPASS_PATHS.has(path);
+  return BEARER_AUTH_BYPASS_PATHS.has(path) || path === "/mcp/agents/agent";
 }
 
 /**

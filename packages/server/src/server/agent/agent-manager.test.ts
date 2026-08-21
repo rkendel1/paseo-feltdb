@@ -2107,7 +2107,8 @@ test("createAgent injects paseo MCP server only into provider launch config", as
   expect(client.lastConfig?.mcpServers).toEqual({
     paseo: {
       type: "http",
-      url: `http://127.0.0.1:6767/mcp/agents?callerAgentId=${snapshot.id}`,
+      url: "http://127.0.0.1:6767/mcp/agents/agent",
+      headers: { Authorization: expect.stringMatching(/^Bearer /u) },
     },
     custom: {
       type: "stdio",
@@ -2402,9 +2403,25 @@ test("createAgent allows best-effort internal MCP when the provider session repo
   expect(manager.getMcpAuthToken()).toBe("cap-token");
   expect(client.lastConfig?.mcpServers?.paseo).toEqual({
     type: "http",
-    url: `http://127.0.0.1:6767/mcp/agents?callerAgentId=${snapshot.id}`,
-    headers: { Authorization: "Bearer cap-token" },
+    url: "http://127.0.0.1:6767/mcp/agents/agent",
+    headers: { Authorization: expect.stringMatching(/^Bearer (?!cap-token$)/u) },
   });
+  const authorization = (
+    client.lastConfig?.mcpServers?.paseo as { headers?: { Authorization?: string } } | undefined
+  )?.headers?.Authorization;
+  expect(manager.authenticateAgentMcpRequest(authorization)?.agentId).toBe(snapshot.id);
+  expect(manager.authenticateAgentMcpRequest("Bearer cap-token")).toBeNull();
+  await manager.reloadAgentSession(snapshot.id);
+  const rotatedAuthorization = (
+    client.resumeOverrides.at(-1)?.mcpServers?.paseo as
+      | { headers?: { Authorization?: string } }
+      | undefined
+  )?.headers?.Authorization;
+  expect(rotatedAuthorization).not.toBe(authorization);
+  expect(manager.authenticateAgentMcpRequest(authorization)).toBeNull();
+  expect(manager.authenticateAgentMcpRequest(rotatedAuthorization)?.agentId).toBe(snapshot.id);
+  await manager.archiveAgent(snapshot.id);
+  expect(manager.authenticateAgentMcpRequest(rotatedAuthorization)).toBeNull();
 
   rmSync(workdir, { recursive: true, force: true });
 });
@@ -2448,7 +2465,8 @@ test("resumeAgentFromPersistence replaces stored internal paseo MCP with current
   expect(client.resumeOverrides[0]?.mcpServers).toEqual({
     paseo: {
       type: "http",
-      url: `http://127.0.0.1:6768/mcp/agents?callerAgentId=${snapshot.id}`,
+      url: "http://127.0.0.1:6768/mcp/agents/agent",
+      headers: { Authorization: expect.stringMatching(/^Bearer /u) },
     },
     custom: {
       type: "stdio",

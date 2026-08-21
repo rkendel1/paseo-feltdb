@@ -1,6 +1,6 @@
-# Paseo command workspace runtime contract v1
+# Paseo command workspace runtime contract v2
 
-Implement this contract to add a trusted workspace runtime without importing Paseo server code. Use the schemas and types from `@getpaseo/workspace-runtime-contract`; the tested byte examples are in [`examples/v1.json`](examples/v1.json).
+Implement this contract to add a trusted workspace runtime without importing Paseo server code. Use the schemas and types from `@getpaseo/workspace-runtime-contract`; the tested byte examples are in [`examples/v2.json`](examples/v2.json).
 
 The command-runtime protocol and workspace-helper protocol have independent version fields. A
 Paseo release pins compatible versions of this package and `@getpaseo/workspace-helper`, then
@@ -25,7 +25,7 @@ reconcile
 
 `describe` writes `CommandRuntimeDescribeResponse` JSON to stdout. Lifecycle commands read one `CommandRuntimeLifecycleRequest` JSON value from stdin and write one `CommandRuntimeLifecycleResponse` JSON value to stdout. `create` and `resume` return `state`; `inspect` returns `inspection`; `pause`, `destroy`, and `reconcile` return `ok`. Diagnostics go to stderr. A non-zero wrapper exit means the operation failed.
 
-Paseo sends options from trusted daemon configuration and a stable `runtimeInstanceId` for shared-resource ownership. Runtime implementations decide how that opaque instance token maps to their resource system. Secrets never belong in argv or temporary request files. The runtime must reject any `protocolVersion` other than `1` with a clear stderr diagnostic and non-zero exit. Every public v1 object schema is strict at every nested object boundary, so unknown keys fail instead of being stripped. Extensibility belongs only in the explicit `options`, workload `env`, and lifecycle-environment maps. The optional create `purpose: "discovery"` field marks a short-lived environment-discovery workspace without naming the higher-level consumer. Every `create` response must set `materializedFreshContent`: `true` only when that call created fresh workspace content/resources on which repo setup is permitted, and `false` when it adopted or reused existing content. `resume` state responses omit it.
+Paseo sends options from trusted daemon configuration and a stable `runtimeInstanceId` for shared-resource ownership. Runtime implementations decide how that opaque instance token maps to their resource system. Secrets never belong in argv or temporary request files. The runtime must reject any `protocolVersion` other than `2` with a clear stderr diagnostic and non-zero exit. Every public v2 object schema is strict at every nested object boundary, so unknown keys fail instead of being stripped. Extensibility belongs only in the explicit `options`, workload `env`, and lifecycle-environment maps. The optional create `purpose: "discovery"` field marks a short-lived environment-discovery workspace without naming the higher-level consumer. Every `create` response must set `materializedFreshContent`: `true` only when that call created fresh workspace content/resources on which repo setup is permitted, and `false` when it adopted or reused existing content. `resume` state responses omit it.
 
 `project.source` is either a directory visible to the runtime wrapper or a Git URL plus a required revision string and optional subdirectory. An empty Git revision selects the remote's default state. Paseo derives this source before invoking the runtime; `placement.cwd` never overrides it. A `discovery` create must expose the same runtime environment as a user workspace but must not execute repository setup. The checked-in JSON example uses this purpose so wrappers can lock its exact bytes.
 
@@ -49,8 +49,12 @@ Paseo addresses only `workspaceId`. The runtime keeps physical placement private
 
 Every runtime must provide the compatible `paseo-workspace-helper` executable on its workload `PATH`. Paseo launches it as an ordinary workload with purpose `workspace-helper`, already rooted at the private workspace placement. The helper receives only relative `--path` values and uses its process cwd (`.`) as confinement authority; it has no `--root` option. Runtime authors do not implement file, watch, Git, provider, script, or agent APIs: the helper handles structured files and watching, while Paseo runs Git, providers, and scripts through `exec`.
 
+`describe` includes `requirements.daemonAuthentication`. Paseo refuses a runtime that requires
+authentication when daemon authentication is disabled. Placement may include `hostVisiblePath`
+for host editor integration; it is descriptive and never execution authority.
+
 ## Compatibility
 
-Version 1 targets macOS/Linux hosts and POSIX runtime environments. Unknown v1 fields are rejected; future fields require a new protocol version. A semantic change to framing, fd ownership, lifecycle, or cleanup also increments the protocol version. Paseo fails closed on a version mismatch; it never falls back to host execution.
+Version 2 targets macOS/Linux hosts and POSIX runtime environments. Unknown v2 fields are rejected; future fields require a new protocol version. A semantic change to framing, fd ownership, lifecycle, or cleanup also increments the protocol version. Paseo fails closed on a version mismatch; it never falls back to host execution.
 
 The private `@getpaseo/fixture-workspace-runtime` package is the executable contract fixture. It records the validated create input, can copy a directory source into owned storage, exposes deterministic failure and placement options, and runs workloads through both pipe and PTY framing. It is test infrastructure, not a production runtime or a second schema owner; all validation comes from this package's exported schemas.

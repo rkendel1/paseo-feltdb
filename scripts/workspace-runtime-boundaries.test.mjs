@@ -533,7 +533,7 @@ test("strict public schemas and helper argv reject root authority independent of
     () =>
       contract.CommandRuntimeLifecycleResponseSchema.parse({
         type: "state",
-        protocolVersion: 1,
+        protocolVersion: 2,
         state: { ...state },
         placement: { cwd: "/workspace" },
       }),

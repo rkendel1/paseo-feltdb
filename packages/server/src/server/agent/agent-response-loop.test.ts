@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { z } from "zod";
 import {
   getStructuredAgentResponse,
+  generateStructuredAgentResponse,
   generateStructuredAgentResponseWithFallback,
   StructuredAgentFallbackError,
   StructuredAgentResponseError,
@@ -154,7 +155,12 @@ describe("generateStructuredAgentResponseWithFallback", () => {
   }
 
   it("uses the first available provider in the waterfall", async () => {
-    const calls: Array<{ provider: string; model?: string; persistSession?: boolean }> = [];
+    const calls: Array<{
+      provider: string;
+      model?: string;
+      workspaceId?: string;
+      persistSession?: boolean;
+    }> = [];
     const manager = createManager([
       { provider: "claude", available: true, error: null },
       { provider: "codex", available: true, error: null },
@@ -164,6 +170,7 @@ describe("generateStructuredAgentResponseWithFallback", () => {
     const result = await generateStructuredAgentResponseWithFallback({
       manager,
       cwd: "/tmp/project",
+      workspaceId: "workspace-1",
       prompt: "Return JSON",
       schema,
       providers: [
@@ -175,6 +182,7 @@ describe("generateStructuredAgentResponseWithFallback", () => {
         calls.push({
           provider: options.agentConfig.provider,
           model: options.agentConfig.model ?? undefined,
+          workspaceId: options.workspaceId,
           persistSession: options.persistSession,
         });
         return { summary: "ok" };
@@ -182,7 +190,14 @@ describe("generateStructuredAgentResponseWithFallback", () => {
     });
 
     expect(result).toEqual({ summary: "ok" });
-    expect(calls).toEqual([{ provider: "claude", model: "haiku", persistSession: false }]);
+    expect(calls).toEqual([
+      {
+        provider: "claude",
+        model: "haiku",
+        workspaceId: "workspace-1",
+        persistSession: false,
+      },
+    ]);
     expect(manager.checkedProviders).toEqual(["claude"]);
   });
 
@@ -277,5 +292,31 @@ describe("generateStructuredAgentResponseWithFallback", () => {
         },
       }),
     ).rejects.toBeInstanceOf(StructuredAgentFallbackError);
+  });
+});
+
+describe("generateStructuredAgentResponse", () => {
+  it("creates its internal agent in the selected workspace", async () => {
+    const createAgent = vi.fn(async () => ({ id: "agent-1" }));
+    const manager = {
+      createAgent,
+      runAgent: async () => ({ finalText: '{"summary":"ok"}', timeline: [] }),
+      closeAgent: async () => {},
+      deleteAgentState: async () => {},
+    } as unknown as AgentManager;
+
+    await generateStructuredAgentResponse({
+      manager,
+      workspaceId: "workspace-1",
+      agentConfig: { provider: "codex", cwd: "/runtime/repo" },
+      prompt: "Return JSON",
+      schema: z.object({ summary: z.string() }),
+    });
+
+    expect(createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "/runtime/repo" }),
+      undefined,
+      { persistSession: undefined, workspaceId: "workspace-1" },
+    );
   });
 });

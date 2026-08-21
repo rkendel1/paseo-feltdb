@@ -6,9 +6,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-test("the public contract contains no host or provider authority fields", async () => {
+test("the public contract contains no provider or host execution authority fields", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /host-directory|hostVisiblePath|provider-probe|provider:/u);
+  assert.doesNotMatch(source, /host-directory|provider-probe|provider:/u);
 });
 import { promisify } from "node:util";
 
@@ -37,7 +37,7 @@ const npmCommand = process.platform === "win32" ? process.execPath : "npm";
 const npmPrefixArgs =
   process.platform === "win32" ? [requireEnvironmentVariable("npm_execpath")] : [];
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const examples = JSON.parse(await readFile(path.join(packageRoot, "examples/v1.json"), "utf8"));
+const examples = JSON.parse(await readFile(path.join(packageRoot, "examples/v2.json"), "utf8"));
 
 function requireEnvironmentVariable(name) {
   const value = process.env[name];
@@ -145,7 +145,7 @@ test("PTY keeps fd3 open for resize and signal through EOF and emits a valid fd4
     examples.bytes.startedEvent +
       examples.bytes.resizedEvent +
       examples.bytes.eofEvent +
-      '{"type":"exit","protocolVersion":1,"code":null,"signal":"SIGTERM"}\n',
+      '{"type":"exit","protocolVersion":2,"code":null,"signal":"SIGTERM"}\n',
   );
   assert.deepEqual(
     decodeEvents(events).map((event) => event.type),
@@ -156,7 +156,7 @@ test("PTY keeps fd3 open for resize and signal through EOF and emits a valid fd4
 test("actual fd4 rejects malformed and wrong-version frames and detects early wrapper exit", async () => {
   for (const [mode, pattern] of [
     ["malformed", SyntaxError],
-    ["wrong-version", /expected 1/],
+    ["wrong-version", /expected 2/],
   ]) {
     const child = spawn(process.execPath, [path.join(packageRoot, "test/pipe-fixture.mjs"), mode], {
       stdio: ["ignore", "ignore", "ignore", "ignore", "pipe"],
@@ -191,8 +191,8 @@ test("framing accepts partial bytes and rejects malformed, early EOF, and wrong 
 
   const wrongVersion = createCommandRuntimeMessageDecoder(CommandRuntimeProcessEventSchema);
   assert.throws(
-    () => wrongVersion.push('{"type":"exit","protocolVersion":2,"code":0,"signal":null}\n'),
-    /expected 1/,
+    () => wrongVersion.push('{"type":"exit","protocolVersion":3,"code":0,"signal":null}\n'),
+    /expected 2/,
   );
 });
 
@@ -275,7 +275,7 @@ test("process event conversations enforce the complete mode-specific lifecycle",
   }
 });
 
-test("every public v1 object rejects unknown authority at every nesting level", () => {
+test("every public v2 object rejects unknown authority at every nesting level", () => {
   const createInput = examples.lifecycleRequest.input;
   const gitSource = {
     kind: "git",
@@ -315,25 +315,25 @@ test("every public v1 object rejects unknown authority at every nesting level", 
     [
       "inspect request",
       CommandRuntimeLifecycleRequestSchema,
-      { protocolVersion: 1, options: {} },
+      { protocolVersion: 2, options: {} },
       [],
     ],
     [
       "pause request",
       CommandRuntimeLifecycleRequestSchema,
-      { protocolVersion: 1, options: {} },
+      { protocolVersion: 2, options: {} },
       [],
     ],
     [
       "resume request",
       CommandRuntimeLifecycleRequestSchema,
-      { protocolVersion: 1, options: {} },
+      { protocolVersion: 2, options: {} },
       [],
     ],
     [
       "destroy request",
       CommandRuntimeLifecycleRequestSchema,
-      { protocolVersion: 1, options: {} },
+      { protocolVersion: 2, options: {} },
       [],
     ],
     ["create input", CommandRuntimeCreateInputSchema, createInput, []],
@@ -410,37 +410,37 @@ test("every public v1 object rejects unknown authority at every nesting level", 
     [
       "inspection response",
       CommandRuntimeLifecycleResponseSchema,
-      { protocolVersion: 1, type: "inspection", inspection: { status: "missing" } },
+      { protocolVersion: 2, type: "inspection", inspection: { status: "missing" } },
       [],
     ],
     [
       "ready inspection response state",
       CommandRuntimeLifecycleResponseSchema,
-      { protocolVersion: 1, type: "inspection", inspection: readyInspection },
+      { protocolVersion: 2, type: "inspection", inspection: readyInspection },
       ["inspection", "state"],
     ],
     [
       "ready inspection response placement",
       CommandRuntimeLifecycleResponseSchema,
-      { protocolVersion: 1, type: "inspection", inspection: readyInspection },
+      { protocolVersion: 2, type: "inspection", inspection: readyInspection },
       ["inspection", "placement"],
     ],
     [
       "nested inspection",
       CommandRuntimeLifecycleResponseSchema,
-      { protocolVersion: 1, type: "inspection", inspection: { status: "missing" } },
+      { protocolVersion: 2, type: "inspection", inspection: { status: "missing" } },
       ["inspection"],
     ],
     [
       "pause ok response",
       CommandRuntimeLifecycleResponseSchema,
-      { protocolVersion: 1, type: "ok" },
+      { protocolVersion: 2, type: "ok" },
       [],
     ],
     [
       "destroy ok response",
       CommandRuntimeLifecycleResponseSchema,
-      { protocolVersion: 1, type: "ok" },
+      { protocolVersion: 2, type: "ok" },
       [],
     ],
     ["agent purpose", CommandRuntimeProcessPurposeSchema, { kind: "agent" }, []],
@@ -475,10 +475,10 @@ test("every public v1 object rejects unknown authority at every nesting level", 
   }
 });
 
-test("v1 extension maps stay explicit and future versions fail by protocol version", () => {
+test("v2 extension maps stay explicit and future versions fail by protocol version", () => {
   assert.deepEqual(
     CommandRuntimeLifecycleRequestSchema.parse({
-      protocolVersion: 1,
+      protocolVersion: 2,
       runtimeInstanceId: examples.lifecycleRequest.runtimeInstanceId,
       options: { root: "runtime-private-option", vendorExtension: { nested: true } },
     }).options,
@@ -510,7 +510,7 @@ test("v1 extension maps stay explicit and future versions fail by protocol versi
     [CommandRuntimeControlSchema, examples.pipeSpawnControl],
     [CommandRuntimeProcessEventSchema, examples.startedEvent],
   ]) {
-    assert.throws(() => schema.parse({ ...value, protocolVersion: 2 }), /expected 1/);
+    assert.throws(() => schema.parse({ ...value, protocolVersion: 3 }), /expected 2/);
   }
 });
 
@@ -551,7 +551,7 @@ test("every export condition resolves from a packed standalone install", async (
     await stat(path.join(installed, target));
   }
   const imported = await import(pathToFileURL(path.join(installed, manifest.exports["."].default)));
-  assert.equal(imported.COMMAND_RUNTIME_PROTOCOL_VERSION, 1);
+  assert.equal(imported.COMMAND_RUNTIME_PROTOCOL_VERSION, 2);
 });
 
 async function collect(stream) {

@@ -85,6 +85,7 @@ import {
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import type { BrowserToolsBroker } from "../../browser-tools/broker.js";
+import type { WorkspaceRuntimeAgentToolGroup } from "../../workspace-runtime/index.js";
 import type {
   PaseoToolCatalog,
   PaseoToolConfig,
@@ -144,7 +145,59 @@ export interface PaseoToolHostDependencies {
   resolveCallerContext?: (callerAgentId: string) => VoiceCallerContext | null;
   enableVoiceTools?: boolean;
   voiceOnly?: boolean;
+  agentToolGroups?: ReadonlySet<WorkspaceRuntimeAgentToolGroup>;
   logger: Logger;
+}
+
+function agentToolGroup(name: string): WorkspaceRuntimeAgentToolGroup | null {
+  if (name === "speak") return "voice";
+  if (name.startsWith("browser_")) return "browser";
+  if (["list_workspaces", "archive_workspace", "rename_workspace"].includes(name)) {
+    return "workspace";
+  }
+  if (
+    [
+      "create_agent",
+      "send_agent_prompt",
+      "get_agent_status",
+      "list_agents",
+      "cancel_agent",
+      "archive_agent",
+      "kill_agent",
+      "update_agent",
+      "get_agent_activity",
+      "set_agent_mode",
+    ].includes(name)
+  ) {
+    return "agents";
+  }
+  if (name.includes("terminal")) return "terminals";
+  if (name.includes("workspace_script")) return "scripts";
+  if (["create_heartbeat", "delete_heartbeat"].includes(name)) return "heartbeats";
+  if (["list_providers", "list_models", "list_profiles", "inspect_provider"].includes(name)) {
+    return "providers";
+  }
+  if (["list_pending_permissions", "respond_to_permission"].includes(name)) {
+    return "permissions";
+  }
+  return null;
+}
+
+function assertRuntimeScopedCreateAgentInput(name: string, value: Record<string, unknown>): void {
+  if (name !== "create_agent") return;
+  const legacyPlacementKeys = [
+    "relationship",
+    "workspace",
+    "cwd",
+    "worktreeName",
+    "branchName",
+    "baseBranch",
+    "refName",
+    "githubPrNumber",
+  ];
+  if (legacyPlacementKeys.some((key) => value[key] !== undefined)) {
+    throw new Error("Runtime-scoped agents may only create same-workspace subagents");
+  }
 }
 
 function parseTimestamp(value: string | null | undefined): number {
@@ -551,6 +604,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     callerAgentId,
     resolveSpeakHandler,
     resolveCallerContext,
+    agentToolGroups,
     logger,
   } = options;
   const childLogger = logger.child({ module: "agent", component: "paseo-tool-catalog" });
@@ -571,12 +625,50 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
   };
 
   const tools = new Map<string, PaseoToolDefinition>();
+  let scopedWorkspaceId: string | undefined;
+  if (agentToolGroups && callerAgentId) {
+    scopedWorkspaceId = agentManager.getAgent(callerAgentId)?.workspaceId;
+  }
+
+  const assertScopedInput = async (name: string, input: unknown): Promise<void> => {
+    if (!agentToolGroups) return;
+    if (!scopedWorkspaceId) throw new Error("Scoped Paseo tools require a workspace");
+    const value = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+    if (typeof value.workspaceId === "string" && value.workspaceId !== scopedWorkspaceId) {
+      throw new Error("Paseo tool target is outside the caller workspace");
+    }
+    assertRuntimeScopedCreateAgentInput(name, value);
+    if (typeof value.agentId === "string") {
+      const target =
+        agentManager.getAgent(value.agentId) ?? (await agentStorage.get(value.agentId));
+      if (!target || target.workspaceId !== scopedWorkspaceId) {
+        throw new Error("Paseo tool target is outside the caller workspace");
+      }
+    }
+    if (typeof value.terminalId === "string") {
+      const terminal = terminalManager?.getTerminal(value.terminalId);
+      if (!terminal || terminal.workspaceId !== scopedWorkspaceId) {
+        throw new Error("Paseo tool target is outside the caller workspace");
+      }
+    }
+    if (typeof value.cwd === "string") {
+      const caller = callerAgentId ? agentManager.getAgent(callerAgentId) : null;
+      const resolved = caller ? resolvePathFromBase(caller.cwd, value.cwd) : value.cwd;
+      if (!caller || !isSameOrDescendantPath(caller.cwd, resolved)) {
+        throw new Error("Paseo tool cwd is outside the caller workspace");
+      }
+    }
+  };
   const registerTool = (
     name: string,
     config: PaseoToolConfig,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Tool handlers are schema-validated at registration boundaries.
     handler: (input: any, context: PaseoToolExecutionContext) => Promise<PaseoToolResult>,
   ) => {
+    if (agentToolGroups) {
+      const group = agentToolGroup(name);
+      if (!group || !agentToolGroups.has(group)) return;
+    }
     tools.set(name, {
       name,
       title: config.title,
@@ -600,7 +692,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!tool) {
         throw new Error(`Paseo tool not found: ${name}`);
       }
-      return tool.handler(await parseToolInput(tool, input), context);
+      const parsed = await parseToolInput(tool, input);
+      await assertScopedInput(name, parsed);
+      return tool.handler(parsed, context);
     },
   });
 
@@ -1347,6 +1441,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       }
       const workspaces = (await options.workspaceRegistry.list())
         .filter((workspace) => !workspace.archivedAt)
+        .filter((workspace) => !scopedWorkspaceId || workspace.workspaceId === scopedWorkspaceId)
         .map(toWorkspaceAutomationSummary);
       return {
         content: [],
@@ -1431,7 +1526,19 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         requestedBackground = resolvedArgs.parsedArgs.background;
         notifyOnFinish = resolvedArgs.parsedArgs.notifyOnFinish ?? false;
       }
-      const selectedProvider = resolveRequiredProviderModel(parsedArgs.provider).provider;
+      const selectedProviderModel = resolveRequiredProviderModel(parsedArgs.provider);
+      const models = await providerSnapshotManager.listModels({
+        provider: selectedProviderModel.provider,
+        cwd: resolvedArgs.cwd,
+        workspaceId: resolvedArgs.workspaceId,
+        wait: true,
+      });
+      if (!models.some((model) => model.id === selectedProviderModel.model)) {
+        throw new Error(
+          `Unknown model '${selectedProviderModel.model}' for provider '${selectedProviderModel.provider}'. Call list_models and choose an available model.`,
+        );
+      }
+      const selectedProvider = selectedProviderModel.provider;
       const inheritedConfig = resolveInheritedProviderConfig(selectedProvider);
       const {
         snapshot,
@@ -2028,7 +2135,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       const requestedCwd = cwd?.trim() ? expandUserPath(cwd) : callerCwd;
       const statusFilter = statuses && statuses.length > 0 ? new Set(statuses) : null;
       const sinceMs = Date.now() - sinceHours * 60 * 60 * 1000;
-      const liveSnapshots = agentManager.listAgents();
+      const liveSnapshots = agentManager
+        .listAgents()
+        .filter((agent) => !scopedWorkspaceId || agent.workspaceId === scopedWorkspaceId);
       const liveAgents = await Promise.all(
         liveSnapshots.map((snapshot) =>
           serializeSnapshotWithMetadata(agentStorage, snapshot, childLogger),
@@ -2039,6 +2148,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       const registeredProviderIds = new Set(providerSnapshotManager.listRegisteredProviderIds());
       const storedAgents = storedRecords
         .filter((record) => !record.internal && !liveIds.has(record.id))
+        .filter((record) => !scopedWorkspaceId || record.workspaceId === scopedWorkspaceId)
         .filter((record) => includeArchived || !record.archivedAt)
         .filter(
           (record) =>
@@ -2345,7 +2455,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
                 })),
               ),
             )
-          ).flat()
+          )
+            .flat()
+            .filter((terminal) => {
+              if (!scopedWorkspaceId) return true;
+              return terminalManager.getTerminal(terminal.id)?.workspaceId === scopedWorkspaceId;
+            })
         : (await terminalManager.getTerminals(resolveScopedCwd(cwd, { required: true }))).map(
             (terminal) => ({
               id: terminal.id,
@@ -3020,6 +3135,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         agentId: z.string(),
         limit: z
           .number()
+          .int()
+          .positive()
+          .max(200)
           .optional()
           .describe("Optional limit for number of activities to include (most recent first)."),
       },
@@ -3110,6 +3228,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     },
     async () => {
       const permissions = agentManager.listAgents().flatMap((agent) => {
+        if (scopedWorkspaceId && agent.workspaceId !== scopedWorkspaceId) return [];
         const payload = toAgentPayload(agent);
         return payload.pendingPermissions.map((request) => ({
           agentId: agent.id,

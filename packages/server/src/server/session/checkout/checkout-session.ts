@@ -719,10 +719,10 @@ export class CheckoutSession {
       const workspaceGit = await this.resolveWorkspaceGit(msg);
       let message = msg.message?.trim() ?? "";
       if (!message) {
-        if (msg.workspaceId) {
-          throw new Error("Selected workspace Git requires an explicit commit message");
-        }
-        message = await this.gitMetadataGenerator.generateCommitMessage(cwd);
+        message = await this.gitMetadataGenerator.generateCommitMessage({
+          workspaceGit,
+          workspaceId: msg.workspaceId,
+        });
       }
       if (!message) {
         throw new Error("Commit message is required");
@@ -795,6 +795,12 @@ export class CheckoutSession {
         invalidateForge: true,
       });
       this.scheduleDiffRefresh(mutatedWorkspaceGit);
+      if (msg.workspaceId !== undefined && mutatedWorkspaceGit !== workspaceGit) {
+        await this.gitMutation.bind(workspaceGit).notify("merge-to-base", {
+          invalidateForge: true,
+        });
+        this.scheduleDiffRefresh(workspaceGit);
+      }
 
       this.host.emit({
         type: "checkout_merge_response",

@@ -990,6 +990,7 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
   let pendingInput = "";
   let inputFlushImmediate: ReturnType<typeof setImmediate> | null = null;
   let stateRevision = 0;
+  let snapshotAfterCurrentWrite = false;
   const inputModeTracker = new TerminalInputModeTracker();
   const activityTracker = new TerminalActivityTracker();
   const activityChangeListeners = new Set<(transition: TerminalActivityTransition) => void>();
@@ -1154,6 +1155,7 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
       return true;
     }
 
+    snapshotAfterCurrentWrite = true;
     for (const listener of Array.from(commandFinishedListeners)) {
       try {
         listener(commandFinished);
@@ -1249,6 +1251,16 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
       stateRevision += 1;
       for (const listener of listeners) {
         listener({ type: "output", data, revision: stateRevision });
+      }
+      if (snapshotAfterCurrentWrite) {
+        snapshotAfterCurrentWrite = false;
+        if (listeners.size === 0) {
+          return;
+        }
+        const snapshot = getStateSnapshot();
+        for (const listener of listeners) {
+          listener({ type: "snapshot", ...snapshot });
+        }
       }
     });
   }

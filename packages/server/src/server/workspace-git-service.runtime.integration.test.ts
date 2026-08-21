@@ -521,7 +521,7 @@ test("selected workspace Git rejects mutations unsupported by its command runtim
     "Branch not found: host-only",
   );
   await expect(selectedGit.mergeToBase({ baseRef: "main" })).rejects.toThrow(
-    "Selected workspace Git does not support merge to base",
+    "does not support Merge locally",
   );
   await expect(selectedGit.mergeFromBase({ baseRef: "main" })).rejects.toThrow(
     "Selected workspace Git does not support merge from base",
@@ -558,6 +558,21 @@ test("selected workspace Git commit and branch stay inside its command runtime",
     path: "tracked.txt",
     contents: Buffer.from("runtime edit\n"),
   });
+  const runtime = await workspaceRuntime.bind(workspaceId);
+  const nodeExecutable = await runtime.resolveCommand("node");
+  expect(nodeExecutable).not.toBeNull();
+  const createUntracked = await workspaceRuntime.run({
+    workspaceId,
+    argv: [
+      nodeExecutable!,
+      "-e",
+      "require('node:fs').writeFileSync('untracked.txt', 'runtime untracked\\n')",
+    ],
+    env: {},
+    purpose: { kind: "git" },
+  });
+  createUntracked.stdin.end();
+  await expect(createUntracked.exited).resolves.toEqual({ code: 0, signal: null });
   await writeFile(path.join(hostDecoy, "tracked.txt"), "host edit\n");
   await selectedGit.commit({ message: "runtime commit", addAll: true });
   await selectedGit.createBranch({ branch: "runtime-branch", baseRef: "main" });
@@ -572,10 +587,29 @@ test("selected workspace Git commit and branch stay inside its command runtime",
   expect(await readFile(path.join(runtimeRepository, "tracked.txt"), "utf8")).toBe(
     "runtime edit\n",
   );
+  expect(await readFile(path.join(runtimeRepository, "untracked.txt"), "utf8")).toBe(
+    "runtime untracked\n",
+  );
   expect(await readFile(path.join(hostDecoy, "tracked.txt"), "utf8")).toBe("host edit\n");
   expect(git(runtimeRepository, "log", "-1", "--format=%s")).toBe("runtime commit");
   expect(git(runtimeRepository, "branch", "--list", "runtime-branch")).toBe("runtime-branch");
 }, 30_000);
+
+test("selected workspace Git reports the runtime identity setting before staging", async () => {
+  const { runtimeRepository, selectedGit, workspaceRuntime, workspaceId } =
+    await createCommandRuntimeGitFixture();
+  git(runtimeRepository, "config", "user.name", "");
+  git(runtimeRepository, "config", "user.email", "");
+  await workspaceRuntime.files(workspaceId).write({
+    path: "tracked.txt",
+    contents: Buffer.from("runtime edit\n"),
+  });
+
+  await expect(selectedGit.commit({ message: "runtime commit", addAll: true })).rejects.toThrow(
+    "workspaceRuntimes.<runtimeId>.options.gitIdentity",
+  );
+  expect(git(runtimeRepository, "diff", "--cached", "--name-only")).toBe("");
+}, 20_000);
 
 test("selected workspace Git fetch stays inside its command runtime", async () => {
   const { root, runtimeRepository, selectedGit } = await createCommandRuntimeGitFixture();

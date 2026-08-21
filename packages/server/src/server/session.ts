@@ -4202,6 +4202,10 @@ export class Session {
         listWorkspaceRecords: () => this.workspaceRegistry.list(),
         archiveWorkspaceRecord: (workspaceId, options) =>
           this.archiveWorkspaceRecord(workspaceId, options),
+        preflightArchiveWorkspaceRecord: async (workspaceId) => {
+          const workspace = await this.workspaceRegistry.get(workspaceId);
+          if (workspace?.runtime) await this.workspaceRuntime?.preflightArchive(workspaceId);
+        },
         emit: (message) => this.emit(message),
         emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>
           this.emitWorkspaceUpdatesForWorkspaceIds(workspaceIds),
@@ -6482,6 +6486,10 @@ export class Session {
           listWorkspaceRecords: () => this.workspaceRegistry.list(),
           archiveWorkspaceRecord: (workspaceId, options) =>
             this.archiveWorkspaceRecord(workspaceId, options),
+          preflightArchiveWorkspaceRecord: async (workspaceId) => {
+            const workspace = await this.workspaceRegistry.get(workspaceId);
+            if (workspace?.runtime) await this.workspaceRuntime?.preflightArchive(workspaceId);
+          },
           emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>
             this.emitWorkspaceUpdatesForWorkspaceIds(workspaceIds),
           markWorkspaceArchiving: (workspaceIds, archivingAt) =>

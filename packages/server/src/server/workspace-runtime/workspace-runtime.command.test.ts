@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { afterEach, expect, test as vitestTest, vi } from "vitest";
 
-import { createWorkspaceRuntimeService } from "./index.js";
+import { createWorkspaceRuntimeService, isWorkspaceRuntimeRegistrationError } from "./index.js";
 
 const fixtureExecutable = fileURLToPath(
   new URL("../../../../../runtimes/fixture/src/index.mjs", import.meta.url),
@@ -65,6 +65,66 @@ test("a trusted registered command is selected and receives secret launch data o
     }),
   ).rejects.toThrow("Workspace runtime is not registered: nope");
   await fixture.service.destroy(fixture.workspaceId);
+});
+
+test("registration fails closed when the runtime requires daemon authentication", async () => {
+  const unauthenticated = await createFixture("daemon-auth-required", false, "pty", {
+    requiresDaemonAuthentication: true,
+  });
+  const failure = await unauthenticated.service.reconcile().catch((error: unknown) => error);
+  expect(isWorkspaceRuntimeRegistrationError(failure)).toBe(true);
+  expect((failure as AggregateError).errors).toEqual([
+    expect.objectContaining({ message: expect.stringContaining("requires daemon authentication") }),
+  ]);
+
+  const authenticated = await createFixture("daemon-auth-configured", false, "pty", {
+    requiresDaemonAuthentication: true,
+    daemonAuthenticationConfigured: true,
+  });
+  await expect(authenticated.service.create(authenticated.createInput)).resolves.toMatchObject({
+    workspaceId: authenticated.workspaceId,
+  });
+  await authenticated.service.destroy(authenticated.workspaceId);
+});
+
+test("registration fails closed when command runtime option validation fails", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "paseo-command-validation-"));
+  cleanupRoots.push(root);
+  const executable = path.join(root, "runtime.mjs");
+  await writeFile(
+    executable,
+    [
+      "const operation = process.argv[2];",
+      "if (operation === 'describe') process.stdout.write(JSON.stringify({protocolVersion:2,modes:['pipes'],reconcile:false,requirements:{daemonAuthentication:false}})+'\\n');",
+      "else if (operation === 'manage-describe') process.stdout.write(JSON.stringify({protocolVersion:2,operations:['validate-options']})+'\\n');",
+      "else if (operation === 'validate-options') { process.stderr.write('workspaceRuntimes options.readOnlyPaths path is unavailable: /missing/grant'); process.exitCode = 1; }",
+      "else process.exitCode = 2;",
+    ].join("\n"),
+  );
+  const service = createWorkspaceRuntimeService({
+    paseoHome: path.join(root, "paseo-home"),
+    resolveRuntimeId: async () => null,
+    persistRuntimeId: async () => {},
+    beginWorkspaceDeletion: async () => {},
+    removeWorkspaceRecord: async () => {},
+    externalRuntimes: {
+      validating: {
+        type: "command",
+        command: [processExecPath(), executable],
+        options: { readOnlyPaths: ["/missing/grant"] },
+      },
+    },
+  });
+
+  const failure = await service.reconcile().catch((error: unknown) => error);
+  expect(isWorkspaceRuntimeRegistrationError(failure)).toBe(true);
+  expect((failure as AggregateError).errors).toEqual([
+    expect.objectContaining({
+      message: expect.stringContaining(
+        "workspaceRuntimes options.readOnlyPaths path is unavailable: /missing/grant",
+      ),
+    }),
+  ]);
 });
 
 test("the fixture executable receives generic discovery purpose through the strict lifecycle contract", async () => {
@@ -535,11 +595,11 @@ test.each(["success", "error", "hang"] as const)(
 
 test("a command runtime protocol version mismatch fails with the authored and expected versions", async () => {
   const fixture = await createFixture("version-mismatch", false, "pty", {
-    describeProtocolVersion: 2,
+    describeProtocolVersion: 3,
   });
 
   await expect(fixture.service.create(fixture.createInput)).rejects.toThrow(
-    "unsupported command protocol version 2; expected 1",
+    "unsupported command protocol version 3; expected 2",
   );
 });
 
@@ -924,6 +984,7 @@ async function createFixture(
   const workspaceId = `${name}-workspace`;
   const service = createWorkspaceRuntimeService({
     paseoHome: path.join(root, "paseo-home"),
+    daemonAuthenticationConfigured: runtimeOptions.daemonAuthenticationConfigured === true,
     resolveRuntimeId: async (id) => runtimeIds.get(id) ?? null,
     persistRuntimeId: async (id, runtimeId) => {
       runtimeIds.set(id, runtimeId);
@@ -945,6 +1006,9 @@ async function createFixture(
           ...(runtimeOptions.describeProtocolVersion === undefined
             ? []
             : ["--protocol-version", String(runtimeOptions.describeProtocolVersion)]),
+          ...(runtimeOptions.requiresDaemonAuthentication === true
+            ? ["--require-daemon-auth"]
+            : []),
         ],
         options: {
           stateDirectory,

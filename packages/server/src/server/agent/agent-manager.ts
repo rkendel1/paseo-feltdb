@@ -286,6 +286,14 @@ export interface AgentManagerOptions {
     workspaceId: string,
     cwd: string,
   ) => Promise<AgentLaunchContext["workspace"] | null>;
+  resolveWorkspaceRuntimeId?: (workspaceId: string) => Promise<string | null>;
+}
+
+interface AgentMcpAuthBinding {
+  token: string;
+  workspaceId: string | null;
+  runtimeId: string | null;
+  generation: number;
 }
 
 export interface WaitForAgentOptions {
@@ -665,6 +673,7 @@ export class AgentManager {
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
+  private readonly agentMcpAuthBindings = new Map<string, AgentMcpAuthBinding>();
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private appendSystemPrompt: string;
@@ -674,6 +683,7 @@ export class AgentManager {
   private logger: Logger;
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
   private readonly resolveProviderWorkspace?: AgentManagerOptions["resolveProviderWorkspace"];
+  private readonly resolveWorkspaceRuntimeId?: AgentManagerOptions["resolveWorkspaceRuntimeId"];
   private acceptingAgentRegistrations = true;
 
   constructor(options: AgentManagerOptions) {
@@ -688,6 +698,7 @@ export class AgentManager {
     this.appendSystemPrompt = options.appendSystemPrompt ?? "";
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
     this.resolveProviderWorkspace = options.resolveProviderWorkspace;
+    this.resolveWorkspaceRuntimeId = options.resolveWorkspaceRuntimeId;
     this.rescueTimeouts = {
       reloadSessionCloseMs:
         options.rescueTimeouts?.reloadSessionCloseMs ?? RELOAD_SESSION_CLOSE_TIMEOUT_MS,
@@ -774,6 +785,24 @@ export class AgentManager {
    */
   getMcpAuthToken(): string | null {
     return this.mcpAuthToken;
+  }
+
+  authenticateAgentMcpRequest(authorizationHeader: string | undefined): {
+    agentId: string;
+    workspaceId: string | null;
+    runtimeId: string | null;
+    generation: number;
+  } | null {
+    const token = authorizationHeader?.match(/^Bearer\s+(.+)$/i)?.[1] ?? null;
+    if (!token) return null;
+    for (const [agentId, binding] of this.agentMcpAuthBindings) {
+      if (binding.token !== token) continue;
+      const agent = this.getAgent(agentId);
+      if (!agent || (agent.workspaceId ?? null) !== binding.workspaceId) return null;
+      const { workspaceId, runtimeId, generation } = binding;
+      return { agentId, workspaceId, runtimeId, generation };
+    }
+    return null;
   }
 
   setAppendSystemPrompt(prompt: string | null | undefined): void {
@@ -1524,6 +1553,7 @@ export class AgentManager {
 
   private async closeAgentRuntime(agentId: string): Promise<void> {
     const agent = this.requireAgent(agentId);
+    this.agentMcpAuthBindings.delete(agentId);
     this.logger.trace(
       {
         agentId,
@@ -4614,12 +4644,23 @@ export class AgentManager {
       env,
       validateHostCwd: !workspaceId,
     });
+    const mcpAuthToken = randomUUID();
+    const previousBinding = this.agentMcpAuthBindings.get(agentId);
+    const runtimeId = workspaceId
+      ? ((await this.resolveWorkspaceRuntimeId?.(workspaceId)) ?? null)
+      : null;
+    this.agentMcpAuthBindings.set(agentId, {
+      token: mcpAuthToken,
+      workspaceId: workspaceId ?? null,
+      runtimeId,
+      generation: (previousBinding?.generation ?? 0) + 1,
+    });
     const launchConfig = this.applyDaemonAppendSystemPrompt(
       withRuntimePaseoMcpServer({
         config: storedConfig,
         agentId,
         mcpBaseUrl: this.mcpBaseUrl,
-        mcpAuthToken: this.mcpAuthToken,
+        mcpAuthToken,
       }),
     );
     return { storedConfig, launchConfig };
@@ -4768,7 +4809,7 @@ export class AgentManager {
       await client.archiveNativeSession(persistence, launchContext);
     } catch (error) {
       this.logger.warn(
-        { error, provider, sessionId: persistence.sessionId },
+        { err: error, provider, sessionId: persistence.sessionId },
         "Failed to archive native session (best-effort)",
       );
     }

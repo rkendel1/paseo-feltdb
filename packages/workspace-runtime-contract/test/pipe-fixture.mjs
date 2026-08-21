@@ -8,7 +8,7 @@ import {
   encodeCommandRuntimeMessage,
 } from "../dist/index.js";
 
-const examples = JSON.parse(readFileSync(new URL("../examples/v1.json", import.meta.url), "utf8"));
+const examples = JSON.parse(readFileSync(new URL("../examples/v2.json", import.meta.url), "utf8"));
 const mode = process.argv[2] ?? "conversation";
 
 if (mode === "lifecycle") {
@@ -22,7 +22,7 @@ if (mode === "lifecycle") {
 } else if (mode === "malformed") {
   writeSync(4, "{malformed}\n");
 } else if (mode === "wrong-version") {
-  writeSync(4, '{"type":"started","protocolVersion":2}\n');
+  writeSync(4, '{"type":"started","protocolVersion":3}\n');
 } else {
   const fd3 = readFileSync(3, "utf8");
   const envelope = CommandRuntimeSpawnEnvelopeSchema.parse(JSON.parse(fd3));

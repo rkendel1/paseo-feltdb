@@ -19,7 +19,7 @@ describe("withRuntimePaseoMcpServer", () => {
 
     expect(result.mcpServers?.paseo).toEqual({
       type: "http",
-      url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=agent-1",
+      url: "http://127.0.0.1:6767/mcp/agents/agent",
       headers: { Authorization: "Bearer cap-token" },
     });
   });
@@ -34,7 +34,7 @@ describe("withRuntimePaseoMcpServer", () => {
 
     expect(result.mcpServers?.paseo).toEqual({
       type: "http",
-      url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=agent-1",
+      url: "http://127.0.0.1:6767/mcp/agents/agent",
     });
   });
 
@@ -47,5 +47,29 @@ describe("withRuntimePaseoMcpServer", () => {
     });
 
     expect(result.mcpServers).toBeUndefined();
+  });
+
+  test("rotates an already injected scoped server", () => {
+    const result = withRuntimePaseoMcpServer({
+      config: {
+        ...BASE_CONFIG,
+        mcpServers: {
+          paseo: {
+            type: "http",
+            url: "http://127.0.0.1:6767/mcp/agents/agent",
+            headers: { Authorization: "Bearer old-token" },
+          },
+        },
+      },
+      agentId: "agent-1",
+      mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
+      mcpAuthToken: "new-token",
+    });
+
+    expect(result.mcpServers?.paseo).toEqual({
+      type: "http",
+      url: "http://127.0.0.1:6767/mcp/agents/agent",
+      headers: { Authorization: "Bearer new-token" },
+    });
   });
 });

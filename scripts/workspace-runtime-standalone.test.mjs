@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -18,19 +18,20 @@ test("the fixture installs and describes from isolated packed dependencies", asy
     }
     for (const artifact of managedArtifacts) {
       if (artifact.hiddenPath) {
-        await rename(artifact.hiddenPath, path.join(repoRoot, artifact.relativePath));
+        await move(artifact.hiddenPath, path.join(repoRoot, artifact.relativePath));
       }
     }
     await rm(root, { recursive: true, force: true });
   });
   const packs = path.join(root, "packs");
+  const npmEnvironment = { ...process.env, npm_config_cache: path.join(root, "npm-cache") };
   await mkdir(packs);
 
   for (const relativePath of buildArtifacts) {
     const hiddenPath = path.join(root, "previous-dist", relativePath.replaceAll("/", "__"));
     try {
       await mkdir(path.dirname(hiddenPath), { recursive: true });
-      await rename(path.join(repoRoot, relativePath), hiddenPath);
+      await move(path.join(repoRoot, relativePath), hiddenPath);
       managedArtifacts.push({ relativePath, hiddenPath });
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
@@ -44,6 +45,7 @@ test("the fixture installs and describes from isolated packed dependencies", asy
   };
   await run("npm", ["run", "build", "--workspace=@getpaseo/fixture-workspace-runtime"], {
     cwd: repoRoot,
+    env: npmEnvironment,
   });
   const tarballs = {};
   for (const [name, relativeRoot] of Object.entries(packageRoots)) {
@@ -51,6 +53,7 @@ test("the fixture installs and describes from isolated packed dependencies", asy
       (
         await run("npm", ["pack", "--json", "--pack-destination", packs], {
           cwd: path.join(repoRoot, relativeRoot),
+          env: npmEnvironment,
         })
       ).stdout,
     );
@@ -72,14 +75,15 @@ test("the fixture installs and describes from isolated packed dependencies", asy
   );
   await run("npm", ["install", "--ignore-scripts"], {
     cwd: project,
-    env: { ...process.env, npm_config_cache: path.join(root, "npm-cache") },
+    env: npmEnvironment,
   });
   const bin = path.join(project, "node_modules/.bin/paseo-fixture-workspace-runtime");
   const description = JSON.parse((await run(bin, ["describe"], { cwd: project })).stdout);
   assert.deepEqual(description, {
-    protocolVersion: 1,
+    protocolVersion: 2,
     modes: ["pipes", "pty"],
     reconcile: false,
+    requirements: { daemonAuthentication: false },
   });
   const bundledHelper = path.join(
     project,
@@ -101,3 +105,13 @@ const buildArtifacts = [
   "packages/workspace-helper/dist",
   "runtimes/fixture/dist",
 ];
+
+async function move(source, destination) {
+  try {
+    await rename(source, destination);
+  } catch (error) {
+    if (error.code !== "EXDEV") throw error;
+    await cp(source, destination, { recursive: true });
+    await rm(source, { recursive: true, force: true });
+  }
+}

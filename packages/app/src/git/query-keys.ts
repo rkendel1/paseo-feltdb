@@ -1,6 +1,5 @@
 import type { Query, QueryClient } from "@tanstack/react-query";
 import {
-  workspaceGitQueryIdentitiesEqual,
   type WorkspaceGitQueryIdentity,
   type WorkspaceGitStatusTarget,
   type WorkspaceGitTarget,
@@ -139,7 +138,8 @@ function checkoutQueryPredicate(
       key[1] === scope.serverId &&
       (scope.target === undefined ||
         (isWorkspaceGitQueryIdentity(key[2]) &&
-          workspaceGitQueryIdentitiesEqual(key[2], scope.target.queryIdentity) &&
+          key[2][0] === scope.target.queryIdentity[0] &&
+          key[2][1] === scope.target.queryIdentity[1] &&
           key[3] === scope.target.cwd))
     );
   };

@@ -106,7 +106,7 @@ interface RecordedGitMutationCalls {
 }
 
 interface RecordedGeneratorCalls {
-  generateCommitMessage: string[];
+  generateCommitMessage: Array<{ cwd: string; workspaceId?: string }>;
   generatePullRequestText: Array<{ cwd: string; baseRef?: string }>;
 }
 
@@ -153,8 +153,8 @@ function makeCheckoutSession(options?: {
     ...options?.gitMutation,
   };
   const gitMetadataGenerator: GitMetadataGenerator = {
-    generateCommitMessage: async (cwd) => {
-      generatorCalls.generateCommitMessage.push(cwd);
+    generateCommitMessage: async ({ workspaceGit, workspaceId }) => {
+      generatorCalls.generateCommitMessage.push({ cwd: workspaceGit.cwd, workspaceId });
       return "";
     },
     generatePullRequestText: async (cwd, baseRef) => {
@@ -824,7 +824,7 @@ describe("CheckoutSession", () => {
         requestId: "c1",
       });
 
-      expect(generatorCalls.generateCommitMessage).toEqual(["/repo"]);
+      expect(generatorCalls.generateCommitMessage).toEqual([{ cwd: "/repo" }]);
       expect(emitted).toEqual([
         {
           type: "checkout_commit_response",
@@ -836,6 +836,74 @@ describe("CheckoutSession", () => {
           },
         },
       ]);
+    });
+
+    it("generates a selected workspace commit message through its bound Git capability", async () => {
+      const commitCalls: Array<{
+        cwd: string;
+        options: { message: string; addAll: boolean };
+      }> = [];
+      const generateCommitMessage = vi.fn().mockResolvedValue("Generated runtime commit");
+      const { checkout, emitted } = makeCheckoutSession({
+        git: {
+          commit: async (cwd, options) => {
+            commitCalls.push({ cwd, options });
+          },
+        },
+        gitMetadataGenerator: { generateCommitMessage },
+      });
+
+      await checkout.handleCheckoutCommitRequest({
+        type: "checkout_commit_request",
+        workspaceId: "workspace-1",
+        cwd: "/runtime/repo",
+        addAll: true,
+        requestId: "c2",
+      });
+
+      expect(generateCommitMessage).toHaveBeenCalledWith({
+        workspaceGit: expect.objectContaining({ cwd: "/runtime/repo" }),
+        workspaceId: "workspace-1",
+      });
+      expect(commitCalls).toEqual([
+        {
+          cwd: "/runtime/repo",
+          options: { message: "Generated runtime commit", addAll: true },
+        },
+      ]);
+      expect(emitted).toContainEqual({
+        type: "checkout_commit_response",
+        payload: {
+          cwd: "/runtime/repo",
+          success: true,
+          error: null,
+          requestId: "c2",
+        },
+      });
+    });
+
+    it("uses an explicit selected workspace commit message without generation", async () => {
+      const commit = vi.fn().mockResolvedValue(undefined);
+      const generateCommitMessage = vi.fn().mockResolvedValue("Unused generated message");
+      const { checkout } = makeCheckoutSession({
+        git: { commit },
+        gitMetadataGenerator: { generateCommitMessage },
+      });
+
+      await checkout.handleCheckoutCommitRequest({
+        type: "checkout_commit_request",
+        workspaceId: "workspace-1",
+        cwd: "/runtime/repo",
+        message: "Explicit runtime commit",
+        addAll: false,
+        requestId: "c3",
+      });
+
+      expect(generateCommitMessage).not.toHaveBeenCalled();
+      expect(commit).toHaveBeenCalledWith("/runtime/repo", {
+        message: "Explicit runtime commit",
+        addAll: false,
+      });
     });
   });
 

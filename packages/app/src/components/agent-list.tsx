@@ -25,6 +25,7 @@ import { HighlightedText } from "@/components/ui/highlighted-text";
 import { StatusBadge, type StatusBadgeVariant } from "@/components/ui/status-badge";
 import type { AgentSearchMatch } from "@getpaseo/protocol/messages";
 import type { MatchRange } from "@getpaseo/protocol/search/text-match";
+import { useMinuteTick } from "@/hooks/use-minute-tick";
 
 interface AgentListProps {
   agents: AggregatedAgent[];
@@ -226,6 +227,8 @@ function SessionRow({
 }) {
   const { theme } = useUnistyles();
   const { t } = useTranslation();
+  // Idle agents get no prop churn, so tick to keep "Xm ago" from freezing.
+  useMinuteTick();
   const timeAgo = formatTimeAgo(agent.lastActivityAt);
   const agentKey = `${agent.serverId}:${agent.id}`;
   const isSelected = selectedAgentId === agentKey;

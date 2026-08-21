@@ -1,8 +1,9 @@
-import { memo, useMemo } from "react";
+import { memo, useCallback, useMemo } from "react";
 import { View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet } from "react-native-unistyles";
 import { ComposerTrackPill, ComposerTrackRow } from "@/composer/tracks";
+import { ComposerTrackProgressRing } from "@/composer/track-progress-ring";
 import { TaskListRow } from "@/components/task-list-row";
 import type { TodoEntry } from "@/types/stream";
 
@@ -25,17 +26,25 @@ const TaskListCard = memo(function TaskListCard({ tasks }: { tasks: TodoEntry[] 
   // truncated on a phone; the panel shows it in full, in place, with the rest of the list.
   const label = t("message.todo.tasksProgress", { completed, total: tasks.length });
   const segments = useMemo(() => [{ bucket: null, text: label }], [label]);
+  // The same fraction the label spells, as the mark that leads it. The ring is the part you can
+  // read at a glance without parsing two numbers, and the numbers stay for the exact count.
+  const progress = completed / tasks.length;
+  const renderMark = useCallback(
+    () => <ComposerTrackProgressRing progress={progress} />,
+    [progress],
+  );
 
   return (
     <ComposerTrackPill
       testID="agent-task-list-header"
       segments={segments}
+      leading={renderMark}
       panelTitle={t("message.todo.title")}
     >
       {tasks.map((task, index) => (
         <ComposerTrackRow key={task.id ?? `${index}:${task.text}`}>
           <View style={styles.taskRow}>
-            <TaskListRow task={task} />
+            <TaskListRow task={task} live />
           </View>
         </ComposerTrackRow>
       ))}

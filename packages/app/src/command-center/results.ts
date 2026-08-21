@@ -7,6 +7,8 @@ export interface CommandCenterWorkspaceResult {
   title: string;
   subtitle: string;
   searchText: string;
+  /** PR/MR number backing this workspace, so a number query can match it exactly. */
+  changeRequestNumber: number | null;
   run(): void;
 }
 

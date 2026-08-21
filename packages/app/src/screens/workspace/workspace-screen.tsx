@@ -743,7 +743,6 @@ const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitcher({
         options={tabSwitcherOptions}
         value={activeTabKey}
         onSelect={onSelectSwitcherTab}
-        searchable={false}
         title={t("workspace.tabs.switcher.title")}
         searchPlaceholder={t("workspace.tabs.switcher.searchPlaceholder")}
         open={isOpen}

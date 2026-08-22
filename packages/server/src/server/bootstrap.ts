@@ -399,7 +399,6 @@ export async function createPaseoDaemon(
     // Run crash recovery: reconcile durable Runs against runtime state
     const runRecoveryManager = new RunRecoveryManager({
       paseoState,
-      agentStorage,
       logger,
     });
     const recoverySummary = await runRecoveryManager.reconcileAll();

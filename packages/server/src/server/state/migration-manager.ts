@@ -16,6 +16,8 @@ import type {
   PersistedProjectRecord,
   PersistedWorkspaceRecord,
 } from "../workspace-registry.js";
+import type { AgentStorage } from "../agent/agent-storage.js";
+import type { PaseoState } from "./paseo-state.js";
 
 interface MigrationResult {
   success: boolean;
@@ -65,6 +67,8 @@ export async function runMigration(
   paseoHome: string,
   repos: Repositories,
   logger: Logger,
+  agentStorage?: AgentStorage,
+  paseoState?: PaseoState,
 ): Promise<MigrationResult> {
   const log = logger.child({ module: "migration-manager" });
   const migrationName = "json-to-feltdb";
@@ -204,10 +208,94 @@ export async function runMigration(
       }
     }
 
-    // Migrate agents (if AgentStorage provides a migration interface, use it)
-    // For now, this is deferred to Phase 3 when agent timeline migration is implemented
-    if (legacy.hasAgents) {
-      log.info("Agent migration deferred to Phase 3 (timeline integration)");
+    // Migrate agents from AgentStorage to FeltDB
+    if (legacy.hasAgents && agentStorage && paseoState) {
+      try {
+        const agentRecords = await agentStorage.list();
+        for (const legacyAgent of agentRecords) {
+          try {
+            const existing = await repos.agents.getById(legacyAgent.id);
+            if (existing) {
+              log.debug({ agentId: legacyAgent.id }, "Agent already migrated");
+              continue;
+            }
+
+            // Resolve workspace from agent cwd
+            const workspace = await paseoState.workspaces.getByCwd(legacyAgent.cwd);
+            if (!workspace) {
+              // Workspace not found - record warning but continue
+              log.warn(
+                { agentId: legacyAgent.id, cwd: legacyAgent.cwd },
+                "Could not find workspace for agent cwd; agent will not be migrated",
+              );
+              errors.push({
+                entity: "agent",
+                id: legacyAgent.id,
+                error: `No workspace found for cwd: ${legacyAgent.cwd}`,
+              });
+              continue;
+            }
+
+            // Migrate agent to FeltDB
+            await repos.agents.create({
+              id: legacyAgent.id,
+              workspaceId: workspace.id,
+              provider: (legacyAgent.provider || "claude") as "claude" | "codex" | "opencode",
+              model: legacyAgent.runtimeInfo?.model || undefined,
+              status: (legacyAgent.lastStatus || "closed") as
+                | "running"
+                | "closed"
+                | "paused"
+                | "archived",
+              config: legacyAgent.config
+                ? {
+                    title: legacyAgent.config.title || undefined,
+                    modeId: legacyAgent.config.modeId || undefined,
+                    thinkingOptionId: legacyAgent.config.thinkingOptionId || undefined,
+                    systemPrompt: legacyAgent.config.systemPrompt || undefined,
+                    mcpServers: legacyAgent.config.mcpServers || undefined,
+                    extra: legacyAgent.config.extra || undefined,
+                  }
+                : undefined,
+              createdAt: legacyAgent.createdAt,
+              updatedAt: legacyAgent.updatedAt,
+              lastActivityAt: legacyAgent.lastActivityAt,
+              lastUserMessageAt: legacyAgent.lastUserMessageAt || undefined,
+              persistenceHandle: legacyAgent.persistence || undefined,
+              labels: legacyAgent.labels || {},
+              attention: legacyAgent.requiresAttention
+                ? {
+                    required: true,
+                    reason: (legacyAgent.attentionReason || undefined) as
+                      | "finished"
+                      | "error"
+                      | "permission"
+                      | undefined,
+                    timestamp: legacyAgent.attentionTimestamp || undefined,
+                  }
+                : undefined,
+              internal: legacyAgent.internal || false,
+              archivedAt: legacyAgent.archivedAt || undefined,
+            });
+
+            agentsMigrated++;
+            log.debug({ agentId: legacyAgent.id }, "Agent migrated to FeltDB");
+          } catch (err) {
+            const error = err instanceof Error ? err.message : String(err);
+            errors.push({ entity: "agent", id: legacyAgent.id, error });
+            log.warn(
+              { agentId: legacyAgent.id, err },
+              "Failed to migrate agent to FeltDB",
+            );
+          }
+        }
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        log.error({ err }, "Failed to migrate agents");
+        errors.push({ entity: "agents", id: "all", error });
+      }
+    } else if (legacy.hasAgents) {
+      log.warn("Agent directory exists but AgentStorage not available; skipping agent migration");
     }
 
     const completedAt = new Date().toISOString();

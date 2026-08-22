@@ -14,12 +14,10 @@
  */
 
 import type { Logger } from "pino";
-import type { AgentStorage } from "../agent/agent-storage.js";
 import type { PaseoState } from "./paseo-state.js";
 
 export interface RunRecoveryOptions {
   paseoState: PaseoState;
-  agentStorage: AgentStorage;
   logger: Logger;
 }
 
@@ -38,12 +36,10 @@ export interface RunRecoverySummary {
  */
 export class RunRecoveryManager {
   private readonly paseoState: PaseoState;
-  private readonly agentStorage: AgentStorage;
   private readonly logger: Logger;
 
   constructor(options: RunRecoveryOptions) {
     this.paseoState = options.paseoState;
-    this.agentStorage = options.agentStorage;
     this.logger = options.logger.child({ module: "run-recovery" });
   }
 
@@ -140,7 +136,7 @@ export class RunRecoveryManager {
    * Determine whether a Run is orphaned (its execution definitively no longer exists).
    *
    * Conservative logic:
-   * - If the agent doesn't exist in AgentStorage, the Run is orphaned
+   * - If the agent doesn't exist in FeltDB, the Run is orphaned
    * - If the agent exists with a persistence handle, defer (it might be recoverable)
    * - If the agent exists but has no persistence, mark as orphaned
    *
@@ -151,20 +147,20 @@ export class RunRecoveryManager {
     const { agentId } = run;
 
     try {
-      // Check if the agent still exists in AgentStorage
-      const agent = await this.agentStorage.get(agentId);
+      // Check if the agent still exists in FeltDB
+      const agent = await this.paseoState.agents.getById(agentId);
 
       if (!agent) {
         // Agent was deleted or never stored - Run is definitely orphaned
         this.logger.debug(
           { agentId, runId: run.id },
-          "Agent not found in storage: Run is orphaned",
+          "Agent not found in FeltDB: Run is orphaned",
         );
         return true;
       }
 
       // Agent exists. Check if it has a valid persistence handle.
-      if (!agent.persistence || !agent.persistence.sessionId) {
+      if (!agent.persistenceHandle || !agent.persistenceHandle.sessionId) {
         // Agent has no session information - cannot resume, Run is orphaned
         this.logger.debug(
           { agentId, runId: run.id },

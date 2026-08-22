@@ -12,6 +12,7 @@ import {
 } from "./feltdb/index.js";
 import { createPaseoState, type PaseoState } from "./paseo-state.js";
 import { runMigration, detectLegacyState, hasMigrationCompleted } from "./migration-manager.js";
+import { AgentStorage } from "../agent/agent-storage.js";
 
 export interface StateInitOptions {
   paseoHome: string;
@@ -58,13 +59,21 @@ export async function initializeState(options: StateInitOptions): Promise<Initia
     const db = paseoDB.getDatabase();
     const repositories = createRepositories(db);
 
-    // 3. Check for legacy state and run migration if needed
+    // 3. Create state service early (needed for migration)
+    const state = createPaseoState(repositories, logger);
+
+    // 4. Initialize AgentStorage (needed for migration)
+    const agentStoragePath = `${paseoHome}/agents`;
+    const agentStorage = new AgentStorage(agentStoragePath, logger);
+    await agentStorage.initialize();
+
+    // 5. Check for legacy state and run migration if needed
     const legacy = detectLegacyState(paseoHome);
     const alreadyMigrated = await hasMigrationCompleted(repositories);
 
     if ((legacy.hasProjects || legacy.hasWorkspaces || legacy.hasAgents) && !alreadyMigrated) {
       log.info("Legacy state detected, running migration");
-      const migrationResult = await runMigration(paseoHome, repositories, logger);
+      const migrationResult = await runMigration(paseoHome, repositories, logger, agentStorage, state);
 
       if (!migrationResult.success) {
         log.warn(
@@ -75,9 +84,6 @@ export async function initializeState(options: StateInitOptions): Promise<Initia
         log.info("Migration completed successfully");
       }
     }
-
-    // 4. Create state service
-    const state = createPaseoState(repositories, logger);
 
     // 5. Verify health
     const health = await paseoDB.health();

@@ -110,3 +110,9 @@ export async function initializeState(options: StateInitOptions): Promise<Initia
 
 export type { PaseoState } from "./paseo-state.js";
 export { detectLegacyState } from "./migration-manager.js";
+export {
+  createContextResolver,
+  type ContextResolver,
+  type ContextResolverInput,
+  type AgentContext,
+} from "./context-resolver.js";

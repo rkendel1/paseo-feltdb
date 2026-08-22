@@ -419,7 +419,8 @@ interface ACPAgentClientOptions {
   configFeatureOptions?: ACPConfigFeatureOption[];
   clientCapabilities?: ACPClientCapabilities;
   clientCapabilityMeta?: ACPClientCapabilityMeta;
-  modeIdTransformer?: (modeId: string) => string | null;
+  modeIdTransformer?: (modeId: string, currentModeId?: string | null) => string | null;
+  providerModeMapper?: (modeId: string) => string | null;
   toolSnapshotTransformer?: (snapshot: ACPToolSnapshot) => ACPToolSnapshot;
   providerModeWriter?: (
     context: ACPProviderModeWriterContext,
@@ -449,7 +450,8 @@ interface ACPAgentSessionOptions {
   configFeatureOptions?: ACPConfigFeatureOption[];
   clientCapabilities?: ACPClientCapabilities;
   clientCapabilityMeta?: ACPClientCapabilityMeta;
-  modeIdTransformer?: (modeId: string) => string | null;
+  modeIdTransformer?: (modeId: string, currentModeId?: string | null) => string | null;
+  providerModeMapper?: (modeId: string) => string | null;
   toolSnapshotTransformer?: (snapshot: ACPToolSnapshot) => ACPToolSnapshot;
   providerModeWriter?: (
     context: ACPProviderModeWriterContext,
@@ -806,7 +808,11 @@ export class ACPAgentClient implements AgentClient {
   private readonly configFeatureOptions: ACPConfigFeatureOption[];
   private readonly clientCapabilities?: ACPClientCapabilities;
   private readonly clientCapabilityMeta?: ACPClientCapabilityMeta;
-  private readonly modeIdTransformer?: (modeId: string) => string | null;
+  private readonly modeIdTransformer?: (
+    modeId: string,
+    currentModeId?: string | null,
+  ) => string | null;
+  private readonly providerModeMapper?: (modeId: string) => string | null;
   private readonly toolSnapshotTransformer?: (snapshot: ACPToolSnapshot) => ACPToolSnapshot;
   private readonly providerModeWriter?: (
     context: ACPProviderModeWriterContext,
@@ -843,6 +849,7 @@ export class ACPAgentClient implements AgentClient {
     this.clientCapabilities = options.clientCapabilities;
     this.clientCapabilityMeta = options.clientCapabilityMeta;
     this.modeIdTransformer = options.modeIdTransformer;
+    this.providerModeMapper = options.providerModeMapper;
     this.toolSnapshotTransformer = options.toolSnapshotTransformer;
     this.providerModeWriter = options.providerModeWriter;
     this.beforeModeWriter = options.beforeModeWriter;
@@ -872,6 +879,7 @@ export class ACPAgentClient implements AgentClient {
         clientCapabilities: this.clientCapabilities,
         clientCapabilityMeta: this.clientCapabilityMeta,
         modeIdTransformer: this.modeIdTransformer,
+        providerModeMapper: this.providerModeMapper,
         toolSnapshotTransformer: this.toolSnapshotTransformer,
         providerModeWriter: this.providerModeWriter,
         beforeModeWriter: this.beforeModeWriter,
@@ -922,6 +930,7 @@ export class ACPAgentClient implements AgentClient {
       clientCapabilities: this.clientCapabilities,
       clientCapabilityMeta: this.clientCapabilityMeta,
       modeIdTransformer: this.modeIdTransformer,
+      providerModeMapper: this.providerModeMapper,
       toolSnapshotTransformer: this.toolSnapshotTransformer,
       providerModeWriter: this.providerModeWriter,
       beforeModeWriter: this.beforeModeWriter,
@@ -1411,7 +1420,11 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   private readonly configFeatureOptions: ACPConfigFeatureOption[];
   private readonly clientCapabilities?: ACPClientCapabilities;
   private readonly clientCapabilityMeta?: ACPClientCapabilityMeta;
-  private readonly modeIdTransformer?: (modeId: string) => string | null;
+  private readonly modeIdTransformer?: (
+    modeId: string,
+    currentModeId?: string | null,
+  ) => string | null;
+  private readonly providerModeMapper?: (modeId: string) => string | null;
   private readonly toolSnapshotTransformer?: (snapshot: ACPToolSnapshot) => ACPToolSnapshot;
   private readonly providerModeWriter?: (
     context: ACPProviderModeWriterContext,
@@ -1441,6 +1454,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   private agentCapabilities: ACPAgentCapabilities | null = null;
   private sessionId: string | null = null;
   private currentMode: string | null = null;
+  private providerCurrentMode: string | null = null;
   private availableModes: AgentMode[];
   private currentModel: string | null = null;
   private availableModels: AvailableACPModel[] | null = null;
@@ -1478,11 +1492,13 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     this.clientCapabilities = options.clientCapabilities;
     this.clientCapabilityMeta = options.clientCapabilityMeta;
     this.modeIdTransformer = options.modeIdTransformer;
+    this.providerModeMapper = options.providerModeMapper;
     this.toolSnapshotTransformer = options.toolSnapshotTransformer;
     this.providerModeWriter = options.providerModeWriter;
     this.beforeModeWriter = options.beforeModeWriter;
     this.thinkingOptionWriter = options.thinkingOptionWriter;
     this.availableModes = options.defaultModes;
+    this.providerCurrentMode = null;
     this.agentId = options.agentId;
     this.launchEnv = options.launchEnv;
     this.initialHandle = options.handle;
@@ -1786,10 +1802,14 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       : { handled: false };
     if (providerResult.handled) {
       this.currentMode = providerResult.currentModeId ?? modeId;
-      if (providerResult.configOptions) {
+      if (providerResult.configOptions !== undefined) {
         this.configOptions = this.transformConfigOptions(providerResult.configOptions);
+        this.availableModes = deriveModesFromACP(this.defaultModes, null, this.configOptions).modes;
       }
-      this.availableModes = deriveModesFromACP(this.defaultModes, null, this.configOptions).modes;
+      this.providerCurrentMode =
+        this.currentMode !== null && this.providerModeMapper
+          ? this.providerModeMapper(this.currentMode)
+          : this.currentMode;
       this.pushEvent({
         type: "mode_changed",
         provider: this.provider,
@@ -2558,7 +2578,11 @@ export class ACPAgentSession implements AgentSession, ACPClient {
 
     const modeInfo = deriveModesFromACP(this.defaultModes, transformed.modes, this.configOptions);
     this.availableModes = modeInfo.modes;
-    this.currentMode = modeInfo.currentModeId ?? this.currentMode;
+    this.providerCurrentMode = modeInfo.currentModeId;
+    this.currentMode = this.transformModeId(
+      modeInfo.currentModeId ?? this.currentMode,
+      this.config.modeId ?? this.currentMode,
+    );
 
     this.availableModels = transformed.models?.availableModels ?? null;
     this.currentModel =
@@ -2573,19 +2597,25 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       : configOptions;
   }
 
-  private transformModeId(modeId: string): string | null {
-    return this.modeIdTransformer ? this.modeIdTransformer(modeId) : modeId;
+  private transformModeId(modeId: string | null, currentModeId?: string | null): string | null {
+    if (modeId === null) return null;
+    return this.modeIdTransformer ? this.modeIdTransformer(modeId, currentModeId) : modeId;
   }
 
   private async applyConfiguredOverrides(): Promise<void> {
     const configuredModeId = this.config.modeId;
-    if (configuredModeId && configuredModeId !== this.currentMode) {
-      const selection = resolveACPModeSelection({
-        modeId: configuredModeId,
-        availableModes: this.availableModes,
-        configOptions: this.configOptions,
-      });
-      await this.setModeWithSelection({ modeId: configuredModeId, selection });
+    if (configuredModeId) {
+      const shouldApply = this.providerModeMapper
+        ? this.providerModeMapper(configuredModeId) !== this.providerCurrentMode
+        : configuredModeId !== this.currentMode;
+      if (shouldApply) {
+        const selection = resolveACPModeSelection({
+          modeId: configuredModeId,
+          availableModes: this.availableModes,
+          configOptions: this.configOptions,
+        });
+        await this.setModeWithSelection({ modeId: configuredModeId, selection });
+      }
     }
     const configuredModelId = this.config.model;
     if (configuredModelId && configuredModelId !== this.currentModel) {
@@ -2792,7 +2822,8 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   }
 
   private handleCurrentModeUpdate(update: CurrentModeUpdate): void {
-    this.currentMode = this.transformModeId(update.currentModeId);
+    this.providerCurrentMode = update.currentModeId;
+    this.currentMode = this.transformModeId(update.currentModeId, this.currentMode);
   }
 
   private handleConfigOptionUpdate(update: ConfigOptionUpdate): AgentStreamEvent[] {
@@ -2803,7 +2834,11 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     const nextThinkingOptionId = deriveCurrentConfigValue(this.configOptions, "thought_level");
 
     this.availableModes = modeInfo.modes;
-    this.currentMode = nextMode ?? this.currentMode;
+    this.currentMode = this.transformModeId(nextMode, this.currentMode) ?? this.currentMode;
+    this.providerCurrentMode =
+      this.currentMode !== null && this.providerModeMapper
+        ? this.providerModeMapper(this.currentMode)
+        : this.currentMode;
     this.currentModel = nextModel ?? this.currentModel;
     this.thinkingOptionId = nextThinkingOptionId ?? this.thinkingOptionId;
 

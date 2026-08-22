@@ -2182,6 +2182,7 @@ export class HostRuntimeStore {
           useSessionStore.getState().sessions[serverId]?.serverInfo?.features?.forgeSearch === true;
         await dispatchComposerAgentMessage({
           client,
+          serverId,
           agentId,
           text,
           attachments,

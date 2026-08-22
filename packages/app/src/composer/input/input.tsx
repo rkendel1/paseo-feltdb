@@ -50,6 +50,8 @@ import { useIosHardwareKeyboardSubmit } from "@/hooks/use-ios-hardware-keyboard-
 import { formatShortcut, type ShortcutKey } from "@/utils/format-shortcut";
 import { getShortcutOs } from "@/utils/shortcut-platform";
 import type { MessageInputKeyboardActionKind } from "@/keyboard/actions";
+import { listNavigationDataSet } from "@/keyboard/list-search-keys";
+import type { ListSearchKeyEvent } from "@/keyboard/list-search-keys";
 import { isImeComposingKeyboardEvent } from "@/utils/keyboard-ime";
 import { isWeb } from "@/constants/platform";
 import { useIsCompactFormFactor } from "@/constants/layout";
@@ -100,8 +102,7 @@ export interface ComposerInputSnapshot {
   selection: { start: number; end: number };
 }
 
-export interface ComposerKeyPressEvent {
-  key: string;
+export interface ComposerKeyPressEvent extends ListSearchKeyEvent {
   preventDefault: () => void;
   input: ComposerInputSnapshot;
 }
@@ -158,6 +159,7 @@ export interface MessageInputProps {
   onSubmitLoadingPress?: () => void;
   /** Intercept key press events before default handling. Return true to prevent default. */
   onKeyPress?: (event: ComposerKeyPressEvent) => boolean;
+  ownsListNavigation?: boolean;
   /** Reports cursor selection updates from the underlying input. */
   onSelectionChange?: (selection: { start: number; end: number }) => void;
   onFocusChange?: (focused: boolean) => void;
@@ -200,6 +202,7 @@ type WebTextInputKeyPressEvent = NativeSyntheticEvent<
     metaKey?: boolean;
     ctrlKey?: boolean;
     shiftKey?: boolean;
+    altKey?: boolean;
     // Web-only: present on DOM KeyboardEvent during IME composition (CJK input).
     isComposing?: boolean;
     keyCode?: number;
@@ -403,6 +406,10 @@ function handleDesktopKeyPressImpl(
   if (ctx.onKeyPressCallback) {
     const handled = ctx.onKeyPressCallback({
       key: event.nativeEvent.key,
+      ctrlKey: event.nativeEvent.ctrlKey,
+      metaKey: event.nativeEvent.metaKey,
+      altKey: event.nativeEvent.altKey,
+      shiftKey: event.nativeEvent.shiftKey,
       preventDefault: () => event.preventDefault(),
       input: ctx.input,
     });
@@ -1077,6 +1084,7 @@ interface ResolvedMessageInputProps {
   onQueue: ((payload: MessagePayload) => void) | undefined;
   onSubmitLoadingPress: (() => void) | undefined;
   onKeyPressCallback: ((event: ComposerKeyPressEvent) => boolean) | undefined;
+  ownsListNavigation: boolean;
   onSelectionChangeCallback: ((selection: { start: number; end: number }) => void) | undefined;
   onFocusChange: ((focused: boolean) => void) | undefined;
   onHeightChange: ((height: number) => void) | undefined;
@@ -1124,6 +1132,7 @@ function resolveMessageInputProps(props: MessageInputProps): ResolvedMessageInpu
     onQueue: props.onQueue,
     onSubmitLoadingPress: props.onSubmitLoadingPress,
     onKeyPressCallback: props.onKeyPress,
+    ownsListNavigation: props.ownsListNavigation ?? false,
     onSelectionChangeCallback: props.onSelectionChange,
     onFocusChange: props.onFocusChange,
     onHeightChange: props.onHeightChange,
@@ -1179,6 +1188,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       onQueue,
       onSubmitLoadingPress,
       onKeyPressCallback,
+      ownsListNavigation,
       onSelectionChangeCallback,
       onFocusChange,
       onHeightChange,
@@ -1803,7 +1813,12 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
     );
 
     return (
-      <View ref={rootRef} style={styles.container} testID="message-input-root">
+      <View
+        ref={rootRef}
+        style={styles.container}
+        testID="message-input-root"
+        dataSet={listNavigationDataSet(ownsListNavigation)}
+      >
         <MessageInputAutoFocus
           enabled={autoFocus}
           autoFocusKey={autoFocusKey}

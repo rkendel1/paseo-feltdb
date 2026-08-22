@@ -5,6 +5,7 @@ import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import invariant from "tiny-invariant";
 import { FileExplorerPane } from "@/components/file-explorer-pane";
+import { createWorkspaceFileTabTarget } from "@/workspace/file-open";
 import { usePaneContext } from "@/panels/pane-context";
 import type { PanelRegistration } from "@/panels/panel-registry";
 import { useAddFileToChat } from "@/panels/use-add-file-to-chat";
@@ -37,7 +38,8 @@ function FilesPanel() {
   const { addFile, canAddToChat } = useAddFileToChat({ serverId, workspaceId });
   invariant(target.kind === "files", "FilesPanel requires files target");
   const onOpenFile = useCallback(
-    (path: string) => retargetCurrentTab({ kind: "file", path }),
+    (path: string, lineStart?: number, lineEnd?: number) =>
+      retargetCurrentTab(createWorkspaceFileTabTarget({ path, lineStart, lineEnd })),
     [retargetCurrentTab],
   );
   if (!workspaceRoot) {

@@ -120,12 +120,14 @@ export function CompactExplorerSidebarHost({ children, enabled }: CompactExplore
   }, [model, openCompactFileExplorer]);
 
   const handleOpenFile = useCallback(
-    (filePath: string) => {
+    (filePath: string, lineStart?: number, lineEnd?: number) => {
       if (!model) {
         return;
       }
       openWorkspaceFileFromExplorer({
         filePath,
+        lineStart,
+        lineEnd,
         persistenceKey: model.persistenceKey,
         showMobileAgent,
         openWorkspaceTabInFocusedPane,

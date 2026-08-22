@@ -8,6 +8,7 @@ import type { PanelRegistration } from "@/panels/panel-registry";
 import { useWorkspaceDirectory } from "@/stores/session-store-hooks";
 import { createMaterialFileIcon } from "@/components/material-file-icon";
 import { FileExplorerPane } from "@/components/file-explorer-pane";
+import { createWorkspaceFileTabTarget } from "@/workspace/file-open";
 import { TreeRail } from "@/components/tree-rail";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { defaultFileState, fileStateSchema } from "@/panels/file/state";
@@ -42,7 +43,8 @@ function FilePanel() {
   const treeVisible = fileState.treeVisible;
   const workspaceDirectory = useWorkspaceDirectory(serverId, workspaceId);
   const handleOpenFile = useCallback(
-    (path: string) => retargetCurrentTab({ kind: "file", path }),
+    (path: string, lineStart?: number, lineEnd?: number) =>
+      retargetCurrentTab(createWorkspaceFileTabTarget({ path, lineStart, lineEnd })),
     [retargetCurrentTab],
   );
   const handleTreeWidthChange = useCallback(

@@ -747,7 +747,7 @@ export function isAgentToolCallItem(item: StreamItem): item is AgentToolCallItem
   return item.kind === "tool_call" && item.payload.source === "agent";
 }
 
-type ActivityLogType = "system" | "info" | "success" | "error";
+type ActivityLogType = "system" | "info" | "success" | "warning" | "error";
 
 export interface ActivityLogItem {
   kind: "activity_log";
@@ -1395,7 +1395,7 @@ function reduceTimelineCompaction(
   }
   const compaction: CompactionItem = {
     kind: "compaction",
-    id: createTimelineId("compaction", item.status, timestamp),
+    id: createUniqueTimelineId(state, "compaction", item.status, timestamp),
     ...(timelineCursor ? { timelineCursor } : {}),
     timestamp,
     status: item.status,
@@ -1403,6 +1403,16 @@ function reduceTimelineCompaction(
     preTokens: item.preTokens,
   };
   return [...state, compaction];
+}
+
+function toActivityLogType(level: "info" | "warning" | "error" | undefined): ActivityLogType {
+  if (level === "warning") {
+    return "warning";
+  }
+  if (level === "error") {
+    return "error";
+  }
+  return "info";
 }
 
 function reduceTimelineEvent(
@@ -1461,11 +1471,22 @@ function reduceTimelineEvent(
     case "error": {
       const activity: ActivityLogItem = {
         kind: "activity_log",
-        id: createTimelineId("error", item.message ?? "", timestamp),
+        id: createUniqueTimelineId(state, "error", item.message ?? "", timestamp),
         ...(timelineCursor ? { timelineCursor } : {}),
         timestamp,
         activityType: "error",
         message: item.message ?? "Unknown error",
+      };
+      return finalizeActiveThoughts(appendActivityLog(state, activity));
+    }
+    case "notification": {
+      const activity: ActivityLogItem = {
+        kind: "activity_log",
+        id: createUniqueTimelineId(state, "notification", item.text ?? "", timestamp),
+        ...(timelineCursor ? { timelineCursor } : {}),
+        timestamp,
+        activityType: toActivityLogType(item.level),
+        message: item.text ?? "",
       };
       return finalizeActiveThoughts(appendActivityLog(state, activity));
     }

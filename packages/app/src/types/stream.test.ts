@@ -1956,3 +1956,96 @@ describe("turn lifecycle events", () => {
     );
   });
 });
+
+describe("notification timeline items", () => {
+  it("maps notification items to activity log entries with the matching level", () => {
+    const timestamp = new Date("2026-07-26T10:00:00.000Z");
+    const state = hydrateStreamState(
+      [
+        {
+          event: {
+            type: "timeline",
+            provider: "pi",
+            item: { type: "notification", text: "Search finished", level: "info" },
+          },
+          timestamp,
+        },
+        {
+          event: {
+            type: "timeline",
+            provider: "pi",
+            item: { type: "notification", text: "Command blocked", level: "warning" },
+          },
+          timestamp,
+        },
+        {
+          event: {
+            type: "timeline",
+            provider: "pi",
+            item: { type: "notification", text: "Turn failed", level: "error" },
+          },
+          timestamp,
+        },
+        {
+          event: {
+            type: "timeline",
+            provider: "pi",
+            item: { type: "notification", text: "No level" },
+          },
+          timestamp,
+        },
+      ],
+      { source: "canonical" },
+    );
+
+    expect(
+      state.map((item) =>
+        item.kind === "activity_log"
+          ? { kind: item.kind, activityType: item.activityType, message: item.message }
+          : { kind: item.kind },
+      ),
+    ).toEqual([
+      { kind: "activity_log", activityType: "info", message: "Search finished" },
+      { kind: "activity_log", activityType: "warning", message: "Command blocked" },
+      { kind: "activity_log", activityType: "error", message: "Turn failed" },
+      { kind: "activity_log", activityType: "info", message: "No level" },
+    ]);
+  });
+
+  it("keeps repeated notifications with the same text in the same millisecond", () => {
+    const timestamp = new Date("2026-07-26T10:00:00.000Z");
+    const state = hydrateStreamState(
+      [
+        {
+          event: {
+            type: "timeline",
+            provider: "pi",
+            item: { type: "notification", text: "Command blocked", level: "warning" },
+          },
+          timestamp,
+        },
+        {
+          event: {
+            type: "timeline",
+            provider: "pi",
+            item: { type: "notification", text: "Command blocked", level: "error" },
+          },
+          timestamp,
+        },
+      ],
+      { source: "canonical" },
+    );
+
+    expect(
+      state.map((item) =>
+        item.kind === "activity_log"
+          ? { kind: item.kind, activityType: item.activityType, message: item.message }
+          : { kind: item.kind },
+      ),
+    ).toEqual([
+      { kind: "activity_log", activityType: "warning", message: "Command blocked" },
+      { kind: "activity_log", activityType: "error", message: "Command blocked" },
+    ]);
+    expect(new Set(state.map((item) => item.id)).size).toBe(state.length);
+  });
+});

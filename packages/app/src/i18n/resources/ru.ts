@@ -1073,6 +1073,7 @@ export const ru: TranslationResources = {
     },
     pinned: {
       title: "Закреплённые",
+      reorder: "Перетащите, чтобы изменить порядок",
     },
     host: {
       noHost: "Нет хоста",

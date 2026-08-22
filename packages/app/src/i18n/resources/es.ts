@@ -1091,6 +1091,7 @@ export const es: TranslationResources = {
     },
     pinned: {
       title: "Anclados",
+      reorder: "Arrastra para reordenar",
     },
     host: {
       noHost: "Sin anfitrión",

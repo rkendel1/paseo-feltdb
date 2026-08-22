@@ -3066,6 +3066,11 @@ export const ToolCall = memo(function ToolCall({
 }: ToolCallProps) {
   const { openToolCall } = useToolCallSheet();
   const [isExpanded, setIsExpanded] = useState(defaultExpanded ?? false);
+  const [prevDefaultExpanded, setPrevDefaultExpanded] = useState(defaultExpanded);
+  if (prevDefaultExpanded !== defaultExpanded) {
+    setPrevDefaultExpanded(defaultExpanded);
+    setIsExpanded(defaultExpanded ?? false);
+  }
 
   const isMobile = useIsCompactFormFactor();
   const shouldRenderInline = !isMobile || forceInline;

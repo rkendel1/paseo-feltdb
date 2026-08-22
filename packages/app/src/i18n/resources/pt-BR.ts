@@ -1972,9 +1972,14 @@ export const ptBR: TranslationResources = {
           "Links de arquivo, pull requests e progresso da configuração abrem ao lado do seu trabalho em vez do painel em foco",
       },
       autoExpandReasoning: {
-        label: "Sempre expandir raciocínio",
-        description:
-          "Mostrar os blocos de pensamento e raciocínio do agente totalmente expandidos por padrão",
+        label: "Exibição de pensamento",
+        description: "Como os blocos de pensamento aparecem na linha do tempo",
+        accessibilityLabel: "Selecionar exibição de pensamento ({{value}})",
+        options: {
+          collapsed: "Recolhido",
+          expandLast: "Expandir último",
+          expanded: "Sempre expandir",
+        },
       },
       toolCallDetail: {
         label: "Exibição de chamadas de ferramentas",

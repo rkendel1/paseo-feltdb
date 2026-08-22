@@ -1956,8 +1956,14 @@ export const ja: TranslationResources = {
           "ファイルリンク、プルリクエスト、セットアップの進行状況が、フォーカス中のペインではなく作業の横に開きます",
       },
       autoExpandReasoning: {
-        label: "常に思考プロセスを展開",
-        description: "デフォルトでAIのエージェント思考・推論ブロックを完全に展開して表示します",
+        label: "思考プロセスの表示",
+        description: "タイムラインでの思考ブロックの表示方法",
+        accessibilityLabel: "思考プロセスの表示を選択 ({{value}})",
+        options: {
+          collapsed: "折りたたむ",
+          expandLast: "最新のみ展開",
+          expanded: "常に展開",
+        },
       },
       toolCallDetail: {
         label: "ツール呼び出しの表示",

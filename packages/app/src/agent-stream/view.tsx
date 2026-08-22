@@ -64,6 +64,7 @@ import {
   prepareToolCallHistory,
   projectToolCallDetailLevel,
 } from "@/tool-calls/detail-level/projection";
+import { formatThinkingText } from "@/utils/thinking-text-formatter";
 import { OverviewToolCallGroupView } from "@/tool-calls/detail-level/overview/view";
 import { type AgentStreamRenderModel, buildAgentStreamRenderModel } from "./model";
 import { resolveStreamRenderStrategy } from "./strategy-resolver";
@@ -707,22 +708,42 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       [agentId, client, handleInlinePathPress, resolvedServerId, toast, workspaceRoot],
     );
 
+    const latestThoughtId = useMemo(() => {
+      const head = projectedToolCalls.head;
+      for (let i = head.length - 1; i >= 0; i -= 1) {
+        if (head[i]?.kind === "thought") {
+          return head[i]?.id ?? null;
+        }
+      }
+      const tail = projectedToolCalls.tail;
+      for (let i = tail.length - 1; i >= 0; i -= 1) {
+        if (tail[i]?.kind === "thought") {
+          return tail[i]?.id ?? null;
+        }
+      }
+      return null;
+    }, [projectedToolCalls.head, projectedToolCalls.tail]);
+
     const renderThoughtItem = useCallback(
       (layoutItem: StreamLayoutItem, item: Extract<StreamItem, { kind: "thought" }>) => {
+        const isLastThought = item.id === latestThoughtId;
+        const isExpanded =
+          autoExpandReasoning === "expanded" ||
+          (autoExpandReasoning === "expand_last" && isLastThought);
         return (
           <ToolCallSlot
             itemId={item.id}
             onInlineDetailsExpandedChangeByItemId={setInlineDetailsExpanded}
             toolName="thinking"
-            args={item.text}
+            args={formatThinkingText(item.text)}
             status={item.status === "ready" ? "completed" : "executing"}
             isLastInSequence={layoutItem.isLastInToolSequence}
-            defaultExpanded={autoExpandReasoning}
-            forceInline={autoExpandReasoning}
+            defaultExpanded={isExpanded}
+            forceInline={isExpanded}
           />
         );
       },
-      [autoExpandReasoning, setInlineDetailsExpanded],
+      [autoExpandReasoning, latestThoughtId, setInlineDetailsExpanded],
     );
 
     const renderSingleToolCallItem = useCallback(

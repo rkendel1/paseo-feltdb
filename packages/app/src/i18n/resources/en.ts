@@ -2003,8 +2003,14 @@ export const en = {
           "File links, pull requests, and setup progress open beside your work instead of in the focused pane",
       },
       autoExpandReasoning: {
-        label: "Always expand reasoning",
-        description: "Show agent thinking and chain-of-thought blocks fully expanded by default",
+        label: "Thinking display",
+        description: "How agent thinking and chain-of-thought blocks appear in the timeline",
+        accessibilityLabel: "Select thinking display ({{value}})",
+        options: {
+          collapsed: "Collapsed",
+          expandLast: "Expand Last",
+          expanded: "Always expand",
+        },
       },
       toolCallDetail: {
         label: "Tool call display",

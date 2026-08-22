@@ -35,6 +35,7 @@ export type ServiceUrlBehavior = "ask" | "in-app" | "external";
 export type WorkspaceTitleSource = "title" | "branch";
 /** What a sidebar workspace row shows in the space to the right of its title. */
 export type SidebarWorkspaceTrailing = "diff" | "timestamp" | "none";
+export type ThinkingDisplayDetail = "collapsed" | "expand_last" | "expanded";
 export type ToolCallDetailLevel = "overview" | "detailed";
 
 const ThemePreferenceSchema = z.enum([
@@ -52,6 +53,11 @@ const VALID_SIDEBAR_WORKSPACE_TRAILINGS = new Set<SidebarWorkspaceTrailing>([
   "none",
 ]);
 const VALID_TOOL_CALL_DETAIL_LEVELS = new Set<ToolCallDetailLevel>(["overview", "detailed"]);
+const VALID_THINKING_DISPLAY_DETAILS = new Set<ThinkingDisplayDetail>([
+  "collapsed",
+  "expand_last",
+  "expanded",
+]);
 export const DEFAULT_TERMINAL_SCROLLBACK_LINES = 10_000;
 export const MIN_TERMINAL_SCROLLBACK_LINES = 0;
 export const MAX_TERMINAL_SCROLLBACK_LINES = 1_000_000;
@@ -93,7 +99,7 @@ export interface AppSettings {
   sidebarWorkspaceTrailing: SidebarWorkspaceTrailing;
   sidebarRowItems: SidebarRowItems;
   sidebarChecksDisplay: SidebarChecksDisplay;
-  autoExpandReasoning: boolean;
+  autoExpandReasoning: ThinkingDisplayDetail;
   toolCallDetailLevel: ToolCallDetailLevel;
   chatOutlineEnabled: boolean;
   vimKeybindings: boolean;
@@ -143,7 +149,9 @@ const StoredAppSettingsSchema = z.strictObject({
   sidebarWorkspaceTrailing: z.enum(["diff", "timestamp", "none"]).optional(),
   sidebarRowItems: SidebarRowItemsSchema.optional(),
   sidebarChecksDisplay: z.enum(["iconAndText", "icon", "none"]).optional(),
-  autoExpandReasoning: z.boolean().optional(),
+  autoExpandReasoning: z
+    .union([z.enum(["collapsed", "expand_last", "expand_active", "expanded"]), z.boolean()])
+    .optional(),
   toolCallDetailLevel: z.enum(["overview", "detailed"]).optional(),
   compactToolCalls: z.boolean().optional(),
   chatOutlineEnabled: z.boolean().optional(),
@@ -176,7 +184,7 @@ export const DEFAULT_CLIENT_SETTINGS: AppSettings = {
   sidebarWorkspaceTrailing: "diff",
   sidebarRowItems: DEFAULT_SIDEBAR_ROW_ITEMS,
   sidebarChecksDisplay: DEFAULT_SIDEBAR_CHECKS_DISPLAY,
-  autoExpandReasoning: false,
+  autoExpandReasoning: "collapsed",
   toolCallDetailLevel: "detailed",
   chatOutlineEnabled: true,
   vimKeybindings: false,
@@ -304,6 +312,25 @@ export function normalizeAppSettings(value: unknown): AppSettings {
     ...DEFAULT_CLIENT_SETTINGS,
     ...pickAppSettings(result.success ? result.data : {}),
   };
+}
+
+function parseThinkingDisplayDetail(stored: StoredAppSettings): ThinkingDisplayDetail | null {
+  if (stored.autoExpandReasoning !== undefined) {
+    if (stored.autoExpandReasoning === "expand_active") {
+      // COMPAT(autoExpandReasoningExpandActive): migrated to expand_last in v0.4.0.
+      return "expand_last";
+    }
+    if (
+      typeof stored.autoExpandReasoning === "string" &&
+      VALID_THINKING_DISPLAY_DETAILS.has(stored.autoExpandReasoning as ThinkingDisplayDetail)
+    ) {
+      return stored.autoExpandReasoning as ThinkingDisplayDetail;
+    }
+    if (typeof stored.autoExpandReasoning === "boolean") {
+      return stored.autoExpandReasoning ? "expanded" : "collapsed";
+    }
+  }
+  return null;
 }
 
 function parseToolCallDetailLevel(stored: StoredAppSettings): ToolCallDetailLevel | null {
@@ -455,8 +482,9 @@ function pickAppSettings(stored: StoredAppSettings): Partial<AppSettings> {
     result.codeFontSize = codeFontSize;
   }
   Object.assign(result, pickBooleanAppSettings(stored));
-  if (typeof stored.autoExpandReasoning === "boolean") {
-    result.autoExpandReasoning = stored.autoExpandReasoning;
+  const thinkingDisplayDetail = parseThinkingDisplayDetail(stored);
+  if (thinkingDisplayDetail !== null) {
+    result.autoExpandReasoning = thinkingDisplayDetail;
   }
   const toolCallDetailLevel = parseToolCallDetailLevel(stored);
   if (toolCallDetailLevel !== null) {

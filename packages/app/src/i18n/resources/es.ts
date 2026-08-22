@@ -1988,9 +1988,14 @@ export const es: TranslationResources = {
           "Los enlaces a archivos, las solicitudes de incorporación y el progreso de configuración se abren junto a tu trabajo en lugar del panel enfocado",
       },
       autoExpandReasoning: {
-        label: "Siempre expandir razonamiento",
-        description:
-          "Mostrar los bloques de pensamiento y razonamiento del agente totalmente expandidos de forma predeterminada",
+        label: "Visualización de pensamiento",
+        description: "Cómo aparecen los bloques de pensamiento del agente en la cronología",
+        accessibilityLabel: "Seleccionar visualización de pensamiento ({{value}})",
+        options: {
+          collapsed: "Plegado",
+          expandLast: "Expandir último",
+          expanded: "Expandir siempre",
+        },
       },
       toolCallDetail: {
         label: "Visualización de llamadas a herramientas",

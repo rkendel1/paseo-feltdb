@@ -1,8 +1,10 @@
-import React, { useMemo, type ReactNode } from "react";
+import React, { useCallback, useMemo, useRef, type ReactNode } from "react";
 import {
   View,
   Text,
   ScrollView as RNScrollView,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   type StyleProp,
   type ViewStyle,
 } from "react-native";
@@ -21,6 +23,8 @@ import { HighlightedLines } from "./highlighted-content";
 import { DiffViewer } from "./diff-viewer";
 import { getCodeInsets } from "./code-insets";
 import { isWeb } from "@/constants/platform";
+import { formatThinkingText } from "@/utils/thinking-text-formatter";
+import { MarkdownRenderer } from "./markdown/renderer";
 
 const ScrollView = isWeb ? RNScrollView : GHScrollView;
 
@@ -490,17 +494,74 @@ function FetchDetailSection({ url, result, ds }: FetchDetailProps) {
 }
 
 function ScrollablePlainTextSection({ text, ds }: { text: string; ds: DetailStyles }) {
+  const scrollRef = useRef<RNScrollView | GHScrollView | null>(null);
+  const isNearBottomRef = useRef(true);
+
+  const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent;
+    const paddingToBottom = 32;
+    const isBottom =
+      layoutMeasurement.height + contentOffset.y >= contentSize.height - paddingToBottom;
+    isNearBottomRef.current = isBottom;
+  }, []);
+
+  const handleContentSizeChange = useCallback(() => {
+    if (isNearBottomRef.current) {
+      scrollRef.current?.scrollToEnd({ animated: false });
+    }
+  }, []);
+
   return (
     <View style={styles.section}>
       <ScrollView
+        ref={scrollRef as never}
         style={ds.scrollAreaStyle}
         contentContainerStyle={styles.scrollContent}
         nestedScrollEnabled
         showsVerticalScrollIndicator
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
+        onContentSizeChange={handleContentSizeChange}
       >
         <Text selectable style={styles.plainText}>
           {text}
         </Text>
+      </ScrollView>
+    </View>
+  );
+}
+
+function ScrollableMarkdownSection({ text, ds }: { text: string; ds: DetailStyles }) {
+  const scrollRef = useRef<RNScrollView | GHScrollView | null>(null);
+  const isNearBottomRef = useRef(true);
+
+  const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent;
+    const paddingToBottom = 32;
+    const isBottom =
+      layoutMeasurement.height + contentOffset.y >= contentSize.height - paddingToBottom;
+    isNearBottomRef.current = isBottom;
+  }, []);
+
+  const handleContentSizeChange = useCallback(() => {
+    if (isNearBottomRef.current) {
+      scrollRef.current?.scrollToEnd({ animated: false });
+    }
+  }, []);
+
+  return (
+    <View style={styles.section}>
+      <ScrollView
+        ref={scrollRef as never}
+        style={ds.scrollAreaStyle}
+        contentContainerStyle={styles.scrollContent}
+        nestedScrollEnabled
+        showsVerticalScrollIndicator
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
+        onContentSizeChange={handleContentSizeChange}
+      >
+        <MarkdownRenderer text={text} compact enableHtmlish={false} />
       </ScrollView>
     </View>
   );
@@ -578,11 +639,36 @@ interface UnknownDetail {
 }
 
 function buildUnknownSections(detail: UnknownDetail, ds: DetailStyles, t: TFunction): ReactNode[] {
-  const plainInputText =
-    typeof detail.input === "string" && detail.output === null ? detail.input : null;
+  const isInputString = typeof detail.input === "string" && detail.input.trim().length > 0;
+  const hasNoOutput =
+    detail.output === null ||
+    detail.output === undefined ||
+    (typeof detail.output === "string" && detail.output.trim().length === 0);
 
-  if (plainInputText !== null) {
-    return [<ScrollablePlainTextSection key="unknown-plain-text" text={plainInputText} ds={ds} />];
+  if (isInputString && hasNoOutput) {
+    return [
+      <ScrollableMarkdownSection
+        key="unknown-markdown-text"
+        text={formatThinkingText(detail.input as string)}
+        ds={ds}
+      />,
+    ];
+  }
+
+  const isOutputString = typeof detail.output === "string" && detail.output.trim().length > 0;
+  const hasNoInput =
+    detail.input === null ||
+    detail.input === undefined ||
+    (typeof detail.input === "string" && detail.input.trim().length === 0);
+
+  if (isOutputString && hasNoInput) {
+    return [
+      <ScrollableMarkdownSection
+        key="unknown-markdown-text"
+        text={formatThinkingText(detail.output as string)}
+        ds={ds}
+      />,
+    ];
   }
 
   const sectionsFromTopLevel = [

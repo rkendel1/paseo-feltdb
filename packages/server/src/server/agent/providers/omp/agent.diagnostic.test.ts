@@ -15,14 +15,14 @@ afterEach(async () => {
 
 describe("OMP diagnostics", () => {
   test.each([
-    ["omp 16.3.8", "16.3.8 (unsupported; minimum 16.3.9)"],
-    ["16.3.9", "16.3.9 (supported; minimum 16.3.9)"],
-    ["oh-my-pi v17.0.0", "17.0.0 (supported; minimum 16.3.9)"],
+    ["omp 17.4.1", "17.4.1 (unsupported; minimum 17.4.2)"],
+    ["17.4.2", "17.4.2 (supported; minimum 17.4.2)"],
+    ["oh-my-pi v18.0.0", "18.0.0 (supported; minimum 17.4.2)"],
   ])("classifies installed version %s", (output, expected) => {
     expect(formatOmpVersionSupport(output)).toBe(expected);
   });
 
-  test("follows OMP 16.3.9 profile, agent override, and XDG path precedence", async () => {
+  test("follows OMP 17.4.2 profile, agent override, and XDG path precedence", async () => {
     const home = await makeTempDir();
     const xdgData = path.join(home, "xdg-data");
     const xdgState = path.join(home, "xdg-state");
@@ -70,7 +70,7 @@ describe("OMP diagnostics", () => {
   test("reports an overridden command and OMP-only paths and caveats", async () => {
     const dir = await makeTempDir();
     const script = path.join(dir, "fake-omp.cjs");
-    await writeFile(script, 'process.stdout.write("omp 16.3.9\\n");\n', "utf8");
+    await writeFile(script, 'process.stdout.write("omp 17.4.2\\n");\n', "utf8");
     const agentDir = path.join(dir, "agent");
     await mkdir(agentDir);
     await writeFile(path.join(agentDir, "agent.db"), "", "utf8");
@@ -90,8 +90,8 @@ describe("OMP diagnostics", () => {
     expect(diagnostic).toContain("Oh My Pi (OMP)");
     expect(diagnostic).toContain(`Configured command: ${process.execPath} ${script}`);
     expect(diagnostic).toContain(`Resolved path: ${process.execPath}`);
-    expect(diagnostic).toContain("Version: omp 16.3.9");
-    expect(diagnostic).toContain("Version support: 16.3.9 (supported; minimum 16.3.9)");
+    expect(diagnostic).toContain("Version: omp 17.4.2");
+    expect(diagnostic).toContain("Version support: 17.4.2 (supported; minimum 17.4.2)");
     expect(diagnostic).toContain("Active profile: default");
     expect(diagnostic).toContain(`Agent directory: ${agentDir}`);
     expect(diagnostic).toContain(`Agent database: ${path.join(agentDir, "agent.db")} (found)`);

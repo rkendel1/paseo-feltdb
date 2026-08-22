@@ -9,7 +9,7 @@ import type { ProviderRuntimeSettings } from "../../provider-launch-config.js";
 const OMP_SESSION_DIR = "~/.omp/agent/sessions";
 const DEFAULT_OMP_MODE_ID = "full";
 
-export const MIN_SUPPORTED_OMP_VERSION = "16.3.9";
+export const MIN_SUPPORTED_OMP_VERSION = "17.4.2";
 export { OMP_MODES };
 
 export const OmpProviderParamsSchema = z

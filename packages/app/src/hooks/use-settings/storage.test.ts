@@ -15,6 +15,7 @@ import {
   parseClampedFontSize,
   parseTerminalScrollbackLines,
   saveAppSettings,
+  type AppSettings,
   type SettingsDeps,
 } from "./storage";
 import { createFakeDesktopBridge, createInMemoryKeyValueStorage } from "./fakes";
@@ -739,6 +740,124 @@ describe("appearance settings", () => {
     });
 
     expect((await loadAppSettingsFromStorage(deps)).syntaxTheme).toBe("one");
+  });
+});
+
+describe("sidebar display preferences", () => {
+  it("defaults the branch display settings to current sidebar behavior", async () => {
+    const deps = makeDeps({
+      storage: createInMemoryKeyValueStorage({
+        [APP_SETTINGS_KEY]: JSON.stringify({ theme: "dark" }),
+      }),
+    });
+
+    const result = await loadAppSettingsFromStorage(deps);
+
+    expect(result.compactSidebarRows).toBe(false);
+    expect(result.showNewWorkspaceRow).toBe(true);
+    expect(result.recentlyDoneWindowMinutes).toBe(0);
+    expect(result.sidebarRowItems).toEqual(DEFAULT_CLIENT_SETTINGS.sidebarRowItems);
+    expect(result.sidebarWorkspaceTrailing).toBe("diff");
+  });
+
+  it("loads canonical sidebar display settings", async () => {
+    const deps = makeDeps({
+      storage: createInMemoryKeyValueStorage({
+        [APP_SETTINGS_KEY]: JSON.stringify({
+          compactSidebarRows: true,
+          showNewWorkspaceRow: false,
+          recentlyDoneWindowMinutes: 15,
+        }),
+      }),
+    });
+
+    const result = await loadAppSettingsFromStorage(deps);
+
+    expect(result.compactSidebarRows).toBe(true);
+    expect(result.showNewWorkspaceRow).toBe(false);
+    expect(result.recentlyDoneWindowMinutes).toBe(15);
+  });
+
+  it("migrates the removed appearance blob into canonical display settings", async () => {
+    const deps = makeDeps({
+      storage: createInMemoryKeyValueStorage({
+        [APP_SETTINGS_KEY]: JSON.stringify({
+          appearance: {
+            hideWorkspaceDiffStats: true,
+            hideHostLabels: true,
+            compactSidebarRows: true,
+            hidePrStatus: true,
+            hideNewWorkspaceRow: true,
+            hideScriptIndicators: true,
+            recentlyDoneWindowMinutes: 30,
+          },
+        }),
+      }),
+    });
+
+    const result = await loadAppSettingsFromStorage(deps);
+
+    expect(result.sidebarWorkspaceTrailing).toBe("none");
+    expect(result.sidebarRowItems).toEqual({
+      ...DEFAULT_CLIENT_SETTINGS.sidebarRowItems,
+      host: false,
+      changeRequest: false,
+      services: false,
+    });
+    expect(result.compactSidebarRows).toBe(true);
+    expect(result.showNewWorkspaceRow).toBe(false);
+    expect(result.recentlyDoneWindowMinutes).toBe(30);
+  });
+
+  it("rejects invalid canonical sidebar display values", async () => {
+    const deps = makeDeps({
+      storage: createInMemoryKeyValueStorage({
+        [APP_SETTINGS_KEY]: JSON.stringify({
+          compactSidebarRows: "yes",
+          showNewWorkspaceRow: 0,
+          recentlyDoneWindowMinutes: 7,
+        }),
+      }),
+    });
+
+    const result = await loadAppSettingsFromStorage(deps);
+
+    expect(result.compactSidebarRows).toBe(false);
+    expect(result.showNewWorkspaceRow).toBe(true);
+    expect(result.recentlyDoneWindowMinutes).toBe(0);
+  });
+
+  it("merges rapid row-item patches instead of reverting the earlier control", async () => {
+    const deps = makeDeps({
+      storage: createInMemoryKeyValueStorage({
+        [APP_SETTINGS_KEY]: JSON.stringify(DEFAULT_CLIENT_SETTINGS),
+      }),
+    });
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(APP_SETTINGS_QUERY_KEY, DEFAULT_CLIENT_SETTINGS);
+
+    const hideHost = saveAppSettings({
+      queryClient,
+      updates: { sidebarRowItems: { host: false } },
+      deps,
+    });
+    const hideServices = saveAppSettings({
+      queryClient,
+      updates: { sidebarRowItems: { services: false } },
+      deps,
+    });
+    await Promise.all([hideHost, hideServices]);
+
+    const expected = {
+      ...DEFAULT_CLIENT_SETTINGS.sidebarRowItems,
+      host: false,
+      services: false,
+    };
+    expect(queryClient.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.sidebarRowItems).toEqual(
+      expected,
+    );
+    const stored = JSON.parse(deps.storage.entries.get(APP_SETTINGS_KEY) ?? "null");
+    expect(stored.sidebarRowItems).toEqual(expected);
   });
 });
 

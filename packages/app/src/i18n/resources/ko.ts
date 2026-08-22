@@ -1039,6 +1039,16 @@ export const ko: TranslationResources = {
         labels: "레이블",
         diff: "Diff 통계",
         timestamp: "마지막 활동",
+        compactRows: "행 간격 좁게",
+        newWorkspaceRow: "새 워크스페이스 행",
+      },
+      recentlyDone: {
+        label: "최근 완료",
+        options: {
+          off: "끔",
+          minutes: "{{minutes}}분",
+          hour: "1시간",
+        },
       },
       checks: {
         iconAndText: "아이콘 및 텍스트",

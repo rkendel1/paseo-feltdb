@@ -1041,6 +1041,16 @@ export const en = {
         labels: "Labels",
         diff: "Diff stats",
         timestamp: "Last activity",
+        compactRows: "Compact rows",
+        newWorkspaceRow: "New workspace row",
+      },
+      recentlyDone: {
+        label: "Recently done",
+        options: {
+          off: "Off",
+          minutes: "{{minutes}} min",
+          hour: "1 hour",
+        },
       },
       checks: {
         iconAndText: "Icon and text",

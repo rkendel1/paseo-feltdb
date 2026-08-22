@@ -1032,6 +1032,16 @@ export const ar: TranslationResources = {
         labels: "التسميات",
         diff: "إحصائيات الفروق",
         timestamp: "آخر نشاط",
+        compactRows: "صفوف مضغوطة",
+        newWorkspaceRow: "صف مساحة عمل جديدة",
+      },
+      recentlyDone: {
+        label: "تم مؤخرًا",
+        options: {
+          off: "إيقاف",
+          minutes: "{{minutes}} د",
+          hour: "ساعة واحدة",
+        },
       },
       checks: {
         iconAndText: "أيقونة ونص",

@@ -1043,6 +1043,16 @@ export const ja: TranslationResources = {
         labels: "ラベル",
         diff: "差分統計",
         timestamp: "最終アクティビティ",
+        compactRows: "コンパクトな行",
+        newWorkspaceRow: "新しいワークスペース行",
+      },
+      recentlyDone: {
+        label: "最近完了",
+        options: {
+          off: "オフ",
+          minutes: "{{minutes}}分",
+          hour: "1時間",
+        },
       },
       checks: {
         iconAndText: "アイコンとテキスト",

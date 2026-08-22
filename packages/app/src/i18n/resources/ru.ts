@@ -1047,6 +1047,16 @@ export const ru: TranslationResources = {
         labels: "Метки",
         diff: "Статистика изменений",
         timestamp: "Последняя активность",
+        compactRows: "Компактные строки",
+        newWorkspaceRow: "Строка «Новое рабочее пространство»",
+      },
+      recentlyDone: {
+        label: "Недавно завершённые",
+        options: {
+          off: "Выключено",
+          minutes: "{{minutes}} мин",
+          hour: "1 час",
+        },
       },
       checks: {
         iconAndText: "Значок и текст",

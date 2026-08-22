@@ -1024,6 +1024,16 @@ export const zhCN: TranslationResources = {
         labels: "标签",
         diff: "差异统计",
         timestamp: "最近活动",
+        compactRows: "紧凑行",
+        newWorkspaceRow: "新建工作区行",
+      },
+      recentlyDone: {
+        label: "最近完成",
+        options: {
+          off: "关闭",
+          minutes: "{{minutes}} 分钟",
+          hour: "1 小时",
+        },
       },
       checks: {
         iconAndText: "图标和文字",

@@ -493,7 +493,7 @@ export interface ACPToolSnapshot {
   toolCallId: string;
   title: string;
   kind?: ToolKind | null;
-  status?: ToolCallStatus | null;
+  status?: ToolCallStatus | "canceled" | null;
   content?: ToolCallContent[] | null;
   locations?: ToolCallLocation[] | null;
   rawInput?: unknown;
@@ -1456,6 +1456,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   private readonly extensionCommandsParser?: ACPExtensionCommandsParser;
   private currentTurnUsage: AgentUsage | undefined;
   private activeForegroundTurnId: string | null = null;
+  private foregroundCancellation: { turnId: string; promise: Promise<void> } | null = null;
   private fallbackAssistantMessageId: string | null = null;
   private closed = false;
   private historyPending = false;
@@ -2147,7 +2148,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     });
 
     if (response.behavior === "deny" && response.interrupt && this.connection && this.sessionId) {
-      await this.connection.cancel({ sessionId: this.sessionId });
+      await this.cancelForegroundTurn(pending.turnId);
     }
   }
 
@@ -2171,14 +2172,13 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       return;
     }
 
+    const interruptedTurnId = this.activeForegroundTurnId;
     for (const pending of this.pendingPermissions.values()) {
       pending.resolve({ outcome: { outcome: "cancelled" } });
     }
     this.pendingPermissions.clear();
 
-    if (this.activeForegroundTurnId) {
-      await this.connection.cancel({ sessionId: this.sessionId });
-    }
+    await this.cancelForegroundTurn(interruptedTurnId);
   }
 
   async close(): Promise<void> {
@@ -2750,6 +2750,9 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     update: ToolCall | ToolCallUpdate,
     previous: ACPToolSnapshot | undefined,
   ): AgentStreamEvent[] {
+    if (previous?.status === "canceled") {
+      return [];
+    }
     let snapshot = mergeToolSnapshot(toolCallId, update, previous);
     if (this.toolSnapshotTransformer) {
       snapshot = this.toolSnapshotTransformer(snapshot);
@@ -2847,6 +2850,9 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   }
 
   private handlePromptResponse(response: PromptResponse, turnId: string): void {
+    if (this.activeForegroundTurnId !== turnId) {
+      return;
+    }
     this.currentTurnUsage = mapACPUsage(response.usage) ?? this.currentTurnUsage;
 
     switch (response.stopReason) {
@@ -2940,6 +2946,20 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   private finishTurn(
     event: Extract<AgentStreamEvent, { type: "turn_completed" | "turn_failed" | "turn_canceled" }>,
   ): void {
+    if (event.turnId && event.turnId !== this.activeForegroundTurnId) {
+      this.logger.trace(
+        {
+          agentId: this.agentId,
+          provider: this.provider,
+          sessionId: this.sessionId,
+          turnId: event.turnId,
+          activeForegroundTurnId: this.activeForegroundTurnId ?? undefined,
+          eventType: event.type,
+        },
+        "Ignoring stale ACP terminal event",
+      );
+      return;
+    }
     this.deliverTranslatedEvents(this.flushPendingUserMessage());
     this.activeForegroundTurnId = null;
     this.fallbackAssistantMessageId = null;
@@ -2962,16 +2982,52 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   }
 
   private synthesizeCanceledToolCalls(): void {
-    for (const snapshot of this.toolCalls.values()) {
+    for (const [toolCallId, snapshot] of this.toolCalls) {
       const mapped = mapToolSnapshotToTimeline(snapshot, this.terminalEntries);
       if (mapped.status === "running") {
+        const canceledSnapshot: ACPToolSnapshot = { ...snapshot, status: "canceled" };
+        this.toolCalls.set(toolCallId, canceledSnapshot);
         this.pushEvent(
-          this.wrapTimeline({
-            ...mapped,
-            status: "canceled",
-            error: null,
-          }),
+          this.wrapTimeline(mapToolSnapshotToTimeline(canceledSnapshot, this.terminalEntries)),
         );
+      }
+    }
+  }
+
+  private async cancelForegroundTurn(turnId: string | null): Promise<void> {
+    if (!turnId || !this.connection || !this.sessionId) {
+      return;
+    }
+
+    const inFlightCancellation = this.foregroundCancellation;
+    if (inFlightCancellation?.turnId === turnId) {
+      await inFlightCancellation.promise;
+      return;
+    }
+    if (this.activeForegroundTurnId !== turnId) {
+      return;
+    }
+
+    const connection = this.connection;
+    const sessionId = this.sessionId;
+    const cancellation = (async () => {
+      await connection.cancel({ sessionId });
+      if (this.activeForegroundTurnId === turnId) {
+        this.synthesizeCanceledToolCalls();
+        this.finishTurn({
+          type: "turn_canceled",
+          provider: this.provider,
+          reason: "Interrupted",
+          turnId,
+        });
+      }
+    })();
+    this.foregroundCancellation = { turnId, promise: cancellation };
+    try {
+      await cancellation;
+    } finally {
+      if (this.foregroundCancellation?.promise === cancellation) {
+        this.foregroundCancellation = null;
       }
     }
   }
@@ -3293,6 +3349,13 @@ function mapToolSnapshotToTimeline(
       error: null,
     };
   }
+  if (status === "canceled") {
+    return {
+      ...base,
+      status: "canceled",
+      error: null,
+    };
+  }
   return {
     ...base,
     status: "running",
@@ -3300,12 +3363,14 @@ function mapToolSnapshotToTimeline(
   };
 }
 
-function mapToolStatus(status: ToolCallStatus | null | undefined): ToolCallTimelineItem["status"] {
+function mapToolStatus(status: ACPToolSnapshot["status"]): ToolCallTimelineItem["status"] {
   switch (status) {
     case "completed":
       return "completed";
     case "failed":
       return "failed";
+    case "canceled":
+      return "canceled";
     case "pending":
     case "in_progress":
     default:

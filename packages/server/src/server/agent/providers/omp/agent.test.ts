@@ -560,17 +560,11 @@ describe("OMP agent client and session", () => {
       optionDetails: [{ description: "First detail" }, {}, { description: " \t" }],
     });
 
-    expect(omp.pendingPermissions()[0]?.input).toMatchObject({
-      questions: [
-        {
-          options: [
-            { label: "First", description: "First detail" },
-            { label: "Second" },
-            { label: "Third" },
-          ],
-        },
-      ],
-    });
+    expect(omp.pendingPermissions()[0]?.input?.questions?.[0]?.options).toStrictEqual([
+      { label: "First", description: "First detail" },
+      { label: "Second" },
+      { label: "Third" },
+    ]);
   });
 
   test("accepts malformed or misaligned optional metadata and falls back to labels", async () => {
@@ -587,9 +581,10 @@ describe("OMP agent client and session", () => {
     if (!parsed.success) throw new Error("Expected malformed metadata event to parse");
 
     omp.emit(parsed.data);
-    expect(omp.pendingPermissions()[0]?.input).toMatchObject({
-      questions: [{ options: [{ label: "First" }, { label: "Second" }] }],
-    });
+    expect(omp.pendingPermissions()[0]?.input?.questions?.[0]?.options).toStrictEqual([
+      { label: "First" },
+      { label: "Second" },
+    ]);
   });
 
   test("preserves combined selection descriptions and freeform sentinel behavior", async () => {
@@ -610,14 +605,12 @@ describe("OMP agent client and session", () => {
       optionDetails: [{ description: "First detail" }, { description: "ignored" }],
     });
 
-    expect(omp.pendingPermissions()[0]?.input).toMatchObject({
-      questions: [
-        {
-          options: [{ label: "First", description: "First detail" }],
-          allowOther: true,
-        },
-        { header: "Comment" },
-      ],
+    const combinedInput = omp.pendingPermissions()[0]?.input;
+    expect(combinedInput?.questions?.[0]?.options).toStrictEqual([
+      { label: "First", description: "First detail" },
+    ]);
+    expect(combinedInput).toMatchObject({
+      questions: [{ allowOther: true }, { header: "Comment" }],
     });
     await omp.respondToPermission("select-combined", {
       behavior: "allow",

@@ -146,8 +146,11 @@ export const ConversationSchema = z.object({
   projectId: z.string(),
   workspaceId: z.string().optional(),
   taskId: z.string().optional(),
-  agentId: z.string().optional(),
+  agentId: z.string(), // Required: conversations belong to agents
   title: z.string().optional(),
+  startedAt: z.string().datetime().optional(), // Explicit conversation start
+  closedAt: z.string().datetime().nullable().optional(), // Explicit conversation end
+  status: z.enum(["active", "closed", "archived"]).default("active"),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   metadata: z.record(z.any()).optional(),
@@ -158,9 +161,12 @@ export type Conversation = z.infer<typeof ConversationSchema>;
 export const MessageSchema = z.object({
   id: z.string(),
   conversationId: z.string(),
-  authorType: z.enum(["user", "agent", "system"]),
+  authorType: z.enum(["user", "agent", "system", "tool"]),
   authorId: z.string().optional(),
   content: z.string(),
+  runId: z.string().nullable().optional(), // Provenance: which run produced this message
+  sequence: z.number(), // Ordering within conversation
+  role: z.enum(["user", "assistant", "tool_output", "system"]).optional(), // Message role for API compatibility
   createdAt: z.string().datetime(),
   metadata: z.record(z.any()).optional(),
 });

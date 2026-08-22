@@ -75,6 +75,7 @@ export type AgentManagerOptions = {
   registry?: AgentStorage;
   onAgentAttention?: AgentAttentionCallback;
   runManager?: any; // RunManager instance for durable run lifecycle
+  paseoState?: any; // PaseoState instance for durable conversation/message persistence
   logger: Logger;
 };
 
@@ -184,6 +185,8 @@ type ManagedAgentBase = {
   attention: AttentionState;
   foregroundTurnWaiters: Set<ForegroundTurnWaiter>;
   unsubscribeSession: (() => void) | null;
+  conversationId: string | null; // Durable conversation for this agent
+  messageSequence: number; // Sequence number for messages within conversation
   /**
    * Internal agents are hidden from listings and don't trigger notifications.
    */
@@ -326,6 +329,7 @@ export class AgentManager {
   private readonly backgroundTasks = new Set<Promise<void>>();
   private onAgentAttention?: AgentAttentionCallback;
   private readonly runManager?: any; // RunManager instance
+  private readonly paseoState?: any; // PaseoState instance for durable state
   private logger: Logger;
 
   constructor(options: AgentManagerOptions) {
@@ -339,6 +343,7 @@ export class AgentManager {
     this.idFactory = options?.idFactory ?? (() => randomUUID());
     this.registry = options?.registry;
     this.runManager = options?.runManager;
+    this.paseoState = options?.paseoState;
     this.onAgentAttention = options?.onAgentAttention;
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
     if (options?.clients) {
@@ -772,6 +777,8 @@ export class AgentManager {
     const preservedLastUsage = existing.lastUsage;
     const preservedLastError = existing.lastError;
     const preservedAttention = existing.attention;
+    const preservedConversationId = existing.conversationId;
+    const preservedMessageSequence = existing.messageSequence;
     const handle = existing.persistence;
     const provider = handle?.provider ?? existing.provider;
     const client = this.requireClient(provider);
@@ -804,7 +811,7 @@ export class AgentManager {
       this.logger.warn({ err: error, agentId }, "Failed to close previous session during refresh");
     }
 
-    // Preserve existing labels and timeline during reload.
+    // Preserve existing labels, timeline, and durable conversation state during reload.
     return this.registerSession(session, normalizedConfig, agentId, {
       labels: existing.labels,
       createdAt: existing.createdAt,
@@ -818,6 +825,8 @@ export class AgentManager {
       lastUsage: preservedLastUsage,
       lastError: preservedLastError,
       attention: preservedAttention,
+      conversationId: preservedConversationId,
+      messageSequence: preservedMessageSequence,
     });
   }
 
@@ -1032,7 +1041,126 @@ export class AgentManager {
         epoch: this.ensureTimelineState(agent).epoch,
       },
     );
+    // Persist message to FeltDB in background (non-blocking)
+    if (this.paseoState) {
+      this.enqueuePersistMessage(agentId, item).catch((err) => {
+        this.logger.warn(
+          { agentId, itemType: item.type, err },
+          "Failed to persist message to FeltDB"
+        );
+      });
+    }
     await this.persistSnapshot(agent);
+  }
+
+  private enqueuePersistMessage(agentId: string, item: AgentTimelineItem): Promise<void> {
+    const promise = this.persistMessage(agentId, item);
+    this.backgroundTasks.add(promise);
+    promise.finally(() => {
+      this.backgroundTasks.delete(promise);
+    });
+    return promise;
+  }
+
+  private async persistMessage(agentId: string, item: AgentTimelineItem): Promise<void> {
+    if (!this.paseoState) return;
+
+    try {
+      const agent = this.agents.get(agentId);
+      if (!agent) return;
+
+      // Ensure conversation exists for this agent
+      let conversationId = agent.conversationId;
+      if (!conversationId) {
+        const feltdbAgent = await this.paseoState.agents.getById(agentId);
+        if (!feltdbAgent) {
+          this.logger.warn({ agentId }, "Agent not found in FeltDB, skipping message persistence");
+          return;
+        }
+
+        // Resolve workspace to get projectId
+        const workspace = feltdbAgent.workspaceId
+          ? await this.paseoState.workspaces.getById(feltdbAgent.workspaceId)
+          : null;
+
+        if (!workspace || !workspace.projectId) {
+          this.logger.warn({ agentId, workspaceId: feltdbAgent.workspaceId },
+            "Workspace or projectId not found, skipping conversation creation");
+          return;
+        }
+
+        // Create conversation on first message
+        const conversation = await this.paseoState.conversations.create({
+          projectId: workspace.projectId,
+          workspaceId: feltdbAgent.workspaceId,
+          agentId,
+        });
+        conversationId = conversation.id;
+        agent.conversationId = conversationId;
+      }
+
+      // Map timeline item to message
+      const { authorType, role, content } = this.mapTimelineItemToMessage(item);
+      if (!content) return; // Skip items with no content
+
+      agent.messageSequence++;
+      await this.paseoState.messages.create({
+        conversationId,
+        authorType,
+        authorId: agentId,
+        content,
+        sequence: agent.messageSequence,
+        role,
+      });
+    } catch (err) {
+      this.logger.warn(
+        { agentId, itemType: item.type, err },
+        "Error persisting message to FeltDB"
+      );
+    }
+  }
+
+  private mapTimelineItemToMessage(
+    item: AgentTimelineItem
+  ): { authorType: "user" | "agent" | "system" | "tool"; role?: string; content: string } {
+    switch (item.type) {
+      case "user_message":
+        return {
+          authorType: "user",
+          role: "user",
+          content: item.text || "",
+        };
+      case "assistant_message":
+        return {
+          authorType: "agent",
+          role: "assistant",
+          content: item.text || "",
+        };
+      case "error":
+        return {
+          authorType: "system",
+          role: "system",
+          content: `Error: ${item.message}`,
+        };
+      case "reasoning":
+        return {
+          authorType: "agent",
+          content: item.text || "",
+        };
+      case "todo":
+        return {
+          authorType: "agent",
+          content: item.items?.map((t) => `[${t.completed ? "x" : " "}] ${t.text}`).join("\n") || "",
+        };
+      case "tool_call":
+      case "compaction":
+      default:
+        // Skip tool calls and other non-message types
+        return {
+          authorType: "system",
+          content: "",
+        };
+    }
   }
 
   async emitLiveTimelineItem(agentId: string, item: AgentTimelineItem): Promise<void> {
@@ -1735,6 +1863,8 @@ export class AgentManager {
       lastUsage?: AgentUsage;
       lastError?: string;
       attention?: AttentionState;
+      conversationId?: string | null;
+      messageSequence?: number;
     },
   ): Promise<ManagedAgent> {
     const resolvedAgentId = validateAgentId(agentId, "registerSession");
@@ -1795,6 +1925,8 @@ export class AgentManager {
               }
             : { requiresAttention: false }
           : { requiresAttention: false },
+      conversationId: options?.conversationId ?? null,
+      messageSequence: options?.messageSequence ?? 0,
       internal: config.internal ?? false,
       labels: options?.labels ?? {},
     } as ActiveManagedAgent;

@@ -9,7 +9,7 @@
 
 import type { Logger } from "pino";
 import type { Repositories } from "./feltdb/repositories.js";
-import type { Project, Workspace, Agent, Task, Conversation, Run } from "./feltdb/schema.js";
+import type { Project, Workspace, Agent, Task, Conversation, Message, Run } from "./feltdb/schema.js";
 
 export interface PaseoState {
   // Project operations
@@ -85,11 +85,33 @@ export interface PaseoState {
       projectId: string;
       workspaceId?: string;
       taskId?: string;
-      agentId?: string;
+      agentId: string; // Required: conversations belong to agents
+      title?: string;
+      startedAt?: string;
     }): Promise<Conversation>;
     getById(id: string): Promise<Conversation | null>;
     listByProject(projectId: string): Promise<Conversation[]>;
+    listByAgent(agentId: string): Promise<Conversation[]>;
     update(id: string, data: Partial<Conversation>): Promise<Conversation>;
+    delete(id: string): Promise<void>;
+  };
+
+  messages: {
+    create(data: {
+      conversationId: string;
+      authorType: "user" | "agent" | "system" | "tool";
+      authorId?: string;
+      content: string;
+      runId?: string;
+      sequence: number;
+      role?: "user" | "assistant" | "tool_output" | "system";
+    }): Promise<Message>;
+    getById(id: string): Promise<Message | null>;
+    listByConversation(
+      conversationId: string,
+      options?: { limit?: number; offset?: number }
+    ): Promise<Message[]>;
+    update(id: string, data: Partial<Message>): Promise<Message>;
     delete(id: string): Promise<void>;
   };
 
@@ -237,6 +259,8 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
       async create(data) {
         return repos.conversations.create({
           ...data,
+          status: "active",
+          startedAt: data.startedAt ?? new Date().toISOString(),
         });
       },
       async getById(id) {
@@ -245,11 +269,34 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
       async listByProject(projectId) {
         return repos.conversations.listByProject(projectId);
       },
+      async listByAgent(agentId) {
+        return repos.conversations.listByAgent(agentId);
+      },
       async update(id, data) {
         return repos.conversations.update(id, data);
       },
       async delete(id) {
         return repos.conversations.delete(id);
+      },
+    },
+
+    messages: {
+      async create(data) {
+        return repos.messages.create({
+          ...data,
+        });
+      },
+      async getById(id) {
+        return repos.messages.getById(id);
+      },
+      async listByConversation(conversationId, options) {
+        return repos.messages.listByConversation(conversationId, options);
+      },
+      async update(id, data) {
+        return repos.messages.update(id, data);
+      },
+      async delete(id) {
+        return repos.messages.delete(id);
       },
     },
 

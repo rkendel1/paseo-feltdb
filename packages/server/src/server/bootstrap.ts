@@ -419,6 +419,7 @@ export async function createPaseoDaemon(
       },
       registry: agentStorage,
       runManager,
+      paseoState,
       logger,
     });
 

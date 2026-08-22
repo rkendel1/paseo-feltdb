@@ -4,6 +4,7 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2020", "DOM"],
+    "ignoreDeprecations": "6.0",
     "baseUrl": "./src",
     "paths": {
       "@server/*": ["./*"]

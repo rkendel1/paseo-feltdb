@@ -19,18 +19,7 @@
  * 5. Repository/project activity
  */
 
-import type {
-  Agent,
-  Conversation,
-  Decision,
-  Handoff,
-  Message,
-  Observation,
-  Project,
-  Repository,
-  Run,
-  Workspace,
-} from "./feltdb/schema.js";
+import type { Message, Run } from "./feltdb/schema.js";
 import type { AgentContext } from "./context-resolver.js";
 
 // ============================================================================

@@ -124,3 +124,18 @@ export {
   type BoundedContextSelection,
   DEFAULT_CONTEXT_POLICY,
 } from "./context-policy.js";
+export {
+  createContextPresenter,
+  type ContextProjection,
+  type AgentTurnContext,
+  ContextPresenter,
+} from "./context-presenter.js";
+export {
+  createAgentContextService,
+  type AgentContextServiceOptions,
+  type ContextResolutionResult,
+  type ContextResolutionError,
+  type ContextResolutionOutcome,
+  ContextResolutionFailurePolicy,
+  AgentContextService,
+} from "./agent-context-service.js";

@@ -139,3 +139,11 @@ export {
   ContextResolutionFailurePolicy,
   AgentContextService,
 } from "./agent-context-service.js";
+export {
+  createExecutionFeedbackNormalizer,
+  type ExecutionFeedbackEvent,
+  type RunTerminalEvent,
+  type ToolExecutedEvent,
+  type TimelineMessageEvent,
+  ExecutionFeedbackNormalizer,
+} from "./execution-feedback-normalizer.js";

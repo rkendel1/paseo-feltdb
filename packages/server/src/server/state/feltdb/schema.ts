@@ -181,7 +181,7 @@ export const RunSchema = z.object({
   model: z.string().optional(),
   prompt: z.string(),
   status: z
-    .enum(["pending", "running", "completed", "failed", "cancelled"])
+    .enum(["pending", "running", "completed", "failed", "cancelled", "interrupted"])
     .default("pending"),
   startedAt: z.string().datetime().optional(),
   completedAt: z.string().datetime().optional(),

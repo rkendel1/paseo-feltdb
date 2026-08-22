@@ -117,6 +117,7 @@ import {
 import { resolveVoiceMcpBridgeFromRuntime } from "./voice-mcp-bridge-command.js";
 import { initializeState, type PaseoState } from "./state/index.js";
 import { RunManager } from "./state/run-manager.js";
+import { RunRecoveryManager } from "./state/run-recovery.js";
 
 type AgentMcpTransportMap = Map<string, StreamableHTTPServerTransport>;
 
@@ -385,11 +386,30 @@ export async function createPaseoDaemon(
       logger,
     );
 
+    // Initialize agent storage before recovery
+    await agentStorage.initialize();
+    logger.info({ elapsed: elapsed() }, "Agent storage initialized");
+
     // Create RunManager for durable run lifecycle integration
     const runManager = new RunManager({
       paseoState,
       logger,
     });
+
+    // Run crash recovery: reconcile durable Runs against runtime state
+    const runRecoveryManager = new RunRecoveryManager({
+      paseoState,
+      agentStorage,
+      logger,
+    });
+    const recoverySummary = await runRecoveryManager.reconcileAll();
+    logger.info(
+      {
+        orphanedRuns: recoverySummary.orphanedRunsMarked,
+        errors: recoverySummary.recoveryErrors.length,
+      },
+      "Run recovery completed",
+    );
 
     const agentManager = new AgentManager({
       clients: {
@@ -410,8 +430,6 @@ export async function createPaseoDaemon(
       agentManager,
       agentStorage,
     );
-    await agentStorage.initialize();
-    logger.info({ elapsed: elapsed() }, "Agent storage initialized");
     await bootstrapWorkspaceRegistries({
       paseoHome: config.paseoHome,
       agentStorage,

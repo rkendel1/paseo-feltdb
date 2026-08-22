@@ -406,6 +406,8 @@ export interface PaseoDaemonConfig {
   autoArchiveAfterMerge?: boolean;
   enableTerminalAgentHooks?: boolean;
   appendSystemPrompt?: string;
+  branchPrefixEnabled?: boolean;
+  branchPrefix?: string;
   terminalProfiles?: TerminalProfile[];
   agentProfiles?: AgentProfile[];
   skillSelection?: AgentSkillSelection;
@@ -527,6 +529,15 @@ function resolveExpressTrustProxySetting(config: PaseoDaemonConfig): true | stri
   return config.trustedProxies ?? ["loopback"];
 }
 
+function resolveBranchPrefixFields(
+  config: PaseoDaemonConfig,
+): Pick<MutableDaemonConfig, "branchPrefixEnabled" | "branchPrefix"> {
+  return {
+    branchPrefixEnabled: config.branchPrefixEnabled ?? false,
+    branchPrefix: config.branchPrefix ?? "",
+  };
+}
+
 function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
   const providers = config.providerOverrides ?? {};
 
@@ -552,6 +563,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
     enableTerminalAgentHooks: config.enableTerminalAgentHooks ?? false,
     appendSystemPrompt: config.appendSystemPrompt ?? "",
+    ...resolveBranchPrefixFields(config),
     pluginsEnabled: config.pluginsEnabled ?? false,
     plugins: config.plugins ?? {},
     skills: { selection: config.skillSelection },
@@ -1055,6 +1067,12 @@ export async function createPaseoDaemon(
     workspaceGitService,
     providerSnapshotManager,
     readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
+    getBranchPrefix: () => {
+      const daemonConfig = daemonConfigStore.get();
+      return daemonConfig.branchPrefixEnabled && daemonConfig.branchPrefix
+        ? daemonConfig.branchPrefix
+        : undefined;
+    },
     gitMutation: createGitMutationService({
       workspaceGitService,
       logger,

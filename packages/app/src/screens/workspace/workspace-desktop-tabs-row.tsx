@@ -23,6 +23,7 @@ import {
   ArrowRightToLine,
   Copy,
   Pencil,
+  PanelTopClose,
   RotateCw,
   Globe,
   FileDiff,
@@ -193,6 +194,7 @@ const ThemedRotateCw = withUnistyles(RotateCw);
 const ThemedArrowLeftToLine = withUnistyles(ArrowLeftToLine);
 const ThemedArrowRightToLine = withUnistyles(ArrowRightToLine);
 const ThemedCopyX = withUnistyles(CopyX);
+const ThemedPanelTopClose = withUnistyles(PanelTopClose);
 const ThemedPencil = withUnistyles(Pencil);
 const ThemedSquarePen = withUnistyles(SquarePen);
 const ThemedSquareTerminal = withUnistyles(SquareTerminal);
@@ -293,22 +295,21 @@ interface TabTargetLauncherOptions {
   onCreateTerminalWithProfile: (profile: TerminalProfile) => void;
 }
 
-interface WorkspaceNewTabButtonProps extends TabTargetLauncherOptions {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  shortcutKeys: ShortcutKey[][] | null;
+interface WorkspaceTabCreationMenuProps extends TabTargetLauncherOptions {
   onEditProfiles: () => void;
   showCreateBrowserTab: boolean;
   terminalDisabled: boolean;
   isGit: boolean;
   showPullRequest: boolean;
-  onLayout: (event: LayoutChangeEvent) => void;
 }
 
-function WorkspaceNewTabButton({
-  open,
-  onOpenChange,
-  shortcutKeys,
+interface WorkspaceTabCreationMenuItemsProps extends WorkspaceTabCreationMenuProps {
+  testIDPrefix: string;
+}
+
+function WorkspaceTabCreationMenuItems({
+  testIDPrefix,
+  normalizedServerId,
   onCreateAgentTab,
   onCreateTerminal,
   onCreateBrowser,
@@ -317,13 +318,11 @@ function WorkspaceNewTabButton({
   onOpenPullRequest,
   onCreateTerminalWithProfile,
   onEditProfiles,
-  normalizedServerId,
   showCreateBrowserTab,
   terminalDisabled,
   isGit,
   showPullRequest,
-  onLayout,
-}: WorkspaceNewTabButtonProps) {
+}: WorkspaceTabCreationMenuItemsProps) {
   const { t } = useTranslation();
   const { config } = useDaemonConfig(normalizedServerId);
   const profiles = useMemo(
@@ -335,7 +334,6 @@ function WorkspaceNewTabButton({
   const browserKeys = useShortcutKeys("workspace-tab-target-browser");
   const changesKeys = useShortcutKeys("workspace-tab-target-changes");
   const filesKeys = useShortcutKeys("workspace-tab-target-files");
-  const tooltipText = t("workspace.tabs.actions.newTab");
   const agentShortcut = useMemo(
     () => (agentKeys ? <Shortcut chord={agentKeys} /> : undefined),
     [agentKeys],
@@ -356,6 +354,97 @@ function WorkspaceNewTabButton({
     () => (filesKeys ? <Shortcut chord={filesKeys} /> : undefined),
     [filesKeys],
   );
+
+  return (
+    <>
+      <DropdownMenuItem
+        testID={`${testIDPrefix}-agent`}
+        leading={AGENT_ICON}
+        trailing={agentShortcut}
+        onSelect={onCreateAgentTab}
+      >
+        {t("workspace.tabs.fallback.agent")}
+      </DropdownMenuItem>
+      <DropdownMenuItem
+        testID={`${testIDPrefix}-terminal`}
+        leading={TERMINAL_ICON}
+        disabled={terminalDisabled}
+        trailing={terminalShortcut}
+        onSelect={terminalDisabled ? undefined : onCreateTerminal}
+      >
+        {t("workspace.tabs.fallback.terminal")}
+      </DropdownMenuItem>
+      {showCreateBrowserTab ? (
+        <DropdownMenuItem
+          testID={`${testIDPrefix}-browser`}
+          leading={BROWSER_ICON}
+          trailing={browserShortcut}
+          onSelect={onCreateBrowser}
+        >
+          {t("workspace.tabs.fallback.browser")}
+        </DropdownMenuItem>
+      ) : null}
+      {isGit ? (
+        <DropdownMenuItem
+          testID={`${testIDPrefix}-changes`}
+          leading={CHANGES_ICON}
+          trailing={changesShortcut}
+          onSelect={onOpenChanges}
+        >
+          {t("workspace.tabs.actions.changes")}
+        </DropdownMenuItem>
+      ) : null}
+      <DropdownMenuItem
+        testID={`${testIDPrefix}-files`}
+        leading={FILES_ICON}
+        trailing={filesShortcut}
+        onSelect={onOpenFiles}
+      >
+        {t("workspace.tabs.actions.files")}
+      </DropdownMenuItem>
+      {showPullRequest ? (
+        <DropdownMenuItem
+          testID={`${testIDPrefix}-pull-request`}
+          leading={PULL_REQUEST_ICON}
+          onSelect={onOpenPullRequest}
+        >
+          {t("workspace.tabs.actions.pullRequest")}
+        </DropdownMenuItem>
+      ) : null}
+      <DropdownMenuSeparator />
+      <DropdownMenuLabel>{t("workspace.tabs.actions.terminalProfilesMenu")}</DropdownMenuLabel>
+      {profiles.map((profile) => (
+        <TerminalProfileMenuItem
+          key={profile.id}
+          profile={profile}
+          disabled={terminalDisabled}
+          onLaunch={onCreateTerminalWithProfile}
+        />
+      ))}
+      <DropdownMenuSeparator />
+      <DropdownMenuItem testID={`${testIDPrefix}-edit-profiles`} onSelect={onEditProfiles}>
+        {t("workspace.tabs.actions.editTerminalProfiles")}
+      </DropdownMenuItem>
+    </>
+  );
+}
+
+interface WorkspaceNewTabButtonProps extends WorkspaceTabCreationMenuProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  shortcutKeys: ShortcutKey[][] | null;
+  onLayout: (event: LayoutChangeEvent) => void;
+}
+
+function WorkspaceNewTabButton({
+  open,
+  onOpenChange,
+  shortcutKeys,
+  onLayout,
+  ...menuProps
+}: WorkspaceNewTabButtonProps) {
+  const { t } = useTranslation();
+  const tooltipText = t("workspace.tabs.actions.newTab");
 
   return (
     <View style={styles.inlineAddButton} onLayout={onLayout}>
@@ -379,77 +468,28 @@ function WorkspaceNewTabButton({
           </TooltipContent>
         </Tooltip>
         <DropdownMenuContent side="bottom" align="start" offset={4} minWidth={200}>
-          <DropdownMenuItem
-            testID="workspace-new-tab-menu-agent"
-            leading={AGENT_ICON}
-            trailing={agentShortcut}
-            onSelect={onCreateAgentTab}
-          >
-            {t("workspace.tabs.fallback.agent")}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            testID="workspace-new-tab-menu-terminal"
-            leading={TERMINAL_ICON}
-            disabled={terminalDisabled}
-            trailing={terminalShortcut}
-            onSelect={terminalDisabled ? undefined : onCreateTerminal}
-          >
-            {t("workspace.tabs.fallback.terminal")}
-          </DropdownMenuItem>
-          {showCreateBrowserTab ? (
-            <DropdownMenuItem
-              testID="workspace-new-tab-menu-browser"
-              leading={BROWSER_ICON}
-              trailing={browserShortcut}
-              onSelect={onCreateBrowser}
-            >
-              {t("workspace.tabs.fallback.browser")}
-            </DropdownMenuItem>
-          ) : null}
-          {isGit ? (
-            <DropdownMenuItem
-              testID="workspace-new-tab-menu-changes"
-              leading={CHANGES_ICON}
-              trailing={changesShortcut}
-              onSelect={onOpenChanges}
-            >
-              {t("workspace.tabs.actions.changes")}
-            </DropdownMenuItem>
-          ) : null}
-          <DropdownMenuItem
-            testID="workspace-new-tab-menu-files"
-            leading={FILES_ICON}
-            trailing={filesShortcut}
-            onSelect={onOpenFiles}
-          >
-            {t("workspace.tabs.actions.files")}
-          </DropdownMenuItem>
-          {showPullRequest ? (
-            <DropdownMenuItem
-              testID="workspace-new-tab-menu-pull-request"
-              leading={PULL_REQUEST_ICON}
-              onSelect={onOpenPullRequest}
-            >
-              {t("workspace.tabs.actions.pullRequest")}
-            </DropdownMenuItem>
-          ) : null}
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel>{t("workspace.tabs.actions.terminalProfilesMenu")}</DropdownMenuLabel>
-          {profiles.map((profile) => (
-            <TerminalProfileMenuItem
-              key={profile.id}
-              profile={profile}
-              disabled={terminalDisabled}
-              onLaunch={onCreateTerminalWithProfile}
-            />
-          ))}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem testID="workspace-new-tab-menu-edit-profiles" onSelect={onEditProfiles}>
-            {t("workspace.tabs.actions.editTerminalProfiles")}
-          </DropdownMenuItem>
+          <WorkspaceTabCreationMenuItems testIDPrefix="workspace-new-tab-menu" {...menuProps} />
         </DropdownMenuContent>
       </DropdownMenu>
     </View>
+  );
+}
+
+function WorkspaceEmptyTabStripContextMenu(props: WorkspaceTabCreationMenuProps) {
+  const { t } = useTranslation();
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger
+        testID="workspace-empty-tab-strip"
+        enabledOnMobile={false}
+        accessibilityLabel={t("workspace.tabs.actions.newTab")}
+        style={styles.emptyTabStrip}
+      />
+      <ContextMenuContent align="start" width={DROPDOWN_WIDTH} testID="workspace-empty-tab-menu">
+        <WorkspaceTabCreationMenuItems testIDPrefix="workspace-empty-tab-menu" {...props} />
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
@@ -563,6 +603,8 @@ function TabContextMenuItem({
         return <ThemedArrowRightToLine size={16} uniProps={mutedColorMapping} />;
       case "copy-x":
         return <ThemedCopyX size={16} uniProps={mutedColorMapping} />;
+      case "panel-top-close":
+        return <ThemedPanelTopClose size={16} uniProps={mutedColorMapping} />;
       case "pencil":
         return <ThemedPencil size={16} uniProps={mutedColorMapping} />;
       case "x":
@@ -667,6 +709,8 @@ interface WorkspaceDesktopTabsRowProps {
   onCloseTabsToLeft: (tabId: string) => Promise<void> | void;
   onCloseTabsToRight: (tabId: string) => Promise<void> | void;
   onCloseOtherTabs: (tabId: string) => Promise<void> | void;
+  onCloseEditorTabs: () => Promise<void> | void;
+  canCloseEditorTabs: boolean;
   onCreateDraftTab: (input: { paneId?: string }) => void;
   onCreateTerminalTab: (input: { paneId?: string; profile?: TerminalProfile }) => void;
   onCreateBrowserTab: (input: { paneId?: string }) => void;
@@ -1151,6 +1195,8 @@ function ResolvedWorkspaceDesktopTabsRow({
   onCloseTabsToLeft,
   onCloseTabsToRight,
   onCloseOtherTabs,
+  onCloseEditorTabs,
+  canCloseEditorTabs,
   onCreateDraftTab,
   onCreateTerminalTab,
   onCreateBrowserTab,
@@ -1300,6 +1346,7 @@ function ResolvedWorkspaceDesktopTabsRow({
       closeLeft: t("workspace.tabs.menu.closeLeft"),
       closeRight: t("workspace.tabs.menu.closeRight"),
       closeOthers: t("workspace.tabs.menu.closeOthers"),
+      closeEditorTabs: t("workspace.tabs.menu.closeEditorTabs"),
       reloadAgent: t("workspace.tabs.menu.reloadAgent"),
       reloadAgentTooltip: t("workspace.tabs.menu.reloadAgentTooltip"),
       close: t("workspace.tabs.menu.close"),
@@ -1558,6 +1605,8 @@ function ResolvedWorkspaceDesktopTabsRow({
           onCloseTabsToLeft={onCloseTabsToLeft}
           onCloseTabsToRight={onCloseTabsToRight}
           onCloseOtherTabs={onCloseOtherTabs}
+          onCloseEditorTabs={onCloseEditorTabs}
+          canCloseEditorTabs={canCloseEditorTabs}
           resolvedTabWidth={resolvedTabWidth}
           showLabel={showLabel}
           showCloseButton={shouldShowCloseButton}
@@ -1577,6 +1626,8 @@ function ResolvedWorkspaceDesktopTabsRow({
       layout.closeButtonPolicy,
       layout.items,
       onCloseOtherTabs,
+      onCloseEditorTabs,
+      canCloseEditorTabs,
       onCloseTab,
       onCloseTabsToLeft,
       onCloseTabsToRight,
@@ -1675,6 +1726,21 @@ function ResolvedWorkspaceDesktopTabsRow({
               onLayout={handleInlineAddButtonLayout}
             />
           ) : null}
+          <WorkspaceEmptyTabStripContextMenu
+            onCreateAgentTab={handleCreateAgentTab}
+            onCreateTerminal={handleCreateTerminal}
+            onCreateBrowser={handleCreateBrowser}
+            onCreateTerminalWithProfile={handleCreateTerminalWithProfile}
+            onOpenChanges={handleOpenChanges}
+            onOpenFiles={handleOpenFiles}
+            onOpenPullRequest={handleOpenPullRequest}
+            onEditProfiles={handleEditProfiles}
+            normalizedServerId={normalizedServerId}
+            showCreateBrowserTab={showCreateBrowserTab}
+            terminalDisabled={terminalDisabled}
+            isGit={isGit}
+            showPullRequest={showPullRequest}
+          />
         </Animated.ScrollView>
         <WorkspaceTabScrollShades
           visible={layout.requiresHorizontalScrollFallback}
@@ -1729,6 +1795,8 @@ function ResolvedDesktopTabChip({
   onCloseTabsToLeft,
   onCloseTabsToRight,
   onCloseOtherTabs,
+  onCloseEditorTabs,
+  canCloseEditorTabs,
   resolvedTabWidth,
   showLabel,
   showCloseButton,
@@ -1754,6 +1822,8 @@ function ResolvedDesktopTabChip({
   onCloseTabsToLeft: (tabId: string) => Promise<void> | void;
   onCloseTabsToRight: (tabId: string) => Promise<void> | void;
   onCloseOtherTabs: (tabId: string) => Promise<void> | void;
+  onCloseEditorTabs: () => Promise<void> | void;
+  canCloseEditorTabs: boolean;
   resolvedTabWidth: number;
   showLabel: boolean;
   showCloseButton: boolean;
@@ -1783,12 +1853,16 @@ function ResolvedDesktopTabChip({
         onCloseTabsToLeft,
         onCloseTabsToRight,
         onCloseOtherTabs,
+        onCloseEditorTabs,
+        canCloseEditorTabs,
         labels,
       }),
     [
       index,
       item.tab,
       onCloseOtherTabs,
+      onCloseEditorTabs,
+      canCloseEditorTabs,
       onCloseTab,
       onCloseTabsToLeft,
       onCloseTabsToRight,
@@ -1867,6 +1941,11 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: TAB_ROW_PADDING_HORIZONTAL,
+    flexGrow: 1,
+  },
+  emptyTabStrip: {
+    flex: 1,
+    alignSelf: "stretch",
   },
   tabScrollShade: {
     position: "absolute",

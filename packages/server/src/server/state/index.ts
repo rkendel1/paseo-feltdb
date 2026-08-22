@@ -116,3 +116,11 @@ export {
   type ContextResolverInput,
   type AgentContext,
 } from "./context-resolver.js";
+export {
+  createContextPolicyEngine,
+  type ContextPolicy,
+  type BoundedAgentContext,
+  type ContextSelection,
+  type BoundedContextSelection,
+  DEFAULT_CONTEXT_POLICY,
+} from "./context-policy.js";

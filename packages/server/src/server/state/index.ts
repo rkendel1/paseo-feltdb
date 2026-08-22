@@ -147,3 +147,8 @@ export {
   type TimelineMessageEvent,
   ExecutionFeedbackNormalizer,
 } from "./execution-feedback-normalizer.js";
+export {
+  createObservationPersistence,
+  type ObservationPersistenceOptions,
+  ObservationPersistence,
+} from "./observation-persistence.js";

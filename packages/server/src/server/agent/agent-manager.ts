@@ -32,6 +32,10 @@ import type {
 } from "./agent-sdk-types.js";
 import type { AgentStorage } from "./agent-storage.js";
 import { AGENT_PROVIDER_IDS } from "./provider-manifest.js";
+import type {
+  ExecutionFeedbackNormalizer,
+  ExecutionFeedbackEvent,
+} from "../state/index.js";
 
 export { AGENT_LIFECYCLE_STATUSES, type AgentLifecycleStatus };
 
@@ -77,6 +81,8 @@ export type AgentManagerOptions = {
   runManager?: any; // RunManager instance for durable run lifecycle
   paseoState?: any; // PaseoState instance for durable conversation/message persistence
   contextService?: any; // AgentContextService instance for durable context injection
+  executionFeedbackNormalizer?: ExecutionFeedbackNormalizer; // For Phase 3.5.1 normalization
+  observationPersistence?: any; // ObservationPersistence instance for Phase 3.5.2 persistence
   logger: Logger;
 };
 
@@ -333,6 +339,8 @@ export class AgentManager {
   private readonly runManager?: any; // RunManager instance
   private readonly paseoState?: any; // PaseoState instance for durable state
   private readonly contextService?: any; // AgentContextService instance
+  private readonly executionFeedbackNormalizer?: ExecutionFeedbackNormalizer; // Phase 3.5.1
+  private readonly observationPersistence?: any; // Phase 3.5.2: ObservationPersistence
   private logger: Logger;
 
   constructor(options: AgentManagerOptions) {
@@ -348,6 +356,8 @@ export class AgentManager {
     this.runManager = options?.runManager;
     this.paseoState = options?.paseoState;
     this.contextService = options?.contextService;
+    this.executionFeedbackNormalizer = options?.executionFeedbackNormalizer;
+    this.observationPersistence = options?.observationPersistence;
     this.onAgentAttention = options?.onAgentAttention;
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
     if (options?.clients) {
@@ -1227,6 +1237,9 @@ export class AgentManager {
       let terminalEventType: "turn_completed" | "turn_failed" | "turn_canceled" | null = null;
       let terminalEventData: AgentStreamEvent | null = null;
 
+      // Collect all events for Phase 3.5.2 persistence
+      const collectedEvents: AgentStreamEvent[] = [];
+
       // Create durable Run entity if RunManager is available
       let createdRun = null;
       try {
@@ -1367,6 +1380,7 @@ export class AgentManager {
         while (!done) {
           while (queue.length > 0) {
             const event = queue.shift()!;
+            collectedEvents.push(event);
             yield event;
             if (isTurnTerminalEvent(event)) {
               terminalEventType = event.type as typeof terminalEventType;
@@ -1400,6 +1414,42 @@ export class AgentManager {
             await self.runManager.markRunInterrupted(agentId);
           } else if (!terminalEventType) {
             self.runManager.forgetRun(agentId);
+          }
+        }
+
+        // Phase 3.5.2: Normalize and persist execution feedback events
+        if (
+          self.executionFeedbackNormalizer &&
+          self.observationPersistence &&
+          createdRun &&
+          collectedEvents.length > 0
+        ) {
+          try {
+            const normalizedEvents = self.executionFeedbackNormalizer.normalize(
+              collectedEvents,
+              createdRun.id,
+            );
+
+            for (const event of normalizedEvents) {
+              try {
+                await self.observationPersistence.persistEvent(event, createdRun);
+              } catch (persistError) {
+                self.logger.warn(
+                  {
+                    agentId,
+                    runId: createdRun.id,
+                    eventType: event.type,
+                    err: persistError,
+                  },
+                  "Failed to persist execution feedback event (non-blocking)",
+                );
+              }
+            }
+          } catch (normalizationError) {
+            self.logger.warn(
+              { agentId, runId: createdRun.id, err: normalizationError },
+              "Failed to normalize execution feedback events (non-blocking)",
+            );
           }
         }
 

@@ -74,6 +74,7 @@ export type AgentManagerOptions = {
   idFactory?: () => string;
   registry?: AgentStorage;
   onAgentAttention?: AgentAttentionCallback;
+  runManager?: any; // RunManager instance for durable run lifecycle
   logger: Logger;
 };
 
@@ -324,6 +325,7 @@ export class AgentManager {
   private readonly previousStatuses = new Map<string, AgentLifecycleStatus>();
   private readonly backgroundTasks = new Set<Promise<void>>();
   private onAgentAttention?: AgentAttentionCallback;
+  private readonly runManager?: any; // RunManager instance
   private logger: Logger;
 
   constructor(options: AgentManagerOptions) {
@@ -336,6 +338,7 @@ export class AgentManager {
         : null;
     this.idFactory = options?.idFactory ?? (() => randomUUID());
     this.registry = options?.registry;
+    this.runManager = options?.runManager;
     this.onAgentAttention = options?.onAgentAttention;
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
     if (options?.clients) {
@@ -1077,12 +1080,25 @@ export class AgentManager {
 
     const self = this;
 
+    // Create durable Run entity if RunManager is available
+    const runPromise = self.runManager
+      ? self.runManager.createRun({
+          agentId,
+          provider: agent.provider,
+          cwd: agent.cwd,
+          prompt: typeof prompt === "string" ? prompt : JSON.stringify(prompt),
+        })
+      : Promise.resolve(null);
+
     const streamForwarder = (async function* streamForwarder() {
       const pendingRun = self.createPendingForegroundRun();
       self.pendingForegroundRuns.set(agentId, pendingRun);
 
       let turnId: string;
       let waiter: ForegroundTurnWaiter | null = null;
+      let terminalEventType: "turn_completed" | "turn_failed" | "turn_canceled" | null = null;
+      let terminalEventData: AgentStreamEvent | null = null;
+
       try {
         const result = await agent.session.startTurn(prompt, options);
         turnId = result.turnId;
@@ -1094,7 +1110,18 @@ export class AgentManager {
           error: errorMsg,
         });
         self.finalizeForegroundTurn(agent);
+        // Mark Run as failed
+        if (self.runManager) {
+          await runPromise;
+          await self.runManager.markRunFailed(agentId, errorMsg);
+        }
         throw error;
+      }
+
+      // Mark Run as started
+      if (self.runManager) {
+        await runPromise;
+        await self.runManager.markRunStarted(agentId);
       }
 
       pendingRun.started = true;
@@ -1141,6 +1168,8 @@ export class AgentManager {
             const event = queue.shift()!;
             yield event;
             if (isTurnTerminalEvent(event)) {
+              terminalEventType = event.type as typeof terminalEventType;
+              terminalEventData = event;
               done = true;
               break;
             }
@@ -1155,6 +1184,25 @@ export class AgentManager {
           }
         }
       } finally {
+        // Update Run entity based on terminal event
+        if (self.runManager) {
+          await runPromise;
+          if (terminalEventType === "turn_completed" && terminalEventData) {
+            const result = (terminalEventData as any).result;
+            await self.runManager.markRunCompleted(agentId, {
+              text: result?.text || "",
+              usage: result?.usage,
+            });
+          } else if (terminalEventType === "turn_failed" && terminalEventData) {
+            const error = (terminalEventData as any).error || "Unknown error";
+            await self.runManager.markRunFailed(agentId, error);
+          } else if (terminalEventType === "turn_canceled") {
+            await self.runManager.markRunInterrupted(agentId);
+          } else if (!terminalEventType) {
+            self.runManager.forgetRun(agentId);
+          }
+        }
+
         if (waiter) {
           agent.foregroundTurnWaiters.delete(waiter);
           self.settleForegroundTurnWaiter(waiter);

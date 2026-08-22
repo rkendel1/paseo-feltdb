@@ -116,6 +116,7 @@ import {
 } from "./voice-mcp-bridge.js";
 import { resolveVoiceMcpBridgeFromRuntime } from "./voice-mcp-bridge-command.js";
 import { initializeState, type PaseoState } from "./state/index.js";
+import { RunManager } from "./state/run-manager.js";
 
 type AgentMcpTransportMap = Map<string, StreamableHTTPServerTransport>;
 
@@ -383,6 +384,13 @@ export async function createPaseoDaemon(
       path.join(config.paseoHome, "projects", "workspaces.json"),
       logger,
     );
+
+    // Create RunManager for durable run lifecycle integration
+    const runManager = new RunManager({
+      paseoState,
+      logger,
+    });
+
     const agentManager = new AgentManager({
       clients: {
         ...createAllClients(logger, {
@@ -391,6 +399,7 @@ export async function createPaseoDaemon(
         ...config.agentClients,
       },
       registry: agentStorage,
+      runManager,
       logger,
     });
 

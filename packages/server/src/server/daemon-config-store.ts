@@ -18,7 +18,7 @@ type ProviderOverride = import("./agent/provider-launch-config.js").ProviderOver
 
 interface SupportedMutableConfigPatch {
   relay?: { enabled?: boolean };
-  mcp?: { injectIntoAgents?: boolean };
+  mcp?: { injectIntoAgents?: boolean; nativeAgentTools?: boolean };
   browserTools?: { enabled?: boolean };
   providers?: MutableDaemonConfig["providers"];
   removeProviders?: string[];
@@ -252,8 +252,17 @@ function compactOwnedPaths(paths: readonly string[], owners: readonly string[]):
 function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMutableConfigPatch {
   return {
     ...(patch.relay?.enabled !== undefined ? { relay: { enabled: patch.relay.enabled } } : {}),
-    ...(patch.mcp?.injectIntoAgents !== undefined
-      ? { mcp: { injectIntoAgents: patch.mcp.injectIntoAgents } }
+    ...(patch.mcp?.injectIntoAgents !== undefined || patch.mcp?.nativeAgentTools !== undefined
+      ? {
+          mcp: {
+            ...(patch.mcp.injectIntoAgents !== undefined
+              ? { injectIntoAgents: patch.mcp.injectIntoAgents }
+              : {}),
+            ...(patch.mcp.nativeAgentTools !== undefined
+              ? { nativeAgentTools: patch.mcp.nativeAgentTools }
+              : {}),
+          },
+        }
       : {}),
     ...(patch.browserTools?.enabled !== undefined
       ? { browserTools: { enabled: patch.browserTools.enabled } }
@@ -638,6 +647,9 @@ function mergeMutableDaemonPatch(
   }
   if (patch.mcp?.injectIntoAgents !== undefined) {
     next.mcp = { ...next.mcp, injectIntoAgents: patch.mcp.injectIntoAgents };
+  }
+  if (patch.mcp?.nativeAgentTools !== undefined) {
+    next.mcp = { ...next.mcp, nativeAgentTools: patch.mcp.nativeAgentTools };
   }
   if (patch.browserTools?.enabled !== undefined) {
     next.browserTools = { ...next.browserTools, enabled: patch.browserTools.enabled };

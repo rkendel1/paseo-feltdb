@@ -115,6 +115,7 @@ export interface MessageRepository {
     options?: { limit?: number; offset?: number }
   ): Promise<Message[]>;
   listByAuthor(authorId: string): Promise<Message[]>;
+  getMaxSequenceInConversation(conversationId: string): Promise<number>;
   update(id: string, data: Partial<Message>): Promise<Message>;
   delete(id: string): Promise<void>;
 }
@@ -497,6 +498,11 @@ function createMessageRepository(db: Database): MessageRepository {
     },
     async listByAuthor(authorId) {
       return await collection.find({ authorId });
+    },
+    async getMaxSequenceInConversation(conversationId) {
+      const messages = await collection.find({ conversationId });
+      if (messages.length === 0) return 0;
+      return Math.max(...messages.map(m => m.sequence || 0));
     },
     async update(id, data) {
       await collection.updateOne({ id }, data);

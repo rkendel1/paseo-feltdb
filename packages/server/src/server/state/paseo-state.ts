@@ -111,6 +111,7 @@ export interface PaseoState {
       conversationId: string,
       options?: { limit?: number; offset?: number }
     ): Promise<Message[]>;
+    getMaxSequenceInConversation(conversationId: string): Promise<number>;
     update(id: string, data: Partial<Message>): Promise<Message>;
     delete(id: string): Promise<void>;
   };
@@ -291,6 +292,9 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
       },
       async listByConversation(conversationId, options) {
         return repos.messages.listByConversation(conversationId, options);
+      },
+      async getMaxSequenceInConversation(conversationId) {
+        return repos.messages.getMaxSequenceInConversation(conversationId);
       },
       async update(id, data) {
         return repos.messages.update(id, data);

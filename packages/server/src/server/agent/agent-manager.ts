@@ -187,6 +187,7 @@ type ManagedAgentBase = {
   unsubscribeSession: (() => void) | null;
   conversationId: string | null; // Durable conversation for this agent
   messageSequence: number; // Sequence number for messages within conversation
+  currentRunId: string | null; // Current Run ID for message provenance
   /**
    * Internal agents are hidden from listings and don't trigger notifications.
    */
@@ -1097,20 +1098,26 @@ export class AgentManager {
         });
         conversationId = conversation.id;
         agent.conversationId = conversationId;
+        // Initialize sequence from durable storage (crash-safe)
+        agent.messageSequence = await this.paseoState.messages.getMaxSequenceInConversation(conversationId);
       }
 
       // Map timeline item to message
       const { authorType, role, content } = this.mapTimelineItemToMessage(item);
       if (!content) return; // Skip items with no content
 
+      // Atomically allocate next sequence number
       agent.messageSequence++;
+      const sequence = agent.messageSequence;
+
       await this.paseoState.messages.create({
         conversationId,
         authorType,
         authorId: agentId,
         content,
-        sequence: agent.messageSequence,
+        sequence,
         role,
+        runId: agent.currentRunId || undefined,
       });
     } catch (err) {
       this.logger.warn(
@@ -1246,10 +1253,14 @@ export class AgentManager {
         throw error;
       }
 
-      // Mark Run as started
+      // Mark Run as started and capture runId for message provenance
+      let createdRun = null;
       if (self.runManager) {
-        await runPromise;
+        createdRun = await runPromise;
         await self.runManager.markRunStarted(agentId);
+        if (createdRun) {
+          agent.currentRunId = createdRun.id;
+        }
       }
 
       pendingRun.started = true;
@@ -1330,6 +1341,9 @@ export class AgentManager {
             self.runManager.forgetRun(agentId);
           }
         }
+
+        // Clear currentRunId to prevent stale runId from leaking to subsequent messages
+        agent.currentRunId = null;
 
         if (waiter) {
           agent.foregroundTurnWaiters.delete(waiter);
@@ -1927,6 +1941,7 @@ export class AgentManager {
           : { requiresAttention: false },
       conversationId: options?.conversationId ?? null,
       messageSequence: options?.messageSequence ?? 0,
+      currentRunId: null,
       internal: config.internal ?? false,
       labels: options?.labels ?? {},
     } as ActiveManagedAgent;

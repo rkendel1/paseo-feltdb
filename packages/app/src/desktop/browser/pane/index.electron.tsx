@@ -1,7 +1,6 @@
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -9,7 +8,6 @@ import {
   type ReactNode,
   createElement,
 } from "react";
-import { createPortal } from "react-dom";
 import { Pressable, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import {
   EditingTextInput as TextInput,
@@ -27,13 +25,11 @@ import {
   Smartphone,
   Tablet,
   Wrench,
-  X,
   type LucideIcon,
 } from "lucide-react-native";
 import { StyleSheet, useUnistyles, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import * as Clipboard from "expo-clipboard";
-import { Button } from "@/components/ui/button";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/contexts/toast-context";
@@ -51,7 +47,6 @@ import {
 import type { AttachmentMetadata, BrowserElementAttachment } from "@/attachments/types";
 import { persistAttachmentFromDataUrl } from "@/attachments/service";
 import { WORKSPACE_SECONDARY_HEADER_HEIGHT } from "@/constants/layout";
-import { getOverlayRoot } from "@/lib/overlay-root";
 import {
   getDesktopHost,
   isElectronRuntime,
@@ -74,6 +69,10 @@ import {
   takeResidentBrowserWebview,
 } from "../resident-webviews";
 import {
+  BrowserElementAnnotationCard,
+  type BrowserElementAnnotation,
+} from "./element-annotation-card.electron";
+import {
   createElementSelectorController,
   type BrowserElementSelection,
   type ElementSelectorOutcome,
@@ -94,10 +93,6 @@ type ElectronWebview = HTMLElement & {
   addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
   removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
 };
-
-interface BrowserElementAnnotation {
-  comment: string;
-}
 
 type DeviceSizeId =
   | "responsive"
@@ -1546,7 +1541,7 @@ export function BrowserPane({
         })}
         {pendingSelection ? (
           <BrowserElementAnnotationCard
-            anchor={webviewClipRef.current}
+            clipRef={webviewClipRef}
             selection={pendingSelection}
             onSubmit={submitAnnotation}
             onCancel={cancelAnnotation}
@@ -1556,131 +1551,6 @@ export function BrowserPane({
     </View>
   );
 }
-
-function BrowserElementAnnotationCard({
-  anchor,
-  selection,
-  onSubmit,
-  onCancel,
-}: {
-  anchor: HTMLElement | null;
-  selection: BrowserElementSelection;
-  onSubmit: (annotation: BrowserElementAnnotation) => void;
-  onCancel: () => void;
-}) {
-  const { t } = useTranslation();
-  const bounds = useElementBounds(anchor);
-  const [comment, setComment] = useState("");
-  const commentRef = useRef(comment);
-  commentRef.current = comment;
-
-  const handleSubmit = useCallback(() => {
-    onSubmit({ comment: commentRef.current });
-  }, [onSubmit]);
-
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        onCancel();
-        return;
-      }
-      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        event.stopPropagation();
-        handleSubmit();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown, true);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown, true);
-    };
-  }, [handleSubmit, onCancel]);
-
-  const elementText = truncateText(selection.text.trim().replace(/\s+/g, " "), 60);
-  const elementLabel = elementText ? `${selection.tag} · ${elementText}` : selection.tag;
-
-  if (!bounds) {
-    return null;
-  }
-
-  return createPortal(
-    <View style={[styles.annotationOverlay, bounds]} pointerEvents="box-none">
-      <View style={styles.annotationCard}>
-        <View style={styles.annotationHeader}>
-          <Text numberOfLines={1} style={styles.annotationTitle}>
-            {t("workspace.browser.annotate.title")}
-          </Text>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={t("workspace.browser.annotate.cancel")}
-            onPress={onCancel}
-            style={styles.annotationCloseButton}
-          >
-            <ThemedCloseIcon size={16} uniProps={iconForegroundMutedMapping} />
-          </Pressable>
-        </View>
-        <Text numberOfLines={1} style={styles.annotationElement}>
-          {elementLabel}
-        </Text>
-        <ThemedAnnotationInput
-          accessibilityLabel={t("workspace.browser.annotate.placeholder")}
-          autoFocus
-          multiline
-          onChangeText={setComment}
-          placeholder={t("workspace.browser.annotate.placeholder")}
-          style={styles.annotationInput}
-          uniProps={annotationInputMapping}
-          initialValue={comment}
-        />
-        <View style={styles.annotationActions}>
-          <Button variant="ghost" size="sm" onPress={onCancel}>
-            {t("workspace.browser.annotate.cancel")}
-          </Button>
-          <Button variant="default" size="sm" onPress={handleSubmit}>
-            {t("workspace.browser.annotate.submit")}
-          </Button>
-        </View>
-      </View>
-    </View>,
-    getOverlayRoot(),
-  );
-}
-
-function useElementBounds(element: HTMLElement | null): ViewStyle | null {
-  const [bounds, setBounds] = useState<ViewStyle | null>(null);
-
-  useLayoutEffect(() => {
-    if (!element) {
-      setBounds(null);
-      return;
-    }
-    const update = () => {
-      const rect = element.getBoundingClientRect();
-      setBounds({ left: rect.left, top: rect.top, width: rect.width, height: rect.height });
-    };
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(element);
-    window.addEventListener("resize", update);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", update);
-    };
-  }, [element]);
-
-  return bounds;
-}
-
-const ThemedCloseIcon = withUnistyles(X);
-const ThemedAnnotationInput = withUnistyles(TextInput);
-const iconForegroundMutedMapping = (theme: { colors: { foregroundMuted: string } }) => ({
-  color: theme.colors.foregroundMuted,
-});
-const annotationInputMapping = (theme: { colors: { foregroundMuted: string } }) => ({
-  placeholderTextColor: theme.colors.foregroundMuted,
-});
 
 const styles = StyleSheet.create((theme) => ({
   container: {
@@ -1776,68 +1646,6 @@ const styles = StyleSheet.create((theme) => ({
   toolbarTooltipText: {
     fontSize: theme.fontSize.sm,
     color: theme.colors.popoverForeground,
-  },
-  annotationOverlay: {
-    position: "absolute",
-    zIndex: 1,
-    padding: theme.spacing[3],
-    alignItems: "center",
-    justifyContent: "flex-end",
-  },
-  annotationCard: {
-    width: "100%",
-    maxWidth: 420,
-    gap: theme.spacing[2],
-    padding: theme.spacing[3],
-    borderRadius: theme.borderRadius.lg,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface0,
-    shadowColor: "#000",
-    shadowOpacity: 0.18,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 6 },
-  },
-  annotationHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: theme.spacing[2],
-  },
-  annotationTitle: {
-    flex: 1,
-    fontSize: theme.fontSize.base,
-    fontWeight: "600",
-    color: theme.colors.foreground,
-  },
-  annotationCloseButton: {
-    width: 24,
-    height: 24,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: theme.borderRadius.md,
-  },
-  annotationElement: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foregroundMuted,
-    marginBottom: theme.spacing[2],
-  },
-  annotationInput: {
-    minHeight: 64,
-    fontSize: theme.fontSize.base,
-    color: theme.colors.foreground,
-    borderRadius: theme.borderRadius.md,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface1,
-    paddingHorizontal: theme.spacing[2],
-    paddingVertical: theme.spacing[2],
-    textAlignVertical: "top",
-  },
-  annotationActions: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    gap: theme.spacing[2],
   },
   unavailableState: {
     flex: 1,

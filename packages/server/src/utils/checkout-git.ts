@@ -974,7 +974,10 @@ async function getRebaseHeadBranch(cwd: string): Promise<string | null> {
   return results.find((result): result is string => result !== null) ?? null;
 }
 
-async function getWorktreeRoot(cwd: string, context?: CheckoutContext): Promise<string | null> {
+export async function getWorktreeRoot(
+  cwd: string,
+  context?: CheckoutContext,
+): Promise<string | null> {
   try {
     const { stdout } = await runGitCommand(["rev-parse", "--show-toplevel"], {
       cwd,

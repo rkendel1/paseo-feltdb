@@ -118,6 +118,32 @@ export async function fanOutReconciledWorkspaceUpdates(input: {
   );
 }
 
+function handleWorkspaceRuntimeReconciliationError(error: unknown, logger: Logger): void {
+  if (isWorkspaceRuntimeRegistrationError(error)) throw error;
+  logger.warn({ err: error }, "Workspace runtime reconciliation failed");
+}
+
+async function reconcileWorkspaceRuntimesAtStartup(
+  workspaceRuntime: WorkspaceRuntimeService,
+  logger: Logger,
+  elapsed: () => string,
+): Promise<void> {
+  try {
+    await workspaceRuntime.reconcile();
+    logger.info({ elapsed: elapsed() }, "Workspace runtimes reconciled");
+  } catch (error) {
+    handleWorkspaceRuntimeReconciliationError(error, logger);
+  }
+}
+
+async function resolveWorkspaceRuntimeIdForAgent(
+  registry: FileBackedWorkspaceRegistry,
+  workspaceId: string,
+): Promise<string | null> {
+  const workspace = await registry.get(workspaceId);
+  return workspace ? resolveSelectedWorkspaceRuntimeId(workspace) : null;
+}
+
 import { VoiceAssistantWebSocketServer } from "./websocket-server.js";
 import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { createGitHubService } from "../services/github-service.js";
@@ -153,6 +179,7 @@ import {
 } from "./workspace-registry.js";
 import {
   createWorkspaceRuntimeService,
+  isWorkspaceRuntimeRegistrationError,
   type WorkspaceRuntimeConfig,
   type WorkspaceRuntimeRecordStore,
   type WorkspaceRuntimeService,
@@ -1008,6 +1035,7 @@ export async function createPaseoDaemon(
     worktreesRoot: config.worktreesRoot,
     externalRuntimes: config.workspaceRuntimes,
     commandResolutionBase: config.workspaceRuntimeCommandResolutionBase,
+    daemonAuthenticationConfigured: Boolean(config.auth?.password),
     ...workspaceRecords,
   });
   const detachProviderProbeInvalidation = projectRegistry.subscribeToMutations(async (mutation) => {
@@ -1136,6 +1164,8 @@ export async function createPaseoDaemon(
     },
     mcpAuthToken: agentMcpAuthToken,
     resolveProviderWorkspace,
+    resolveWorkspaceRuntimeId: (workspaceId) =>
+      resolveWorkspaceRuntimeIdForAgent(workspaceRegistry, workspaceId),
     logger,
   });
 
@@ -1153,12 +1183,7 @@ export async function createPaseoDaemon(
   } catch (error) {
     logger.warn({ err: error }, "Provider probe reconciliation failed");
   }
-  try {
-    await workspaceRuntime.reconcile();
-    logger.info({ elapsed: elapsed() }, "Workspace runtimes reconciled");
-  } catch (error) {
-    logger.warn({ err: error }, "Workspace runtime reconciliation failed");
-  }
+  await reconcileWorkspaceRuntimesAtStartup(workspaceRuntime, logger, elapsed);
   await bootstrapWorkspaceRegistries({
     serverId,
     paseoHome: config.paseoHome,
@@ -1571,6 +1596,9 @@ export async function createPaseoDaemon(
 
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,
+    agentToolGroups?: ReadonlySet<
+      import("./workspace-runtime/index.js").WorkspaceRuntimeAgentToolGroup
+    >,
   ): PaseoToolHostDependencies => ({
     agentManager,
     agentStorage,
@@ -1627,12 +1655,24 @@ export async function createPaseoDaemon(
     callerAgentId: runtime.callerAgentId,
     enableVoiceTools: runtime.enableVoiceTools,
     voiceOnly: runtime.voiceOnly,
+    agentToolGroups,
     resolveSpeakHandler: (agentId) => wsServer?.resolveVoiceSpeakHandler(agentId) ?? null,
     resolveCallerContext: (agentId) => wsServer?.resolveVoiceCallerContext(agentId) ?? null,
     logger,
   });
-  const createAgentToolCatalog = (runtime: PaseoToolRuntimeContext) =>
-    createPaseoToolCatalog(createAgentToolHostDependencies(runtime));
+  const resolveAgentToolGroups = async (callerAgentId?: string) => {
+    if (!callerAgentId) return undefined;
+    const agent = agentManager.getAgent(callerAgentId);
+    if (!agent?.workspaceId) return undefined;
+    const workspace = await workspaceRegistry.get(agent.workspaceId);
+    const runtimeId = workspace?.runtime?.runtimeId;
+    if (!runtimeId || runtimeId === "local" || runtimeId === "worktree") return undefined;
+    return new Set(config.workspaceRuntimes?.[runtimeId]?.agentTools ?? []);
+  };
+  const createAgentToolCatalog = async (runtime: PaseoToolRuntimeContext) =>
+    createPaseoToolCatalog(
+      createAgentToolHostDependencies(runtime, await resolveAgentToolGroups(runtime.callerAgentId)),
+    );
   agentManager.setPaseoToolCatalogFactory(createAgentToolCatalog);
   agentManager.setPaseoToolsEnabled(config.mcpInjectIntoAgents !== false);
 
@@ -1643,7 +1683,10 @@ export async function createPaseoDaemon(
 
     const createAgentMcpSession = async (callerAgentId?: string) => {
       const agentMcpServer = await createAgentMcpServer(
-        createAgentToolHostDependencies({ callerAgentId }),
+        createAgentToolHostDependencies(
+          { callerAgentId },
+          await resolveAgentToolGroups(callerAgentId),
+        ),
       );
 
       // Stateless mode: each HTTP request builds a fresh server + transport that is
@@ -1670,6 +1713,7 @@ export async function createPaseoDaemon(
     const runAgentMcpRequest = async (
       req: express.Request,
       res: express.Response,
+      authenticatedAgentId?: string,
     ): Promise<void> => {
       if (!mcpEnabled) {
         res.status(404).json({ error: "Agent MCP endpoint disabled" });
@@ -1679,13 +1723,23 @@ export async function createPaseoDaemon(
       // authenticates here using the injected capability token (or a valid
       // daemon password). Without this, a password-protected daemon would be
       // wide open on its agent control plane.
-      if (
-        !(await isAgentMcpRequestAuthorized({
-          password: config.auth?.password,
-          capabilityToken: agentMcpAuthToken,
-          authorizationHeader: req.header("authorization"),
-        }))
-      ) {
+      const scopedBinding = authenticatedAgentId
+        ? agentManager.authenticateAgentMcpRequest(req.header("authorization"))
+        : null;
+      const scopedRuntimeMatches =
+        !scopedBinding ||
+        !scopedBinding.workspaceId ||
+        (await resolveRegistryRuntimeId(scopedBinding.workspaceId)) === scopedBinding.runtimeId;
+      const authorized = authenticatedAgentId
+        ? scopedBinding !== null &&
+          scopedBinding.agentId === authenticatedAgentId &&
+          scopedRuntimeMatches
+        : await isAgentMcpRequestAuthorized({
+            password: config.auth?.password,
+            capabilityToken: agentMcpAuthToken,
+            authorizationHeader: req.header("authorization"),
+          });
+      if (!authorized) {
         res.status(401).json({ error: "Unauthorized" });
         return;
       }
@@ -1716,12 +1770,14 @@ export async function createPaseoDaemon(
           });
           return;
         }
-        const callerAgentIdRaw = req.query.callerAgentId;
-        let callerAgentId: string | undefined;
-        if (typeof callerAgentIdRaw === "string") {
-          callerAgentId = callerAgentIdRaw;
-        } else if (Array.isArray(callerAgentIdRaw) && typeof callerAgentIdRaw[0] === "string") {
-          callerAgentId = callerAgentIdRaw[0];
+        let callerAgentId = authenticatedAgentId;
+        if (!callerAgentId) {
+          const callerAgentIdRaw = req.query.callerAgentId;
+          if (typeof callerAgentIdRaw === "string") {
+            callerAgentId = callerAgentIdRaw;
+          } else if (Array.isArray(callerAgentIdRaw) && typeof callerAgentIdRaw[0] === "string") {
+            callerAgentId = callerAgentIdRaw[0];
+          }
         }
         const { server, transport } = await createAgentMcpSession(callerAgentId);
         res.on("close", () => {
@@ -1752,10 +1808,21 @@ export async function createPaseoDaemon(
     const handleAgentMcpRequest: express.RequestHandler = (req, res) => {
       void runAgentMcpRequest(req, res);
     };
+    const handleScopedAgentMcpRequest: express.RequestHandler = (req, res) => {
+      const binding = agentManager.authenticateAgentMcpRequest(req.header("authorization"));
+      if (!binding) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      void runAgentMcpRequest(req, res, binding.agentId);
+    };
 
     app.post(agentMcpRoute, handleAgentMcpRequest);
     app.get(agentMcpRoute, handleAgentMcpRequest);
     app.delete(agentMcpRoute, handleAgentMcpRequest);
+    app.post(`${agentMcpRoute}/agent`, handleScopedAgentMcpRequest);
+    app.get(`${agentMcpRoute}/agent`, handleScopedAgentMcpRequest);
+    app.delete(`${agentMcpRoute}/agent`, handleScopedAgentMcpRequest);
     logger.info({ route: agentMcpRoute, enabled: mcpEnabled }, "Agent MCP route mounted");
   }
 

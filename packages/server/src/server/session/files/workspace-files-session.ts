@@ -1,4 +1,5 @@
 import type pino from "pino";
+import path from "node:path";
 import { areEquivalentPaths } from "../../../utils/path.js";
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
 import {
@@ -325,9 +326,37 @@ export class WorkspaceFilesSession {
 
     try {
       const selectedFiles = await this.resolveSelectedFiles(cwd, request.workspaceId);
+      let selectedPath = requestedPath;
+      if (selectedFiles && path.isAbsolute(requestedPath)) {
+        const relative = path.relative(cwd, requestedPath);
+        if (
+          relative === ".." ||
+          relative.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(relative)
+        ) {
+          this.host.emit(
+            {
+              type: "file_explorer_response",
+              payload: {
+                cwd,
+                path: requestedPath,
+                mode,
+                directory: null,
+                file: null,
+                error:
+                  "Selected runtime artifacts outside the workspace, including files under private HOME, cannot be opened from workspace browsing; write the artifact into the workspace first",
+                requestId,
+              },
+            },
+            source,
+          );
+          return;
+        }
+        selectedPath = relative || ".";
+      }
       if (mode === "list") {
         const directory = selectedFiles
-          ? await selectedFiles.list(requestedPath)
+          ? await selectedFiles.list(selectedPath)
           : await listDirectoryEntries({ root: cwd, relativePath: requestedPath });
 
         this.host.emit(
@@ -347,7 +376,7 @@ export class WorkspaceFilesSession {
         );
       } else {
         if (selectedFiles) {
-          const file = await selectedFiles.read(requestedPath);
+          const file = await selectedFiles.read(selectedPath);
           if (request.acceptBinary && this.host.hasBinaryChannel()) {
             await this.emitStream(requestId, file, source);
           } else {

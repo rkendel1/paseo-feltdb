@@ -75,6 +75,7 @@ export interface MaterializedProviderStateFile {
 /** Provider-owned placement capability. Adapters never receive a workspace runtime or its root. */
 export interface ProviderWorkspace {
   readonly cwd: string;
+  readonly isolatesProcesses?: boolean;
   resolveExecutable(command: string): Promise<string>;
   launch(input: ProviderWorkspaceLaunchInput): Promise<ChildProcessWithoutNullStreams>;
   launchDeferred(
@@ -123,6 +124,7 @@ export function bindProviderWorkspace(input: {
 
   return {
     cwd: input.cwd,
+    isolatesProcesses: input.policy.environment.type === "isolated",
     async resolveExecutable(command) {
       const resolved = await input.runtime.resolveCommand(command);
       if (!resolved)
@@ -153,7 +155,13 @@ export function bindProviderWorkspace(input: {
         process.exited,
       ]);
       if (exit.code !== 0 || exit.signal !== null) {
-        throw new Error(`${probe.provider} probe failed: ${stderr || exit.code || exit.signal}`);
+        const detail = stderr || String(exit.code || exit.signal);
+        if (probe.provider === "claude" && detail.includes("/opt/claude-code")) {
+          throw new Error(
+            `claude probe failed: ${detail.trim()}. Add /opt/claude-code to workspaceRuntimes.<runtimeId>.options.readOnlyPaths`,
+          );
+        }
+        throw new Error(`${probe.provider} probe failed: ${detail}`);
       }
       return { stdout, stderr };
     },

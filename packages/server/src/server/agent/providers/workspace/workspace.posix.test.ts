@@ -27,6 +27,51 @@ posixDescribe("provider workspace placement capability", () => {
     });
   });
 
+  test("explains the explicit Claude mount when its wrapper target is unavailable", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "paseo-provider-claude-mount-"));
+    const cwd = path.join(root, "workspace");
+    await import("node:fs/promises").then((fs) => fs.mkdir(cwd));
+    const runtimeIds = new Map<string, string>();
+    const service = createWorkspaceRuntimeService({
+      paseoHome: path.join(root, "paseo-home"),
+      resolveRuntimeId: async (workspaceId) => runtimeIds.get(workspaceId) ?? null,
+      persistRuntimeId: async (workspaceId, runtimeId) => runtimeIds.set(workspaceId, runtimeId),
+      ...lifecycleRecords(runtimeIds),
+    });
+    await service.create({
+      workspaceId: "provider-claude-mount",
+      runtimeId: "local",
+      project: { id: "project", source: { kind: "host-directory", path: cwd } },
+      placement: { kind: "existing" },
+    });
+    const workspace = bindProviderWorkspace({
+      runtime: await service.bind("provider-claude-mount"),
+      cwd: ".",
+      policy: {
+        environment: { type: "inherit-sanitized-host", hostEnvironment: process.env },
+        sharedHostProviders: new Set(),
+      },
+    });
+
+    try {
+      await expect(
+        workspace.runProbe({
+          argv: [
+            "/bin/sh",
+            "-c",
+            "printf '/usr/bin/claude: /opt/claude-code/bin/claude: not found' >&2; exit 127",
+          ],
+          provider: "claude",
+        }),
+      ).rejects.toThrow(
+        "Add /opt/claude-code to workspaceRuntimes.<runtimeId>.options.readOnlyPaths",
+      );
+    } finally {
+      await service.destroy("provider-claude-mount");
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("streams large binary state without putting content in argv and removes it safely", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "paseo-provider-state-"));
     const cwd = path.join(root, "workspace");

@@ -35,29 +35,82 @@ export interface CommandRuntimeConfig {
   options?: Readonly<Record<string, WorkspaceRuntimeJsonValue>>;
 }
 
+export class WorkspaceRuntimeRegistrationError extends Error {
+  constructor(runtimeId: string, cause: unknown) {
+    super(
+      `Workspace runtime ${runtimeId} registration failed${cause instanceof Error ? `: ${cause.message}` : ""}`,
+      { cause },
+    );
+    this.name = "WorkspaceRuntimeRegistrationError";
+  }
+}
+
+export function isWorkspaceRuntimeRegistrationError(
+  error: unknown,
+): error is WorkspaceRuntimeRegistrationError {
+  return (
+    error instanceof WorkspaceRuntimeRegistrationError ||
+    (error instanceof AggregateError &&
+      error.errors.some((nested) => isWorkspaceRuntimeRegistrationError(nested)))
+  );
+}
+
 export function createCommandRuntime(
   runtimeId: string,
   config: CommandRuntimeConfig,
   runtimeInstanceId: string,
   packageResolutionBase: string,
   pathResolutionBase: string,
+  daemonAuthenticationConfigured: boolean,
 ): WorkspaceRuntimeDriver {
   const command = resolveRuntimeCommand(config.command, packageResolutionBase, pathResolutionBase);
   let described: Promise<ReadonlySet<"pipes" | "pty">> | null = null;
+  let managementOperations: Promise<ReadonlySet<string>> | null = null;
   let supportsReconciliation = false;
 
   function describe(): Promise<ReadonlySet<"pipes" | "pty">> {
-    described ??= runCommand(["describe"], undefined).then((output) => {
+    described ??= runCommand(["describe"], undefined)
+      .then((output) => {
+        const value: unknown = JSON.parse(output);
+        assertProtocolVersion(runtimeId, value);
+        const description = CommandRuntimeDescribeResponseSchema.parse(value);
+        if (description.requirements.daemonAuthentication && !daemonAuthenticationConfigured) {
+          throw new Error(`Workspace runtime ${runtimeId} requires daemon authentication`);
+        }
+        if (!description.modes.includes("pipes")) {
+          throw new Error(`Workspace runtime ${runtimeId} does not support pipes`);
+        }
+        supportsReconciliation = description.reconcile;
+        return new Set(description.modes);
+      })
+      .catch((error) => {
+        throw new WorkspaceRuntimeRegistrationError(runtimeId, error);
+      });
+    return described;
+  }
+
+  function describeManagement(): Promise<ReadonlySet<string>> {
+    managementOperations ??= describe().then(async () => {
+      let output: string;
+      try {
+        output = await runCommand(["manage-describe"], undefined);
+      } catch {
+        return new Set<string>();
+      }
       const value: unknown = JSON.parse(output);
       assertProtocolVersion(runtimeId, value);
-      const description = CommandRuntimeDescribeResponseSchema.parse(value);
-      if (!description.modes.includes("pipes")) {
-        throw new Error(`Workspace runtime ${runtimeId} does not support pipes`);
+      if (
+        typeof value !== "object" ||
+        value === null ||
+        !("operations" in value) ||
+        !Array.isArray(value.operations) ||
+        !value.operations.every((operation) => typeof operation === "string")
+      ) {
+        throw new Error(`Workspace runtime ${runtimeId} returned invalid management capabilities`);
       }
-      supportsReconciliation = description.reconcile;
-      return new Set(description.modes);
+      return new Set(value.operations);
     });
-    return described;
+    return managementOperations;
   }
 
   async function lifecycle(
@@ -78,6 +131,41 @@ export function createCommandRuntime(
     const value: unknown = JSON.parse(output);
     assertProtocolVersion(runtimeId, value);
     return CommandRuntimeLifecycleResponseSchema.parse(value);
+  }
+
+  async function manage(
+    operation: string,
+    workspaceId?: string,
+  ): Promise<{ supported: boolean; sourceRoot?: string }> {
+    if (!(await describeManagement()).has(operation)) return { supported: false };
+    const output = await runCommand(
+      workspaceId ? [operation, "--workspace-id", workspaceId] : [operation],
+      encodeCommandRuntimeMessage(CommandRuntimeLifecycleRequestSchema, {
+        protocolVersion: COMMAND_RUNTIME_PROTOCOL_VERSION,
+        runtimeInstanceId,
+        options: config.options ?? {},
+      }),
+    );
+    const value: unknown = JSON.parse(output);
+    assertProtocolVersion(runtimeId, value);
+    if (operation === "merge-to-base") {
+      if (
+        typeof value !== "object" ||
+        value === null ||
+        !("type" in value) ||
+        value.type !== "merge-to-base" ||
+        !("sourceRoot" in value) ||
+        typeof value.sourceRoot !== "string"
+      ) {
+        throw new Error(`Invalid ${operation} response from ${runtimeId}`);
+      }
+      return { supported: true, sourceRoot: value.sourceRoot };
+    }
+    const response = CommandRuntimeLifecycleResponseSchema.parse(value);
+    if (response.type !== "ok") {
+      throw new Error(`Invalid ${operation} response from ${runtimeId}`);
+    }
+    return { supported: true };
   }
 
   return {
@@ -136,6 +224,19 @@ export function createCommandRuntime(
       const response = await lifecycle("pause", workspaceId);
       if (response.type !== "ok") throw new Error(`Invalid pause response from ${runtimeId}`);
     },
+    async preflightBackingRelease(workspaceId) {
+      await manage("preflight-release-backing", workspaceId);
+    },
+    async releaseBacking(workspaceId) {
+      await manage("release-backing", workspaceId);
+    },
+    async mergeToBase(workspaceId) {
+      const result = await manage("merge-to-base", workspaceId);
+      if (!result.supported || !result.sourceRoot) {
+        throw new Error(`Workspace runtime ${runtimeId} does not support Merge locally`);
+      }
+      return result.sourceRoot;
+    },
     async resume(workspaceId) {
       const response = await lifecycle("resume", workspaceId);
       if (response.type !== "state") throw new Error(`Invalid resume response from ${runtimeId}`);
@@ -147,6 +248,11 @@ export function createCommandRuntime(
     },
     async reconcile(workspaceIds) {
       await describe();
+      try {
+        await manage("validate-options");
+      } catch (error) {
+        throw new WorkspaceRuntimeRegistrationError(runtimeId, error);
+      }
       if (!supportsReconciliation) return;
       const output = await runCommand(
         ["reconcile"],

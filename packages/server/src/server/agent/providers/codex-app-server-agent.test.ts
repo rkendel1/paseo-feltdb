@@ -172,7 +172,11 @@ function createCodexProviderWorkspace(
 
 function createSession(
   configOverrides: Partial<AgentSessionConfig> = {},
-  options: { goalsEnabled?: boolean; autoReviewEnabled?: boolean } = {},
+  options: {
+    goalsEnabled?: boolean;
+    autoReviewEnabled?: boolean;
+    workspace?: ProviderWorkspace;
+  } = {},
 ): CodexTestSession {
   const session = new CodexAppServerAgentSession(
     createConfig(configOverrides),
@@ -185,6 +189,9 @@ function createSession(
     false,
     options.goalsEnabled === true,
     options.autoReviewEnabled === true,
+    undefined,
+    "interactive",
+    options.workspace,
   ) as CodexTestSession;
   session.connected = true;
   session.currentThreadId = "test-thread";
@@ -586,6 +593,33 @@ describe("Codex app-server provider", () => {
         approvalsReviewer: "auto_review",
       }),
     );
+  });
+
+  test("isolated runtimes replace the native sandbox while preserving auto-review", async () => {
+    const session = createSession(
+      { modeId: "auto-review" },
+      {
+        autoReviewEnabled: true,
+        workspace: createStub<ProviderWorkspace>({ isolatesProcesses: true }),
+      },
+    );
+    const request = vi.fn(async (method: string) => {
+      if (method === "thread/loaded/list") return { data: ["test-thread"] };
+      if (method === "turn/start") return {};
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({ request });
+
+    await session.startTurn("run inside the runtime sandbox");
+
+    const turnStart = request.mock.calls.find(([method]) => method === "turn/start")?.[1];
+    expect(turnStart).toMatchObject({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+      sandboxPolicy: { type: "dangerFullAccess" },
+      config: { sandbox_mode: "danger-full-access" },
+    });
   });
 
   test("omitted mode preserves Codex resolved approval and sandbox config", async () => {

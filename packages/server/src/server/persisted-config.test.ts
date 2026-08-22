@@ -146,6 +146,7 @@ describe("PersistedConfigSchema workspace runtime config", () => {
             type: "command",
             label: "Fixture",
             command: ["/trusted/runtime", "--fixture"],
+            agentTools: ["workspace", "agents", "permissions"],
             options: { arbitrary: { nested: [true, 3, null] } },
           },
         },
@@ -155,12 +156,20 @@ describe("PersistedConfigSchema workspace runtime config", () => {
         type: "command",
         label: "Fixture",
         command: ["/trusted/runtime", "--fixture"],
+        agentTools: ["workspace", "agents", "permissions"],
         options: { arbitrary: { nested: [true, 3, null] } },
       },
     });
     expect(() =>
       PersistedConfigSchema.parse({
         workspaceRuntimes: { invalid: { type: "command", command: [] } },
+      }),
+    ).toThrow();
+    expect(() =>
+      PersistedConfigSchema.parse({
+        workspaceRuntimes: {
+          invalid: { type: "command", command: ["runtime"], agentTools: ["unknown"] },
+        },
       }),
     ).toThrow();
     expect(() =>

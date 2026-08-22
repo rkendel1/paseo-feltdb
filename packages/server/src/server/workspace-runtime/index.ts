@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { WorkspaceFiles } from "@getpaseo/workspace-helper";
 
 import { createCommandRuntimeAdapter } from "./command/index.js";
+export { isWorkspaceRuntimeRegistrationError } from "./command/index.js";
 import { createHostGitObservationOwner } from "./internal/host-git-observation.js";
 import { createLocalRuntime } from "./internal/local-runtime.js";
 import { createService } from "./internal/service.js";
@@ -146,7 +147,9 @@ export interface WorkspaceRuntimeService {
   requireHostVisiblePath(workspaceId: string): Promise<string>;
   pause(workspaceId: string): Promise<void>;
   resume(workspaceId: string): Promise<void>;
+  preflightArchive(workspaceId: string): Promise<void>;
   archive(workspaceId: string, options?: { releaseBacking?: boolean }): Promise<void>;
+  mergeToBase(workspaceId: string): Promise<string>;
   restore(workspaceId: string): Promise<void>;
   destroy(workspaceId: string): Promise<void>;
 }
@@ -194,7 +197,19 @@ export interface ExternalWorkspaceRuntime {
   label?: string;
   command: readonly [string, ...string[]];
   options?: Readonly<Record<string, WorkspaceRuntimeJsonValue>>;
+  agentTools?: readonly WorkspaceRuntimeAgentToolGroup[];
 }
+
+export type WorkspaceRuntimeAgentToolGroup =
+  | "workspace"
+  | "agents"
+  | "terminals"
+  | "scripts"
+  | "heartbeats"
+  | "providers"
+  | "permissions"
+  | "browser"
+  | "voice";
 export type WorkspaceRuntimeConfig = ExternalWorkspaceRuntime;
 export type WorkspaceRuntimeJsonValue =
   | string
@@ -209,6 +224,7 @@ export interface WorkspaceRuntimeOptions extends WorkspaceRuntimeRecordStore {
   worktreesRoot?: string;
   externalRuntimes?: Readonly<Record<string, WorkspaceRuntimeConfig>>;
   commandResolutionBase?: string;
+  daemonAuthenticationConfigured?: boolean;
 }
 
 export function createWorkspaceRuntimeService(
@@ -228,6 +244,7 @@ export function createWorkspaceRuntimeService(
       runtimeInstanceId,
       options.commandResolutionBase ?? fileURLToPath(new URL(".", import.meta.url)),
       options.paseoHome,
+      options.daemonAuthenticationConfigured ?? false,
     );
   });
   const drivers = [

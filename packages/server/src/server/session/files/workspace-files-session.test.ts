@@ -185,6 +185,35 @@ describe("WorkspaceFilesSession", () => {
       FileTransferOpcode.FileEnd,
     ]);
 
+    await subsystem.handleFileExplorerRequest({
+      type: "file_explorer_request",
+      workspaceId: record.workspaceId,
+      cwd,
+      path: "/home/paseo/.codex/generated_images/image.png",
+      mode: "file",
+      requestId: "selected-private-home",
+    });
+    expect(emitted.at(-1)).toMatchObject({
+      type: "file_explorer_response",
+      payload: {
+        requestId: "selected-private-home",
+        error: expect.stringContaining("private HOME"),
+      },
+    });
+
+    await subsystem.handleFileExplorerRequest({
+      type: "file_explorer_request",
+      workspaceId: record.workspaceId,
+      cwd,
+      path: join(cwd, "runtime.txt"),
+      mode: "file",
+      requestId: "selected-absolute-inside",
+    });
+    expect(emitted.at(-1)).toMatchObject({
+      type: "file_explorer_response",
+      payload: { requestId: "selected-absolute-inside", error: null },
+    });
+
     const version = await runtime.files(record.workspaceId).stat("runtime.txt");
     if (version.status !== "ready") throw new Error("Expected runtime.txt to exist");
     await subsystem.handleFileWriteRequest({

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const COMMAND_RUNTIME_PROTOCOL_VERSION = 1 as const;
+export const COMMAND_RUNTIME_PROTOCOL_VERSION = 2 as const;
 
 const ProtocolVersionSchema = z.literal(COMMAND_RUNTIME_PROTOCOL_VERSION);
 const EnvironmentSchema = z.record(z.string(), z.string());
@@ -110,6 +110,7 @@ export const CommandRuntimeStateSchema = z
 export const CommandRuntimePlacementSchema = z
   .object({
     cwd: z.string(),
+    hostVisiblePath: z.string().optional(),
   })
   .strict();
 
@@ -157,6 +158,7 @@ export const CommandRuntimeDescribeResponseSchema = z
     protocolVersion: ProtocolVersionSchema,
     modes: z.array(z.enum(["pipes", "pty"])),
     reconcile: z.boolean().optional().default(false),
+    requirements: z.object({ daemonAuthentication: z.boolean() }).strict(),
   })
   .strict();
 

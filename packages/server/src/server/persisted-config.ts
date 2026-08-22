@@ -96,6 +96,21 @@ const CommandWorkspaceRuntimeConfigSchema = z
       .min(1)
       .transform((command) => command as [string, ...string[]]),
     options: z.record(z.string(), z.json()).optional(),
+    agentTools: z
+      .array(
+        z.enum([
+          "workspace",
+          "agents",
+          "terminals",
+          "scripts",
+          "heartbeats",
+          "providers",
+          "permissions",
+          "browser",
+          "voice",
+        ]),
+      )
+      .optional(),
   })
   .strict();
 

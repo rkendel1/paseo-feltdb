@@ -9,6 +9,7 @@ import {
   humanizeProcessTitle,
   normalizeProcessTitle,
   resolveZshShellIntegrationDir,
+  type ServerMessage,
   type TerminalSession,
 } from "./terminal.js";
 import {
@@ -28,6 +29,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setImmediate as waitForImmediate, setTimeout as delay } from "node:timers/promises";
 import { stripVTControlCharacters } from "node:util";
+import { Terminal as HeadlessTerminal } from "@xterm/headless";
+import { renderTerminalSnapshotToAnsi } from "@getpaseo/protocol/terminal-snapshot";
 
 const hasZsh = existsSync("/bin/zsh");
 
@@ -780,6 +783,87 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
 
     unsubscribeCommandFinished();
   });
+
+  it.each(["same", "separate"] as const)(
+    "restores unterminated output before prompt control traffic in %s PTY chunks",
+    async (chunkMode) => {
+      const packageRoot = mkdtempSync(join(tmpdir(), "terminal-unterminated-output-"));
+      temporaryDirs.push(packageRoot);
+      const gatePath = join(packageRoot, "start-output");
+      const finalOutput = "created-from-terminal\r\neeee\x1b]633;D;0\x07";
+      const promptOutput =
+        "\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m" +
+        " ".repeat(79) +
+        "\r \r\x1b]633;A\x07\r\x1b[0m\x1b[27m\x1b[24m\x1b[J$ \x1b[K\x1b[?2004h";
+      const session = trackSession(
+        await createTerminal({
+          workspaceId: "ws-test",
+          cwd: packageRoot,
+          rows: 24,
+          cols: 80,
+          command: process.execPath,
+          args: [
+            "-e",
+            `
+              const fs = require("node:fs");
+              const timer = setInterval(() => {
+                if (!fs.existsSync(${JSON.stringify(gatePath)})) return;
+                clearInterval(timer);
+                process.stdout.write(${JSON.stringify(finalOutput)});
+                if (${JSON.stringify(chunkMode)} === "same") {
+                  process.stdout.write(${JSON.stringify(promptOutput)});
+                } else {
+                  setTimeout(() => process.stdout.write(${JSON.stringify(promptOutput)}), 20);
+                }
+                setInterval(() => {}, 1000);
+              }, 5);
+            `,
+          ],
+        }),
+      );
+      const client = new HeadlessTerminal({ rows: 24, cols: 120, allowProposedApi: true });
+      let snapshots = 0;
+      let pendingWrite = Promise.resolve();
+
+      function handleMessage(message: ServerMessage): void {
+        pendingWrite = pendingWrite.then(
+          () =>
+            new Promise<void>((resolve) => {
+              if (message.type === "snapshot") {
+                snapshots += 1;
+                client.resize(message.state.cols, message.state.rows);
+                client.reset();
+                client.write(renderTerminalSnapshotToAnsi(message.state), resolve);
+                return;
+              }
+              if (message.type === "output") {
+                client.write(message.data, resolve);
+                return;
+              }
+              resolve();
+            }),
+        );
+      }
+
+      const unsubscribe = session.subscribe(handleMessage);
+
+      await waitForState(session, () => snapshots === 1);
+      await pendingWrite;
+      client.resize(120, 24);
+      writeFileSync(gatePath, "go");
+      await waitForState(session, () => snapshots >= 2);
+      await waitForState(session, (state) => getLines(state).includes("eeee%"));
+      await pendingWrite;
+
+      const clientLines = Array.from({ length: client.buffer.active.length }, (_, row) =>
+        client.buffer.active.getLine(row)?.translateToString(true).trimEnd(),
+      );
+      expect(clientLines).toEqual(expect.arrayContaining(["created-from-terminal", "eeee%", "$"]));
+
+      unsubscribe();
+      client.dispose();
+    },
+  );
 
   it("ignores malformed VS Code OSC 633 command completion payloads", async () => {
     const packageRoot = mkdtempSync(join(tmpdir(), "terminal-command-finished-malformed-"));

@@ -782,8 +782,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       getCommitFileDiff: (input) => service.getCommitFileDiff(cwd, input),
       stashPush: (message) => service.stashPush(cwd, message),
       stashPop: (stashIndex) => service.stashPop(cwd, stashIndex),
-      mergeToBase: (options) =>
-        selected ? unsupported("merge to base") : service.mergeToBase(cwd, options),
+      mergeToBase: (options) => service.mergeToBase(cwd, options),
       mergeFromBase: (options) =>
         selected ? unsupported("merge from base") : service.mergeFromBase(cwd, options),
       pull: () => service.pull(cwd),
@@ -1016,7 +1015,41 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
   async commit(cwd: string, options: { message: string; addAll: boolean }): Promise<void> {
     const normalizedCwd = resolve(cwd);
-    await this.withWorkspaceRuntime(normalizedCwd, () => commitChanges(normalizedCwd, options));
+    if (this.selectedWorkspaceId) {
+      await this.withWorkspaceRuntime(normalizedCwd, async () => {
+        const [name, email] = await Promise.all(
+          ["user.name", "user.email"].map(async (key) => {
+            const result = await runGitCommand(["config", "--get", key], {
+              cwd: normalizedCwd,
+              acceptExitCodes: [0, 1],
+            });
+            return result.exitCode === 0 ? result.stdout.trim() : "";
+          }),
+        );
+        if (!name || !email) {
+          throw new Error(
+            "Git identity is missing. Configure workspaceRuntimes.<runtimeId>.options.gitIdentity with name and email.",
+          );
+        }
+        if (options.addAll) {
+          await runGitCommand(["add", "-A", "--"], { cwd: normalizedCwd });
+        }
+        await runGitCommand(
+          [
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-m",
+            options.message,
+          ],
+          { cwd: normalizedCwd },
+        );
+      });
+    } else {
+      await commitChanges(normalizedCwd, options);
+    }
     await this.getSnapshot(normalizedCwd, {
       force: true,
       includeForge: false,
@@ -1125,14 +1158,14 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
   async mergeToBase(cwd: string, options: Parameters<typeof mergeToBase>[1]): Promise<string> {
     const normalizedCwd = resolve(cwd);
-    const selected = this.selectedWorkspaceId !== null;
-    const mutatedCwd = await this.withWorkspaceRuntime(normalizedCwd, () =>
-      mergeToBase(normalizedCwd, options, {
-        paseoHome: this.paseoHome,
-        worktreesRoot: this.worktreesRoot,
-      }),
-    );
-    return selected ? normalizedCwd : mutatedCwd;
+    if (this.selectedWorkspaceId) {
+      if (!this.workspaceRuntime) throw new Error("Workspace runtime is not available");
+      return this.workspaceRuntime.mergeToBase(this.selectedWorkspaceId);
+    }
+    return mergeToBase(normalizedCwd, options, {
+      paseoHome: this.paseoHome,
+      worktreesRoot: this.worktreesRoot,
+    });
   }
 
   async mergeFromBase(cwd: string, options: Parameters<typeof mergeFromBase>[1]): Promise<void> {

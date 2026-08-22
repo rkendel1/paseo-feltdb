@@ -51,6 +51,7 @@ try {
     const response = {
       protocolVersion,
       modes: argument("--modes") === "pipes" ? ["pipes"] : ["pipes", "pty"],
+      requirements: { daemonAuthentication: process.argv.includes("--require-daemon-auth") },
     };
     if (protocolVersion === COMMAND_RUNTIME_PROTOCOL_VERSION) {
       writeJson(CommandRuntimeDescribeResponseSchema, response);

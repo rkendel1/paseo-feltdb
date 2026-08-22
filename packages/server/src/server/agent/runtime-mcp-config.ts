@@ -2,6 +2,7 @@ import type { AgentSessionConfig, McpServerConfig } from "./agent-sdk-types.js";
 
 const PASEO_MCP_SERVER_NAME = "paseo";
 const PASEO_MCP_PATHNAME = "/mcp/agents";
+const PASEO_SCOPED_MCP_PATHNAME = `${PASEO_MCP_PATHNAME}/agent`;
 
 export function stripInternalPaseoMcpServer(config: AgentSessionConfig): AgentSessionConfig {
   const mcpServers = config.mcpServers;
@@ -47,7 +48,7 @@ export function withRuntimePaseoMcpServer(params: {
     mcpServers: {
       [PASEO_MCP_SERVER_NAME]: {
         type: "http",
-        url: `${params.mcpBaseUrl}?callerAgentId=${params.agentId}`,
+        url: `${params.mcpBaseUrl}/agent`,
         ...(params.mcpAuthToken
           ? { headers: { Authorization: `Bearer ${params.mcpAuthToken}` } }
           : {}),
@@ -63,7 +64,8 @@ function isInternalPaseoMcpServer(config: McpServerConfig): boolean {
   }
 
   try {
-    return new URL(config.url).pathname === PASEO_MCP_PATHNAME;
+    const pathname = new URL(config.url).pathname;
+    return pathname === PASEO_MCP_PATHNAME || pathname === PASEO_SCOPED_MCP_PATHNAME;
   } catch {
     return false;
   }

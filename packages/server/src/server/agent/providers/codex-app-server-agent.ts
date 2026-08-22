@@ -3979,8 +3979,10 @@ export class CodexAppServerAgentSession implements AgentSession {
   ): { approvalPolicy?: string; sandboxPolicyType?: string } {
     const approvalPolicy = this.hasWorkflowModeOverride ? preset.approvalPolicy : undefined;
     const sandboxPolicyType =
-      this.providerOptions.sandbox_mode ??
-      (this.hasWorkflowModeOverride ? preset.sandbox : undefined);
+      this.workspace?.isolatesProcesses === true
+        ? "danger-full-access"
+        : (this.providerOptions.sandbox_mode ??
+          (this.hasWorkflowModeOverride ? preset.sandbox : undefined));
     if (approvalPolicy && this.providerOptions.approval_policy === undefined) {
       params.approvalPolicy = approvalPolicy;
     }
@@ -4847,7 +4849,12 @@ export class CodexAppServerAgentSession implements AgentSession {
   } {
     const preset = MODE_PRESETS[this.currentMode] ?? MODE_PRESETS[DEFAULT_CODEX_MODE_ID];
     const approvalPolicy = this.hasWorkflowModeOverride ? preset.approvalPolicy : undefined;
-    const sandbox = this.hasWorkflowModeOverride ? preset.sandbox : undefined;
+    let sandbox: string | undefined;
+    if (this.workspace?.isolatesProcesses === true) {
+      sandbox = "danger-full-access";
+    } else if (this.hasWorkflowModeOverride) {
+      sandbox = preset.sandbox;
+    }
     const innerConfig = this.buildCodexInnerConfig();
     const developerInstructions = composeSystemPromptParts(
       this.config.systemPrompt,
@@ -4859,7 +4866,11 @@ export class CodexAppServerAgentSession implements AgentSession {
       ...(approvalPolicy && this.providerOptions.approval_policy === undefined
         ? { approvalPolicy }
         : {}),
-      ...(sandbox && this.providerOptions.sandbox_mode === undefined ? { sandbox } : {}),
+      ...(sandbox &&
+      (this.workspace?.isolatesProcesses === true ||
+        this.providerOptions.sandbox_mode === undefined)
+        ? { sandbox }
+        : {}),
       ...(developerInstructions ? { developerInstructions } : {}),
       ...(innerConfig ? { config: innerConfig } : {}),
       ...(this.ephemeral ? { ephemeral: true } : {}),
@@ -4875,6 +4886,9 @@ export class CodexAppServerAgentSession implements AgentSession {
     Object.assign(innerConfig, this.providerOptions);
     if (this.deps.customCodexConfig) {
       Object.assign(innerConfig, this.deps.customCodexConfig);
+    }
+    if (this.workspace?.isolatesProcesses === true) {
+      innerConfig.sandbox_mode = "danger-full-access";
     }
     if (this.config.mcpServers) {
       const mcpServers: Record<string, CodexMcpServerConfig> = {};

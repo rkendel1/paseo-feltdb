@@ -425,7 +425,18 @@ function configureOpenCodeProviderStub(
     if (!entry) throw new Error(`Provider ${opts.provider} is not configured`);
     return entry;
   });
-  stub.listModels.mockResolvedValue([]);
+  stub.listModels.mockImplementation(async (input) => {
+    const provider = (input as { provider: AgentProvider }).provider;
+    const ids: Record<string, string[]> = {
+      claude: ["sonnet", "claude-sonnet-4-20250514"],
+      codex: ["gpt-5.4"],
+      opencode: ["gpt-5.4"],
+      ...(options.customOpenCodeProvider
+        ? { [options.customOpenCodeProvider]: ["custom-model"] }
+        : {}),
+    };
+    return (ids[provider] ?? []).map((id) => ({ provider, id, label: id }));
+  });
   stub.listModes.mockImplementation(async (input) => {
     const opts = input as { provider: AgentProvider };
     return modesByProvider[opts.provider] ?? [];
@@ -599,6 +610,11 @@ class BoundaryAgentManagerFake {
 class BoundaryAgentStorageFake {
   public async list(): Promise<StoredAgentRecord[]> {
     return [];
+  }
+
+  public async get(agentId: string): Promise<StoredAgentRecord | null> {
+    if (agentId !== "foreign-agent") return null;
+    return { id: agentId, workspaceId: "foreign-workspace" } as StoredAgentRecord;
   }
 }
 
@@ -855,6 +871,68 @@ function createPaseoWorktreeForMcpTest(options: {
 
 describe("browser MCP tools", () => {
   const logger = createTestLogger();
+
+  it("fails closed to the runtime agent-tool allowlist and daemon browser opt-in", async () => {
+    const base = {
+      agentManager: new BoundaryAgentManagerFake() as unknown as AgentManager,
+      agentStorage: new BoundaryAgentStorageFake() as unknown as AgentStorage,
+      providerSnapshotManager:
+        new BoundaryProviderSnapshotManagerFake() as unknown as ProviderSnapshotManager,
+      callerAgentId: "agent-1",
+      logger,
+    };
+    const omitted = await createAgentMcpServer({ ...base, agentToolGroups: new Set() });
+    const omittedClient = await connectInMemoryMcpClient(omitted);
+    const broker = new FakeBrowserToolsBroker({
+      requestId: "req-browser-allowlist",
+      ok: true,
+      result: { command: "list_tabs", tabs: [] },
+    });
+    const browser = await createAgentMcpServer({
+      ...base,
+      agentToolGroups: new Set(["browser"]),
+      browserToolsEnabled: true,
+      browserToolsBroker: broker as BrowserToolsBroker,
+    });
+    const browserClient = await connectInMemoryMcpClient(browser);
+    try {
+      await expect(omittedClient.listTools()).rejects.toThrow("Method not found");
+      const names = (await browserClient.listTools()).tools.map((tool) => tool.name);
+      expect(names.length).toBeGreaterThan(0);
+      expect(names.every((name) => name.startsWith("browser_"))).toBe(true);
+    } finally {
+      await omittedClient.close();
+      await browserClient.close();
+      await omitted.close();
+      await browser.close();
+    }
+  });
+
+  it("rejects runtime-scoped references to agents in another workspace", async () => {
+    const server = await createAgentMcpServer({
+      agentManager: new BoundaryAgentManagerFake() as unknown as AgentManager,
+      agentStorage: new BoundaryAgentStorageFake() as unknown as AgentStorage,
+      providerSnapshotManager:
+        new BoundaryProviderSnapshotManagerFake() as unknown as ProviderSnapshotManager,
+      callerAgentId: "agent-1",
+      agentToolGroups: new Set(["agents"]),
+      logger,
+    });
+    const client = await connectInMemoryMcpClient(server);
+    try {
+      const result = await client.callTool({
+        name: "get_agent_status",
+        arguments: { agentId: "foreign-agent" },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([
+        expect.objectContaining({ text: expect.stringContaining("outside the caller workspace") }),
+      ]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
 
   it("omits output schemas from tools/list and keeps tool call content model-visible", async () => {
     const agentManager = new BoundaryAgentManagerFake();
@@ -1243,6 +1321,28 @@ describe("create_agent MCP tool", () => {
         (issue: { path: Array<string | number> }) => issue.path[0] === "initialPrompt",
       ),
     ).toBe(true);
+  });
+
+  it("rejects an unknown model before allocating an agent", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    const { manager } = createOpenCodeManager();
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: manager,
+      ensureWorkspaceForCreate,
+      logger,
+    });
+
+    await expect(
+      registeredTool(server, "create_agent").handler({
+        title: "Unknown model",
+        provider: "codex/not-in-the-catalog",
+        initialPrompt: "Do work",
+        background: true,
+      }),
+    ).rejects.toThrow("Unknown model 'not-in-the-catalog' for provider 'codex'. Call list_models");
+    expect(spies.agentManager.createAgent).not.toHaveBeenCalled();
   });
 
   it("creates a fresh local workspace for canonical top-level creation", async () => {
@@ -3468,6 +3568,7 @@ describe("create_agent MCP tool", () => {
       buildSnapshotEntry({ provider, label: "Codex", modes: dynamicModes }),
     );
     provStub.listModes.mockResolvedValue(dynamicModes);
+    provStub.listModels.mockResolvedValue([{ provider: "codex", id: "gpt-5.4", label: "GPT 5.4" }]);
     provStub.resolveCreateConfig.mockImplementation(async (input) => {
       const opts = input as { requestedMode: string | undefined };
       expect(opts.requestedMode).toBe("dynamic");
@@ -5874,5 +5975,24 @@ describe("agent snapshot MCP serialization", () => {
     expect(content).not.toContain("[User] u2");
     expect(content).not.toContain("second answer");
     expect(content).not.toContain("first answer");
+  });
+
+  it("get_agent_activity accepts only positive bounded integer limits", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      logger: createTestLogger(),
+    });
+    const tool = registeredTool(server, "get_agent_activity");
+
+    await expect(tool.inputSchema.safeParseAsync({ agentId: "agent", limit: 1 })).resolves.toEqual(
+      expect.objectContaining({ success: true }),
+    );
+    for (const limit of [0, -1, 1.5, 201]) {
+      const parsed = await tool.inputSchema.safeParseAsync({ agentId: "agent", limit });
+      expect(parsed.success).toBe(false);
+    }
   });
 });

@@ -1,0 +1,101 @@
+{
+  "describeResponse": {
+    "protocolVersion": 2,
+    "requirements": { "daemonAuthentication": false },
+    "modes": ["pipes", "pty"],
+    "reconcile": true
+  },
+  "lifecycleRequest": {
+    "protocolVersion": 2,
+    "runtimeInstanceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "input": {
+      "workspaceId": "workspace-01",
+      "project": {
+        "projectId": "project-01",
+        "source": {
+          "kind": "git",
+          "url": "https://example.test/acme/project.git",
+          "revision": "main",
+          "subdirectory": "packages/app"
+        }
+      },
+      "placement": { "kind": "existing" },
+      "purpose": "discovery"
+    },
+    "options": {}
+  },
+  "lifecycleResponse": {
+    "protocolVersion": 2,
+    "type": "state",
+    "state": {
+      "workspaceId": "workspace-01",
+      "lifecycle": "ready"
+    },
+    "placement": { "cwd": "/workspace" },
+    "materializedFreshContent": true
+  },
+  "pipeSpawnControl": {
+    "type": "spawn",
+    "protocolVersion": 2,
+    "runtimeInstanceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "argv": ["/bin/sh", "-c", "printf hello"],
+    "cwd": "packages/app",
+    "env": { "PATH": "/usr/bin:/bin" },
+    "purpose": { "kind": "workspace-script" },
+    "options": {},
+    "execId": "exec-pipe-01",
+    "stdio": { "kind": "pipes" }
+  },
+  "ptySpawnControl": {
+    "type": "spawn",
+    "protocolVersion": 2,
+    "runtimeInstanceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "argv": ["/bin/sh", "-c", "printf hello"],
+    "cwd": "packages/app",
+    "env": { "PATH": "/usr/bin:/bin" },
+    "purpose": { "kind": "workspace-script" },
+    "options": {},
+    "execId": "exec-pty-01",
+    "stdio": { "kind": "pty", "rows": 24, "cols": 80, "term": "xterm-256color" }
+  },
+  "resizeControl": {
+    "type": "resize",
+    "protocolVersion": 2,
+    "id": 1,
+    "rows": 40,
+    "cols": 120
+  },
+  "signalControl": {
+    "type": "signal",
+    "protocolVersion": 2,
+    "signal": "SIGTERM"
+  },
+  "startedEvent": { "type": "started", "protocolVersion": 2 },
+  "eofEvent": { "type": "eof", "protocolVersion": 2 },
+  "resizedEvent": { "type": "resized", "protocolVersion": 2, "id": 1 },
+  "exitEvent": {
+    "type": "exit",
+    "protocolVersion": 2,
+    "code": 0,
+    "signal": null
+  },
+  "errorEvent": {
+    "type": "error",
+    "protocolVersion": 2,
+    "message": "runtime control failed"
+  },
+  "bytes": {
+    "describeResponse": "{\"protocolVersion\":2,\"modes\":[\"pipes\",\"pty\"],\"reconcile\":true,\"requirements\":{\"daemonAuthentication\":false}}\n",
+    "lifecycleRequest": "{\"protocolVersion\":2,\"runtimeInstanceId\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"input\":{\"workspaceId\":\"workspace-01\",\"project\":{\"projectId\":\"project-01\",\"source\":{\"kind\":\"git\",\"url\":\"https://example.test/acme/project.git\",\"revision\":\"main\",\"subdirectory\":\"packages/app\"}},\"placement\":{\"kind\":\"existing\"},\"purpose\":\"discovery\"},\"options\":{}}\n",
+    "lifecycleResponse": "{\"type\":\"state\",\"protocolVersion\":2,\"state\":{\"workspaceId\":\"workspace-01\",\"lifecycle\":\"ready\"},\"placement\":{\"cwd\":\"/workspace\"},\"materializedFreshContent\":true}\n",
+    "pipeSpawnControl": "{\"type\":\"spawn\",\"protocolVersion\":2,\"runtimeInstanceId\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"argv\":[\"/bin/sh\",\"-c\",\"printf hello\"],\"cwd\":\"packages/app\",\"env\":{\"PATH\":\"/usr/bin:/bin\"},\"purpose\":{\"kind\":\"workspace-script\"},\"options\":{},\"execId\":\"exec-pipe-01\",\"stdio\":{\"kind\":\"pipes\"}}\n",
+    "ptySpawnControl": "{\"type\":\"spawn\",\"protocolVersion\":2,\"runtimeInstanceId\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"argv\":[\"/bin/sh\",\"-c\",\"printf hello\"],\"cwd\":\"packages/app\",\"env\":{\"PATH\":\"/usr/bin:/bin\"},\"purpose\":{\"kind\":\"workspace-script\"},\"options\":{},\"execId\":\"exec-pty-01\",\"stdio\":{\"kind\":\"pty\",\"rows\":24,\"cols\":80,\"term\":\"xterm-256color\"}}\n",
+    "resizeControl": "{\"type\":\"resize\",\"protocolVersion\":2,\"id\":1,\"rows\":40,\"cols\":120}\n",
+    "signalControl": "{\"type\":\"signal\",\"protocolVersion\":2,\"signal\":\"SIGTERM\"}\n",
+    "startedEvent": "{\"type\":\"started\",\"protocolVersion\":2}\n",
+    "eofEvent": "{\"type\":\"eof\",\"protocolVersion\":2}\n",
+    "resizedEvent": "{\"type\":\"resized\",\"protocolVersion\":2,\"id\":1}\n",
+    "exitEvent": "{\"type\":\"exit\",\"protocolVersion\":2,\"code\":0,\"signal\":null}\n",
+    "errorEvent": "{\"type\":\"error\",\"protocolVersion\":2,\"message\":\"runtime control failed\"}\n"
+  }
+}

@@ -337,12 +337,21 @@ export function createService(
         unavailableFiles.delete(workspaceId);
       });
     },
+    async preflightArchive(workspaceId) {
+      await sequence(workspaceId, async () => {
+        const driver = await resolve(workspaceId);
+        await driver.preflightBackingRelease?.(workspaceId);
+      });
+    },
     async archive(workspaceId, archiveOptions) {
       await sequence(workspaceId, async () => {
         if (!records.archiveWorkspaceRecord) {
           throw new Error("Workspace runtime record store cannot archive workspaces");
         }
         const driver = await resolve(workspaceId);
+        if (archiveOptions?.releaseBacking) {
+          await driver.preflightBackingRelease?.(workspaceId);
+        }
         const inspection = await driver.inspect(workspaceId);
         if (inspection.status === "ready") await runArchiveHooks(workspaceId, driver);
         await pauseWithDriver(workspaceId, driver);
@@ -350,6 +359,15 @@ export function createService(
           await driver.releaseBacking?.(workspaceId);
         }
         await records.archiveWorkspaceRecord(workspaceId);
+      });
+    },
+    async mergeToBase(workspaceId) {
+      return sequence(workspaceId, async () => {
+        const driver = await resolve(workspaceId);
+        if (!driver.mergeToBase) {
+          throw new Error(`Workspace runtime ${driver.id} does not support Merge locally`);
+        }
+        return driver.mergeToBase(workspaceId);
       });
     },
     async restore(workspaceId) {
@@ -613,18 +631,12 @@ export function createService(
     workspaceId: string,
     argv: readonly [string, ...string[]],
   ) {
-    const runtimeProcess = await driver.spawn({
+    return runWithDriver(driver, {
       workspaceId,
       argv,
       env: driver.workspaceHelper.env,
       purpose: { kind: "workspace-helper" },
-      stdio: { kind: "pipes" },
     });
-    if (runtimeProcess.kind !== "pipes") {
-      throw new Error(`Workspace runtime returned PTY mode for its helper: ${driver.id}`);
-    }
-    trackProcess(workspaceId, runtimeProcess);
-    return runtimeProcess;
   }
 
   async function sequence<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {

@@ -197,6 +197,43 @@ function assertArchiveResult(
 }
 
 describe("archiveByScope", () => {
+  test("runtime archive preflight blocks teardown before terminals or records are archived", async () => {
+    const { tempDir, repoDir } = createGitRepo();
+    const workspaceId = "ws-dirty-runtime-archive";
+    const deps = createArchiveDeps({
+      paseoHome: path.join(tempDir, ".paseo"),
+      activeWorkspaces: [
+        {
+          workspaceId,
+          cwd: repoDir,
+          kind: "local_checkout",
+          runtimeId: "bubblewrap",
+          hostVisiblePath: repoDir,
+        },
+      ],
+    });
+    deps.preflightArchiveWorkspaceRecord = vi.fn(async () => {
+      throw new Error(
+        "Workspace has uncommitted or untracked changes; commit or explicitly discard changes first",
+      );
+    });
+    deps.archiveWorkspaceRecord = vi.fn();
+
+    await expect(
+      archiveByScope(deps, {
+        scope: { kind: "workspace", workspaceId },
+        requestId: "req-dirty-runtime-archive",
+        releaseBacking: true,
+      }),
+    ).rejects.toThrow(
+      "Workspace has uncommitted or untracked changes; commit or explicitly discard changes first",
+    );
+
+    expect(deps.preflightArchiveWorkspaceRecord).toHaveBeenCalledWith(workspaceId);
+    expect(deps.killTerminalsForWorkspace).not.toHaveBeenCalled();
+    expect(deps.archiveWorkspaceRecord).not.toHaveBeenCalled();
+  });
+
   test("reports a target teardown failure after settling the archive operation", async () => {
     const { tempDir, repoDir } = createGitRepo();
     const workspaceId = "ws-failed-runtime-archive";
@@ -221,7 +258,7 @@ describe("archiveByScope", () => {
         scope: { kind: "workspace", workspaceId },
         requestId: "req-failed-runtime-archive",
       }),
-    ).rejects.toThrow("Failed to archive 1 workspace");
+    ).rejects.toThrow("runtime archive failed");
 
     expect(deps.clearWorkspaceArchiving).toHaveBeenCalledWith([workspaceId]);
   });
@@ -712,9 +749,44 @@ describe("archiveByScope", () => {
         scope: { kind: "worktree", targetPath: worktree.worktreePath },
         requestId: "req-partial-failure",
       }),
-    ).rejects.toThrow("Failed to archive 1 workspace");
+    ).rejects.toThrow("intentional teardown failure");
 
     expect(deps.activeWorkspaces.map((workspace) => workspace.workspaceId)).toEqual([workspaceA]);
+    expect(existsSync(worktree.worktreePath)).toBe(true);
+  });
+
+  test("worktree scope reports every record teardown failure", async () => {
+    const { tempDir, repoDir } = createGitRepo();
+    const paseoHome = path.join(tempDir, ".paseo");
+    const worktree = await createPaseoOwnedWorktree(repoDir, paseoHome, "multiple-failures");
+    const workspaceA = "ws-multiple-failure-a";
+    const workspaceB = "ws-multiple-failure-b";
+    const deps = createArchiveDeps({
+      paseoHome,
+      activeWorkspaces: [
+        { workspaceId: workspaceA, cwd: worktree.worktreePath, kind: "worktree" },
+        { workspaceId: workspaceB, cwd: worktree.worktreePath, kind: "worktree" },
+      ],
+    });
+    deps.archiveWorkspaceRecord = vi.fn(async (workspaceId: string) => {
+      throw new Error(
+        workspaceId === workspaceA ? "first teardown failure" : "second teardown failure",
+      );
+    });
+
+    await expect(
+      archiveByScope(deps, {
+        scope: { kind: "worktree", targetPath: worktree.worktreePath },
+        requestId: "req-multiple-failures",
+      }),
+    ).rejects.toThrow(
+      "Failed to archive 2 workspaces: first teardown failure; second teardown failure",
+    );
+
+    expect(deps.activeWorkspaces.map((workspace) => workspace.workspaceId)).toEqual([
+      workspaceA,
+      workspaceB,
+    ]);
     expect(existsSync(worktree.worktreePath)).toBe(true);
   });
 

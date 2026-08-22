@@ -22,9 +22,9 @@ for await (const line of lines) {
     if (message.type !== "spawn" || message.stdio.kind !== "pty") {
       throw new Error("Expected a PTY spawn envelope");
     }
-    writeEvent({ type: "started", protocolVersion: 1 });
+    writeEvent({ type: "started", protocolVersion: 2 });
   } else if (message.type === "resize") {
-    writeEvent({ type: "resized", protocolVersion: 1, id: message.id });
+    writeEvent({ type: "resized", protocolVersion: 2, id: message.id });
   } else if (message.type !== "signal") {
     throw new Error(`Unexpected PTY control: ${message.type}`);
   }
@@ -33,8 +33,8 @@ for await (const line of lines) {
 if (received.map((message) => message.type).join(",") !== "spawn,resize,signal") {
   throw new Error("Expected spawn, resize, signal, then fd3 EOF");
 }
-writeEvent({ type: "eof", protocolVersion: 1 });
-writeEvent({ type: "exit", protocolVersion: 1, code: null, signal: "SIGTERM" });
+writeEvent({ type: "eof", protocolVersion: 2 });
+writeEvent({ type: "exit", protocolVersion: 2, code: null, signal: "SIGTERM" });
 events.end();
 
 function writeEvent(event) {

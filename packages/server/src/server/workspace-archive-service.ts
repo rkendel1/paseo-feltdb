@@ -51,6 +51,7 @@ export interface ArchiveDependencies {
     workspaceId: string,
     options?: { releaseBacking?: boolean },
   ) => Promise<void>;
+  preflightArchiveWorkspaceRecord?: (workspaceId: string) => Promise<void>;
   emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds: Iterable<string>) => Promise<void>;
   markWorkspaceArchiving: (workspaceIds: Iterable<string>, archivingAt: string) => void;
   clearWorkspaceArchiving: (workspaceIds: Iterable<string>) => void;
@@ -218,9 +219,16 @@ async function archiveByScopeWithPriority(
     }
 
     if (failures.length > 0) {
+      if (failures.length === 1) {
+        const [failure] = failures;
+        throw failure instanceof Error ? failure : new Error(String(failure));
+      }
+      const details = failures
+        .map((failure) => (failure instanceof Error ? failure.message : String(failure)))
+        .join("; ");
       throw new AggregateError(
         failures,
-        `Failed to archive ${failures.length} workspace${failures.length === 1 ? "" : "s"}`,
+        `Failed to archive ${failures.length} workspaces: ${details}`,
       );
     }
 
@@ -436,6 +444,7 @@ async function archiveTargetRecords(
 
   const results = await Promise.allSettled(
     targetWorkspaceIds.map(async (workspaceId) => {
+      await dependencies.preflightArchiveWorkspaceRecord?.(workspaceId);
       const agents = await archiveWorkspaceContents(dependencies, workspaceId);
       await dependencies.archiveWorkspaceRecord(workspaceId, { releaseBacking });
       return { workspaceId, agents };

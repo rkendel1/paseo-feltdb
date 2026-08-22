@@ -406,6 +406,29 @@ export type ACPCatalogModelResolver = (
   context: ACPCatalogModelResolverContext,
 ) => Promise<AgentModelDefinition[]>;
 
+export interface ACPNewSessionStarterContext {
+  connection: ClientSideConnection;
+  config: AgentSessionConfig;
+  mcpServers: McpServer[];
+  runRequest: <T>(request: () => Promise<T>) => Promise<T>;
+  registerProbeSession?: (response: SessionStateResponse) => void;
+  signal?: AbortSignal;
+  launchEnv?: Record<string, string>;
+}
+
+export type ACPNewSessionStarter = (
+  context: ACPNewSessionStarterContext,
+) => Promise<SessionStateResponse>;
+
+export interface ACPProbeSessionCloserContext {
+  response: SessionStateResponse;
+  config: AgentSessionConfig;
+  mcpServers: McpServer[];
+  launchEnv?: Record<string, string>;
+}
+
+export type ACPProbeSessionCloser = (context: ACPProbeSessionCloserContext) => Promise<void>;
+
 interface ACPAgentClientOptions {
   provider: string;
   logger: Logger;
@@ -413,11 +436,16 @@ interface ACPAgentClientOptions {
   defaultCommand: [string, ...string[]];
   defaultModes?: AgentMode[];
   catalogModelResolver?: ACPCatalogModelResolver;
+  newSessionStarter?: ACPNewSessionStarter;
+  newSessionFailureCloser?: ACPProbeSessionCloser;
+  sessionCloser?: ACPProbeSessionCloser;
+  probeSessionCloser?: ACPProbeSessionCloser;
   modelTransformer?: (models: AgentModelDefinition[]) => AgentModelDefinition[];
   sessionResponseTransformer?: (response: SessionStateResponse) => SessionStateResponse;
   configOptionsTransformer?: (configOptions: SessionConfigOption[]) => SessionConfigOption[];
   configFeatureOptions?: ACPConfigFeatureOption[];
   clientCapabilities?: ACPClientCapabilities;
+  probeClientCapabilities?: ACPClientCapabilities;
   clientCapabilityMeta?: ACPClientCapabilityMeta;
   modeIdTransformer?: (modeId: string) => string | null;
   toolSnapshotTransformer?: (snapshot: ACPToolSnapshot) => ACPToolSnapshot;
@@ -443,6 +471,9 @@ interface ACPAgentSessionOptions {
   runtimeSettings?: ProviderRuntimeSettings;
   defaultCommand: [string, ...string[]];
   defaultModes: AgentMode[];
+  newSessionStarter?: ACPNewSessionStarter;
+  newSessionFailureCloser?: ACPProbeSessionCloser;
+  sessionCloser?: ACPProbeSessionCloser;
   modelTransformer?: (models: AgentModelDefinition[]) => AgentModelDefinition[];
   sessionResponseTransformer?: (response: SessionStateResponse) => SessionStateResponse;
   configOptionsTransformer?: (configOptions: SessionConfigOption[]) => SessionConfigOption[];
@@ -487,6 +518,15 @@ interface ACPProcessTransport {
   stderrChunks: string[];
   spawnReady: Promise<void>;
   spawnError: Promise<never>;
+}
+
+interface TrackedACPProbeSession {
+  promise: Promise<SessionStateResponse>;
+  close: () => Promise<void>;
+}
+
+interface ACPProbeSessionCloseOptions {
+  throwOnFailure?: boolean;
 }
 
 export interface ACPToolSnapshot {
@@ -796,6 +836,10 @@ export class ACPAgentClient implements AgentClient {
   protected readonly defaultCommand: [string, ...string[]];
   protected readonly defaultModes: AgentMode[];
   private readonly catalogModelResolver?: ACPCatalogModelResolver;
+  private readonly newSessionStarter?: ACPNewSessionStarter;
+  private readonly newSessionFailureCloser?: ACPProbeSessionCloser;
+  private readonly sessionCloser?: ACPProbeSessionCloser;
+  private readonly probeSessionCloser?: ACPProbeSessionCloser;
   private readonly modelTransformer?: (models: AgentModelDefinition[]) => AgentModelDefinition[];
   private readonly sessionResponseTransformer?: (
     response: SessionStateResponse,
@@ -805,6 +849,7 @@ export class ACPAgentClient implements AgentClient {
   ) => SessionConfigOption[];
   private readonly configFeatureOptions: ACPConfigFeatureOption[];
   private readonly clientCapabilities?: ACPClientCapabilities;
+  private readonly probeClientCapabilities?: ACPClientCapabilities;
   private readonly clientCapabilityMeta?: ACPClientCapabilityMeta;
   private readonly modeIdTransformer?: (modeId: string) => string | null;
   private readonly toolSnapshotTransformer?: (snapshot: ACPToolSnapshot) => ACPToolSnapshot;
@@ -836,11 +881,16 @@ export class ACPAgentClient implements AgentClient {
     this.defaultCommand = options.defaultCommand;
     this.defaultModes = options.defaultModes ?? [];
     this.catalogModelResolver = options.catalogModelResolver;
+    this.newSessionStarter = options.newSessionStarter;
+    this.newSessionFailureCloser = options.newSessionFailureCloser;
+    this.sessionCloser = options.sessionCloser;
+    this.probeSessionCloser = options.probeSessionCloser;
     this.modelTransformer = options.modelTransformer;
     this.sessionResponseTransformer = options.sessionResponseTransformer;
     this.configOptionsTransformer = options.configOptionsTransformer;
     this.configFeatureOptions = options.configFeatureOptions ?? [];
     this.clientCapabilities = options.clientCapabilities;
+    this.probeClientCapabilities = options.probeClientCapabilities;
     this.clientCapabilityMeta = options.clientCapabilityMeta;
     this.modeIdTransformer = options.modeIdTransformer;
     this.toolSnapshotTransformer = options.toolSnapshotTransformer;
@@ -865,6 +915,9 @@ export class ACPAgentClient implements AgentClient {
         runtimeSettings: this.runtimeSettings,
         defaultCommand: this.defaultCommand,
         defaultModes: this.defaultModes,
+        newSessionStarter: this.newSessionStarter,
+        newSessionFailureCloser: this.newSessionFailureCloser,
+        sessionCloser: this.sessionCloser,
         modelTransformer: this.modelTransformer,
         sessionResponseTransformer: this.sessionResponseTransformer,
         configOptionsTransformer: this.configOptionsTransformer,
@@ -915,6 +968,7 @@ export class ACPAgentClient implements AgentClient {
       runtimeSettings: this.runtimeSettings,
       defaultCommand: this.defaultCommand,
       defaultModes: this.defaultModes,
+      sessionCloser: this.sessionCloser,
       modelTransformer: this.modelTransformer,
       sessionResponseTransformer: this.sessionResponseTransformer,
       configOptionsTransformer: this.configOptionsTransformer,
@@ -952,6 +1006,13 @@ export class ACPAgentClient implements AgentClient {
     };
     const handleAbort = () => void closeProbe().catch(() => undefined);
     context?.signal.addEventListener("abort", handleAbort, { once: true });
+    const config: AgentSessionConfig = { provider: this.provider, cwd };
+    const mcpServers: McpServer[] = [];
+    let response: SessionStateResponse | null = null;
+    let probeSession: TrackedACPProbeSession | null = null;
+    let catalog: ProviderCatalog | null = null;
+    let operationFailed = false;
+    let operationError: unknown;
 
     try {
       const initializedProbe = await runProviderRefreshActivity(context, "initialize", () =>
@@ -966,16 +1027,14 @@ export class ACPAgentClient implements AgentClient {
         ),
       );
       probe = initializedProbe;
-      const response = await runProviderRefreshActivity(context, "session/new", () =>
-        raceProviderRefreshAbort(
-          context?.signal,
-          this.runACPRequest(() =>
-            initializedProbe.connection.newSession({
-              cwd,
-              mcpServers: [],
-            }),
-          ),
-        ),
+      const activeProbeSession = this.startTrackedProbeSession({
+        connection: initializedProbe.connection,
+        config,
+        mcpServers,
+      });
+      probeSession = activeProbeSession;
+      response = await runProviderRefreshActivity(context, "session/new", () =>
+        raceProviderRefreshAbort(context?.signal, activeProbeSession.promise),
       );
       const transformed = this.transformSessionResponse(response);
       const derivedModels = deriveModelDefinitionsFromACP(
@@ -983,13 +1042,18 @@ export class ACPAgentClient implements AgentClient {
         transformed.models,
         transformed.configOptions,
       );
+      const catalogResponse = response;
       const models = this.catalogModelResolver
         ? await runProviderRefreshActivity(context, "catalog.resolve", () =>
             raceProviderRefreshAbort(
               context?.signal,
               this.catalogModelResolver?.({
                 connection: initializedProbe.connection,
-                sessionId: response.sessionId,
+                sessionId: requireACPResponseSessionId(
+                  catalogResponse,
+                  this.provider,
+                  "catalog probe",
+                ),
                 models: derivedModels,
                 configOptions: transformed.configOptions,
                 runRequest: (request) => this.runACPRequest(request),
@@ -1008,14 +1072,58 @@ export class ACPAgentClient implements AgentClient {
         transformed.modes,
         transformed.configOptions,
       );
-      return {
+      catalog = {
         models: this.modelTransformer ? this.modelTransformer(models) : models,
         modes: modeInfo.modes,
       };
-    } finally {
-      context?.signal.removeEventListener("abort", handleAbort);
-      await closeProbe();
+    } catch (error) {
+      operationFailed = true;
+      operationError = error;
     }
+
+    context?.signal.removeEventListener("abort", handleAbort);
+    let cleanupFailed = false;
+    let cleanupError: unknown;
+    try {
+      await probeSession?.close();
+    } catch (error) {
+      cleanupFailed = true;
+      cleanupError = error;
+    }
+    try {
+      await closeProbe();
+    } catch (error) {
+      if (!cleanupFailed) {
+        cleanupFailed = true;
+        cleanupError = error;
+      }
+    }
+    if (operationFailed && cleanupFailed) {
+      throw new AggregateError(
+        [operationError, cleanupError],
+        `${this.provider} ACP catalog probe failed and cleanup failed: ${toDiagnosticErrorMessage(
+          operationError,
+        )}; cleanup: ${toDiagnosticErrorMessage(cleanupError)}`,
+      );
+    }
+    if (operationFailed && cleanupFailed) {
+      throw new AggregateError(
+        [operationError, cleanupError],
+        `${this.provider} ACP feature probe failed and cleanup failed: ${toDiagnosticErrorMessage(
+          operationError,
+        )}; cleanup: ${toDiagnosticErrorMessage(cleanupError)}`,
+      );
+    }
+    if (operationFailed) {
+      throw operationError;
+    }
+    if (cleanupFailed) {
+      throw cleanupError;
+    }
+    if (!catalog) {
+      throw new Error(`${this.provider} ACP catalog probe did not return a catalog`);
+    }
+    return catalog;
   }
 
   async listFeatures(config: AgentSessionConfig): Promise<AgentFeature[]> {
@@ -1026,21 +1134,62 @@ export class ACPAgentClient implements AgentClient {
 
     this.assertProvider(config);
     const probe = await this.spawnProcess(PROBE_ENV);
+    const mcpServers: McpServer[] = [];
+    let response: SessionStateResponse | null = null;
+    let features: AgentFeature[] | null = null;
+    let operationFailed = false;
+    let operationError: unknown;
     try {
-      const response = await this.runACPRequest(() =>
-        probe.connection.newSession({
-          cwd: config.cwd,
-          mcpServers: [],
-        }),
-      );
+      response = await this.startProbeSession({
+        connection: probe.connection,
+        config: { ...config, provider: this.provider },
+        mcpServers,
+      });
       const transformed = this.transformSessionResponse(response);
-      return [
+      features = [
         autoAcceptFeature,
         ...deriveFeaturesFromACP(transformed.configOptions, this.configFeatureOptions),
       ];
-    } finally {
-      await this.closeProbe(probe);
+    } catch (error) {
+      operationFailed = true;
+      operationError = error;
     }
+
+    let cleanupFailed = false;
+    let cleanupError: unknown;
+    try {
+      if (response) {
+        await this.closeProbeSession(
+          {
+            response,
+            config: { ...config, provider: this.provider },
+            mcpServers,
+          },
+          { throwOnFailure: true },
+        );
+      }
+    } catch (error) {
+      cleanupFailed = true;
+      cleanupError = error;
+    }
+    try {
+      await this.closeProbe(probe);
+    } catch (error) {
+      if (!cleanupFailed) {
+        cleanupFailed = true;
+        cleanupError = error;
+      }
+    }
+    if (operationFailed) {
+      throw operationError;
+    }
+    if (cleanupFailed) {
+      throw cleanupError;
+    }
+    if (!features) {
+      throw new Error(`${this.provider} ACP feature probe did not return features`);
+    }
+    return features;
   }
 
   async listImportableSessions(
@@ -1196,7 +1345,7 @@ export class ACPAgentClient implements AgentClient {
             protocolVersion: PROTOCOL_VERSION,
             clientCapabilities: buildACPClientCapabilities(
               this.clientCapabilityMeta,
-              this.clientCapabilities,
+              this.probeClientCapabilities ?? this.clientCapabilities,
             ),
             clientInfo: { name: "Paseo", version: "dev" },
           }),
@@ -1300,14 +1449,18 @@ export class ACPAgentClient implements AgentClient {
       }
 
       const sessionStartedAt = Date.now();
+      const config: AgentSessionConfig = { provider: this.provider, cwd };
+      const mcpServers: McpServer[] = [];
+      let response: SessionStateResponse | null = null;
+      let probeSession: TrackedACPProbeSession | null = null;
       try {
-        const response = await withTimeout(
-          this.runACPRequest(() =>
-            activeTransport.connection.newSession({
-              cwd,
-              mcpServers: [],
-            }),
-          ),
+        probeSession = this.startTrackedProbeSession({
+          connection: activeTransport.connection,
+          config,
+          mcpServers,
+        });
+        response = await withTimeout(
+          probeSession.promise,
           phaseTimeoutMs,
           `ACP session/new timed out after ${phaseTimeoutMs}ms`,
         );
@@ -1335,6 +1488,15 @@ export class ACPAgentClient implements AgentClient {
         });
         pushACPStderrRow(rows, activeTransport.stderrChunks);
         return rows;
+      } finally {
+        try {
+          await probeSession?.close();
+        } catch (error) {
+          rows.push({
+            label: "ACP session cleanup",
+            value: `error: ${toDiagnosticErrorMessage(error)}`,
+          });
+        }
       }
 
       pushACPStderrRow(rows, activeTransport.stderrChunks);
@@ -1391,6 +1553,153 @@ export class ACPAgentClient implements AgentClient {
       configOptions: this.configOptionsTransformer(transformed.configOptions),
     };
   }
+
+  private async startProbeSession(context: {
+    connection: ClientSideConnection;
+    config: AgentSessionConfig;
+    mcpServers: McpServer[];
+    registerProbeSession?: (response: SessionStateResponse) => void;
+    signal?: AbortSignal;
+  }): Promise<SessionStateResponse> {
+    if (this.newSessionStarter) {
+      return await this.newSessionStarter({
+        ...context,
+        runRequest: (request) => this.runACPRequest(request),
+      });
+    }
+
+    return await this.runACPRequest(() =>
+      context.connection.newSession({
+        cwd: context.config.cwd,
+        mcpServers: context.mcpServers,
+      }),
+    );
+  }
+
+  private startTrackedProbeSession(context: {
+    connection: ClientSideConnection;
+    config: AgentSessionConfig;
+    mcpServers: McpServer[];
+  }): TrackedACPProbeSession {
+    let response: SessionStateResponse | null = null;
+    let closeRequested = false;
+    let closePromise: Promise<void> | null = null;
+    let resolveTrackedResponse: (sessionResponse: SessionStateResponse) => void = () => undefined;
+    const trackedResponse = new Promise<SessionStateResponse>((resolve) => {
+      resolveTrackedResponse = resolve;
+    });
+    const startupAbortController = new AbortController();
+
+    const closeResponse = (sessionResponse: SessionStateResponse): Promise<void> => {
+      closePromise ??= this.closeProbeSession(
+        {
+          response: sessionResponse,
+          config: context.config,
+          mcpServers: context.mcpServers,
+        },
+        { throwOnFailure: true },
+      );
+      return closePromise;
+    };
+
+    const rememberResponse = (sessionResponse: SessionStateResponse): void => {
+      const hadResponse = response !== null;
+      response = sessionResponse;
+      if (!hadResponse) {
+        resolveTrackedResponse(sessionResponse);
+      }
+      if (closeRequested && this.probeSessionCloser) {
+        void closeResponse(sessionResponse).catch((error) => {
+          this.logger.warn(
+            {
+              err: error,
+              sessionId: getACPResponseSessionId(sessionResponse) ?? undefined,
+              cwd: context.config.cwd,
+            },
+            "Late ACP probe session cleanup failed",
+          );
+        });
+      }
+    };
+
+    const promise = this.startProbeSession({
+      ...context,
+      registerProbeSession: rememberResponse,
+      signal: startupAbortController.signal,
+    }).then((sessionResponse) => {
+      rememberResponse(sessionResponse);
+      return sessionResponse;
+    });
+
+    return {
+      promise,
+      close: async () => {
+        closeRequested = true;
+        if (!this.probeSessionCloser) {
+          startupAbortController.abort(new Error(`${this.provider} ACP probe startup cancelled`));
+          return;
+        }
+        if (response) {
+          await closeResponse(response);
+          return;
+        }
+        startupAbortController.abort(new Error(`${this.provider} ACP probe startup cancelled`));
+        const sessionResponse = await Promise.race([
+          trackedResponse,
+          promise.then(
+            () => response,
+            () => null,
+          ),
+        ]);
+        if (sessionResponse) {
+          await closeResponse(sessionResponse);
+        }
+      },
+    };
+  }
+
+  private async closeProbeSession(
+    context: ACPProbeSessionCloserContext,
+    options: ACPProbeSessionCloseOptions = {},
+  ): Promise<void> {
+    if (!this.probeSessionCloser) {
+      return;
+    }
+
+    try {
+      await this.probeSessionCloser(context);
+    } catch (error) {
+      this.logger.warn(
+        {
+          err: error,
+          sessionId: getACPResponseSessionId(context.response) ?? undefined,
+          cwd: context.config.cwd,
+        },
+        "Failed to close ACP probe session",
+      );
+      if (options.throwOnFailure) {
+        throw error;
+      }
+    }
+  }
+}
+
+function getACPResponseSessionId(response: SessionStateResponse): string | null {
+  return "sessionId" in response && typeof response.sessionId === "string"
+    ? response.sessionId
+    : null;
+}
+
+function requireACPResponseSessionId(
+  response: SessionStateResponse,
+  provider: string,
+  context: string,
+): string {
+  const sessionId = getACPResponseSessionId(response);
+  if (!sessionId) {
+    throw new Error(`${provider} ACP ${context} did not expose a session id`);
+  }
+  return sessionId;
 }
 
 export class ACPAgentSession implements AgentSession, ACPClient {
@@ -1401,6 +1710,9 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   private readonly runtimeSettings?: ProviderRuntimeSettings;
   private readonly defaultCommand: [string, ...string[]];
   private readonly defaultModes: AgentMode[];
+  private readonly newSessionStarter?: ACPNewSessionStarter;
+  private readonly newSessionFailureCloser?: ACPProbeSessionCloser;
+  private readonly sessionCloser?: ACPProbeSessionCloser;
   protected readonly modelTransformer?: (models: AgentModelDefinition[]) => AgentModelDefinition[];
   private readonly sessionResponseTransformer?: (
     response: SessionStateResponse,
@@ -1471,6 +1783,9 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     this.runtimeSettings = options.runtimeSettings;
     this.defaultCommand = options.defaultCommand;
     this.defaultModes = options.defaultModes;
+    this.newSessionStarter = options.newSessionStarter;
+    this.newSessionFailureCloser = options.newSessionFailureCloser;
+    this.sessionCloser = options.sessionCloser;
     this.modelTransformer = options.modelTransformer;
     this.sessionResponseTransformer = options.sessionResponseTransformer;
     this.configOptionsTransformer = options.configOptionsTransformer;
@@ -1501,24 +1816,40 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   }
 
   async initializeNewSession(): Promise<void> {
+    let newSessionCleanupContext: ACPProbeSessionCloserContext | null = null;
     try {
       const spawned = await this.spawnProcess();
       this.child = spawned.child;
       this.connection = spawned.connection;
       this.agentCapabilities = spawned.initialize.agentCapabilities ?? null;
 
-      const response = await this.runACPRequest(() =>
-        this.connection!.newSession({
-          cwd: this.config.cwd,
-          mcpServers: this.acpMcpServers(),
-        }),
-      );
+      const mcpServers = this.acpMcpServers();
+      const response = this.newSessionStarter
+        ? await this.newSessionStarter({
+            connection: spawned.connection,
+            config: this.config,
+            mcpServers,
+            runRequest: (request) => this.runACPRequest(request),
+            launchEnv: this.launchEnv,
+          })
+        : await this.runACPRequest(() =>
+            this.connection!.newSession({
+              cwd: this.config.cwd,
+              mcpServers,
+            }),
+          );
+      newSessionCleanupContext = {
+        response,
+        config: this.config,
+        mcpServers,
+        launchEnv: this.launchEnv,
+      };
       this.sessionId = response.sessionId;
       this.bootstrapThreadEventPending = true;
       this.applySessionState(response);
       await this.applyConfiguredOverrides();
     } catch (error) {
-      await this.closeAfterInitializationFailure(error);
+      await this.closeAfterInitializationFailure(error, newSessionCleanupContext);
     }
   }
 
@@ -1576,7 +1907,24 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     }
   }
 
-  private async closeAfterInitializationFailure(error: unknown): Promise<never> {
+  private async closeAfterInitializationFailure(
+    error: unknown,
+    newSessionCleanupContext?: ACPProbeSessionCloserContext | null,
+  ): Promise<never> {
+    if (newSessionCleanupContext && this.newSessionFailureCloser) {
+      try {
+        await this.newSessionFailureCloser(newSessionCleanupContext);
+        const closedSessionId = getACPResponseSessionId(newSessionCleanupContext.response);
+        if (closedSessionId && this.sessionId === closedSessionId) {
+          this.sessionId = null;
+        }
+      } catch (closeError) {
+        this.logger.warn(
+          { err: closeError, initializationError: error },
+          "Failed to close ACP lifecycle session after initialization failure",
+        );
+      }
+    }
     try {
       await this.close();
     } catch (closeError) {
@@ -2186,6 +2534,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       return;
     }
     this.closed = true;
+    let sessionCloseError: unknown;
 
     this.deliverTranslatedEvents(this.flushPendingUserMessage());
     this.settleCommandsReady();
@@ -2203,11 +2552,23 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       } catch {}
 
       try {
-        if (this.agentCapabilities?.sessionCapabilities?.close) {
+        if (this.sessionCloser) {
+          await this.sessionCloser({
+            response: { sessionId: this.sessionId },
+            config: this.config,
+            mcpServers: this.acpMcpServers(),
+            launchEnv: this.launchEnv,
+          });
+        } else if (this.agentCapabilities?.sessionCapabilities?.close) {
           await this.connection.unstable_closeSession({ sessionId: this.sessionId });
         }
       } catch (error) {
-        this.logger.debug({ err: error }, "ACP closeSession failed during shutdown");
+        if (this.sessionCloser) {
+          sessionCloseError = error;
+          this.logger.warn({ err: error }, "ACP lifecycle session close failed during shutdown");
+        } else {
+          this.logger.debug({ err: error }, "ACP closeSession failed during shutdown");
+        }
       }
     }
 
@@ -2228,6 +2589,10 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     this.connection = null;
     this.child = null;
     this.activeForegroundTurnId = null;
+
+    if (sessionCloseError) {
+      throw sessionCloseError;
+    }
   }
 
   async requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
@@ -2389,7 +2754,9 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     );
     const terminalCommand = resolveTerminalCommand(params.command, params.args);
     const commandEnvOverlays =
-      terminalCommand.shell === false ? [env, createStringCommandShellEnvOverlay()] : [env];
+      terminalCommand.shell === false
+        ? [this.launchEnv, env, createStringCommandShellEnvOverlay()]
+        : [this.launchEnv, env];
     const child = spawnProcess(terminalCommand.command, terminalCommand.args, {
       cwd: params.cwd ?? this.config.cwd,
       ...createProviderEnvSpec({

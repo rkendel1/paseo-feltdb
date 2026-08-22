@@ -18,6 +18,7 @@ import {
 import {
   ACPAgentClient,
   ACPAgentSession,
+  type ACPProbeSessionCloser,
   type SpawnedACPProcess,
   type SessionStateResponse,
   buildACPClientCapabilities,
@@ -30,6 +31,7 @@ import {
   summarizeACPRequestError,
 } from "./acp-agent.js";
 import type { ProcessTerminator, TreeKillTarget } from "../../../utils/tree-kill.js";
+import type { ProviderRefreshContext } from "../agent-sdk-types.js";
 import {
   COPILOT_AGENT_FEATURE_OPTION,
   COPILOT_ALLOW_ALL_MODE_ID,
@@ -80,6 +82,28 @@ describe("buildACPClientCapabilities", () => {
       },
       terminal: true,
       _meta: { source: "provider" },
+    });
+  });
+
+  test("can delegate terminal execution while keeping filesystem execution with the agent", () => {
+    expect(
+      buildACPClientCapabilities(
+        { gjc: { permissionHandling: "prompt" } },
+        {
+          terminal: true,
+        },
+      ),
+    ).toEqual({
+      fs: {
+        readTextFile: false,
+        writeTextFile: false,
+      },
+      terminal: true,
+      _meta: {
+        gjc: {
+          permissionHandling: "prompt",
+        },
+      },
     });
   });
 });
@@ -171,6 +195,25 @@ class FakeTerminator {
       resolve();
     }
   }
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve: Deferred<T>["resolve"] | null = null;
+  let reject: Deferred<T>["reject"] | null = null;
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  if (!resolve || !reject) {
+    throw new Error("Deferred promise executor did not initialize");
+  }
+  return { promise, resolve, reject };
 }
 
 function createSessionWithConfig(
@@ -653,6 +696,51 @@ describe("ACPAgentSession terminal tools", () => {
       "git",
       ["status", "--short"],
       expect.objectContaining({ cwd: "/repo" }),
+    );
+  });
+
+  test("includes launch env in delegated terminal commands", async () => {
+    const child = createTerminalChildStub();
+    const spawn = vi.spyOn(spawnUtils, "spawnProcess").mockReturnValue(child);
+    const session = new ACPAgentSession(
+      {
+        provider: "gjc",
+        cwd: "/tmp/paseo-acp-test",
+      },
+      {
+        provider: "gjc",
+        logger: createTestLogger(),
+        defaultCommand: ["gjc", "acp"],
+        defaultModes: [],
+        launchEnv: {
+          GJC_SESSION_TOKEN: "launch-token",
+          PASEO_AGENT_ID: "agent-1",
+        },
+        capabilities: {
+          supportsStreaming: true,
+          supportsSessionPersistence: true,
+        },
+      },
+    );
+
+    await session.createTerminal({
+      sessionId: "session-1",
+      command: "node",
+      args: ["script.js"],
+      cwd: "/repo",
+      env: [{ name: "GJC_SESSION_TOKEN", value: "request-token" }],
+    });
+
+    expect(spawn).toHaveBeenCalledWith(
+      "node",
+      ["script.js"],
+      expect.objectContaining({
+        cwd: "/repo",
+        envOverlay: expect.objectContaining({
+          GJC_SESSION_TOKEN: "request-token",
+          PASEO_AGENT_ID: "agent-1",
+        }),
+      }),
     );
   });
 
@@ -2010,6 +2098,126 @@ describe("ACPAgentClient config features", () => {
       }),
     ]);
   });
+
+  test("uses the custom starter and closer for feature probe sessions", async () => {
+    const newSession = vi.fn().mockRejectedValue(new Error("newSession should not be called"));
+    const newSessionStarter = vi.fn(async () => ({
+      sessionId: "probe-session-1",
+      configOptions: [copilotAgentConfigOption("Probe Agent")],
+    }));
+    const probeSessionCloser = vi.fn(async () => undefined);
+
+    class TestACPAgentClient extends ACPAgentClient {
+      protected override async spawnProcess(): Promise<SpawnedACPProcess> {
+        return {
+          child: { kill: vi.fn(), exitCode: 0, signalCode: null, once: vi.fn() },
+          connection: {
+            newSession,
+          } as unknown as ClientSideConnection,
+          initialize: { agentCapabilities: {} },
+        } as SpawnedACPProcess;
+      }
+
+      protected override async closeProbe(): Promise<void> {}
+    }
+
+    const client = new TestACPAgentClient({
+      provider: "copilot",
+      logger: createTestLogger(),
+      defaultCommand: ["copilot", "--acp"],
+      configFeatureOptions: [COPILOT_AGENT_FEATURE_OPTION],
+      newSessionStarter,
+      probeSessionCloser,
+    });
+
+    await expect(
+      client.listFeatures({
+        provider: "copilot",
+        cwd: "/tmp/acp-features",
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        type: "toggle",
+        id: "auto_accept",
+      }),
+      expect.objectContaining({
+        type: "select",
+        id: "agent",
+        value: "Probe Agent",
+      }),
+    ]);
+
+    expect(newSession).not.toHaveBeenCalled();
+    expect(probeSessionCloser).toHaveBeenCalledWith({
+      response: {
+        sessionId: "probe-session-1",
+        configOptions: [copilotAgentConfigOption("Probe Agent")],
+      },
+      config: {
+        provider: "copilot",
+        cwd: "/tmp/acp-features",
+      },
+      mcpServers: [],
+    });
+  });
+
+  test("rejects feature probes when custom closer fails after process cleanup", async () => {
+    const newSession = vi.fn().mockRejectedValue(new Error("newSession should not be called"));
+    const newSessionStarter = vi.fn(async () => ({
+      sessionId: "probe-session-1",
+      configOptions: [copilotAgentConfigOption("Probe Agent")],
+    }));
+    const probeSessionCloser = vi.fn(async () => {
+      throw new Error("probe close failed");
+    });
+    const closeProbe = vi.fn(async () => undefined);
+
+    class TestACPAgentClient extends ACPAgentClient {
+      protected override async spawnProcess(): Promise<SpawnedACPProcess> {
+        return {
+          child: { kill: vi.fn(), exitCode: 0, signalCode: null, once: vi.fn() },
+          connection: {
+            newSession,
+          } as unknown as ClientSideConnection,
+          initialize: { agentCapabilities: {} },
+        } as SpawnedACPProcess;
+      }
+
+      protected override async closeProbe(): Promise<void> {
+        await closeProbe();
+      }
+    }
+
+    const client = new TestACPAgentClient({
+      provider: "copilot",
+      logger: createTestLogger(),
+      defaultCommand: ["copilot", "--acp"],
+      configFeatureOptions: [COPILOT_AGENT_FEATURE_OPTION],
+      newSessionStarter,
+      probeSessionCloser,
+    });
+
+    await expect(
+      client.listFeatures({
+        provider: "copilot",
+        cwd: "/tmp/acp-features",
+      }),
+    ).rejects.toThrow("probe close failed");
+
+    expect(newSession).not.toHaveBeenCalled();
+    expect(closeProbe).toHaveBeenCalledTimes(1);
+    expect(probeSessionCloser).toHaveBeenCalledWith({
+      response: {
+        sessionId: "probe-session-1",
+        configOptions: [copilotAgentConfigOption("Probe Agent")],
+      },
+      config: {
+        provider: "copilot",
+        cwd: "/tmp/acp-features",
+      },
+      mcpServers: [],
+    });
+  });
 });
 
 describe("ACPAgentClient sessionResponseTransformer", () => {
@@ -2098,6 +2306,408 @@ describe("ACPAgentClient fetchCatalog", () => {
     });
   });
 
+  test("uses the custom starter and closer for catalog probe sessions", async () => {
+    const newSession = vi.fn().mockRejectedValue(new Error("newSession should not be called"));
+    const loadSession = vi.fn();
+    const newSessionStarter = vi.fn(async () => ({
+      sessionId: "probe-session-1",
+      modes: null,
+      models: null,
+      configOptions: [],
+    }));
+    const probeSessionCloser = vi.fn(async () => undefined);
+
+    class TestACPAgentClient extends ACPAgentClient {
+      protected override async spawnProcess(): Promise<SpawnedACPProcess> {
+        return {
+          child: { kill: vi.fn(), exitCode: 0, signalCode: null, once: vi.fn() },
+          connection: {
+            newSession,
+            loadSession,
+          } as unknown as ClientSideConnection,
+          initialize: { agentCapabilities: {} },
+        } as SpawnedACPProcess;
+      }
+
+      protected override async closeProbe(): Promise<void> {}
+    }
+
+    const client = new TestACPAgentClient({
+      provider: "gjc",
+      logger: createTestLogger(),
+      defaultCommand: ["gjc", "acp"],
+      defaultModes: [],
+      newSessionStarter,
+      probeSessionCloser,
+    });
+
+    await expect(
+      client.fetchCatalog({ scope: "workspace", cwd: "/tmp/acp-catalog-cwd", force: false }),
+    ).resolves.toEqual({ models: [], modes: [] });
+
+    expect(newSession).not.toHaveBeenCalled();
+    expect(newSessionStarter).toHaveBeenCalledWith({
+      connection: expect.objectContaining({
+        newSession,
+        loadSession,
+      }),
+      config: {
+        provider: "gjc",
+        cwd: "/tmp/acp-catalog-cwd",
+      },
+      mcpServers: [],
+      runRequest: expect.any(Function),
+      registerProbeSession: expect.any(Function),
+      signal: expect.any(AbortSignal),
+    });
+    expect(probeSessionCloser).toHaveBeenCalledWith({
+      response: {
+        sessionId: "probe-session-1",
+        modes: null,
+        models: null,
+        configOptions: [],
+      },
+      config: {
+        provider: "gjc",
+        cwd: "/tmp/acp-catalog-cwd",
+      },
+      mcpServers: [],
+    });
+  });
+
+  test("rejects catalog probes when custom closer fails after process cleanup", async () => {
+    const newSession = vi.fn().mockRejectedValue(new Error("newSession should not be called"));
+    const loadSession = vi.fn();
+    const newSessionStarter = vi.fn(async () => ({
+      sessionId: "probe-session-1",
+      modes: null,
+      models: null,
+      configOptions: [],
+    }));
+    const probeSessionCloser = vi.fn(async () => {
+      throw new Error("probe close failed");
+    });
+    const closeProbe = vi.fn(async () => undefined);
+
+    class TestACPAgentClient extends ACPAgentClient {
+      protected override async spawnProcess(): Promise<SpawnedACPProcess> {
+        return {
+          child: { kill: vi.fn(), exitCode: 0, signalCode: null, once: vi.fn() },
+          connection: {
+            newSession,
+            loadSession,
+          } as unknown as ClientSideConnection,
+          initialize: { agentCapabilities: {} },
+        } as SpawnedACPProcess;
+      }
+
+      protected override async closeProbe(): Promise<void> {
+        await closeProbe();
+      }
+    }
+
+    const client = new TestACPAgentClient({
+      provider: "gjc",
+      logger: createTestLogger(),
+      defaultCommand: ["gjc", "acp"],
+      defaultModes: [],
+      newSessionStarter,
+      probeSessionCloser,
+    });
+
+    await expect(
+      client.fetchCatalog({ scope: "workspace", cwd: "/tmp/acp-catalog-cwd", force: false }),
+    ).rejects.toThrow("probe close failed");
+
+    expect(newSession).not.toHaveBeenCalled();
+    expect(closeProbe).toHaveBeenCalledTimes(1);
+    expect(probeSessionCloser).toHaveBeenCalledWith({
+      response: {
+        sessionId: "probe-session-1",
+        modes: null,
+        models: null,
+        configOptions: [],
+      },
+      config: {
+        provider: "gjc",
+        cwd: "/tmp/acp-catalog-cwd",
+      },
+      mcpServers: [],
+    });
+  });
+
+  test("reports catalog operation and cleanup failures together", async () => {
+    const operationError = new Error("catalog failed");
+    const cleanupError = new Error("probe close failed");
+    const newSessionStarter = vi.fn(async () => ({
+      sessionId: "probe-session-1",
+      modes: null,
+      models: null,
+      configOptions: [],
+    }));
+    const probeSessionCloser = vi.fn(async () => {
+      throw cleanupError;
+    });
+
+    class TestACPAgentClient extends ACPAgentClient {
+      protected override async spawnProcess(): Promise<SpawnedACPProcess> {
+        return {
+          child: { kill: vi.fn(), exitCode: 0, signalCode: null, once: vi.fn() },
+          connection: {} as unknown as ClientSideConnection,
+          initialize: { agentCapabilities: {} },
+        } as SpawnedACPProcess;
+      }
+
+      protected override async closeProbe(): Promise<void> {}
+    }
+
+    const client = new TestACPAgentClient({
+      provider: "gjc",
+      logger: createTestLogger(),
+      defaultCommand: ["gjc", "acp"],
+      defaultModes: [],
+      newSessionStarter,
+      probeSessionCloser,
+      catalogModelResolver: async () => {
+        throw operationError;
+      },
+    });
+
+    let thrown: unknown;
+    try {
+      await client.fetchCatalog({
+        scope: "workspace",
+        cwd: "/tmp/acp-catalog-cwd",
+        force: false,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).message).toBe(
+      "gjc ACP catalog probe failed and cleanup failed: catalog failed; cleanup: probe close failed",
+    );
+    expect((thrown as AggregateError).errors).toEqual([operationError, cleanupError]);
+  });
+
+  test("closes registered catalog probe sessions without waiting for load completion", async () => {
+    const started = createDeferred<void>();
+    const loadSession = createDeferred<SessionStateResponse>();
+    const registeredResponse: SessionStateResponse = {
+      sessionId: "registered-probe-session",
+    };
+    const newSessionStarter = vi.fn(
+      (context: { registerProbeSession?: (response: SessionStateResponse) => void }) => {
+        context.registerProbeSession?.(registeredResponse);
+        started.resolve(undefined);
+        return loadSession.promise;
+      },
+    );
+    const probeSessionCloser = vi.fn(async () => undefined);
+
+    class TestACPAgentClient extends ACPAgentClient {
+      protected override async spawnProcess(): Promise<SpawnedACPProcess> {
+        return {
+          child: { kill: vi.fn(), exitCode: 0, signalCode: null, once: vi.fn() },
+          connection: {
+            newSession: vi.fn().mockRejectedValue(new Error("newSession should not be called")),
+          } as unknown as ClientSideConnection,
+          initialize: { agentCapabilities: {} },
+        } as SpawnedACPProcess;
+      }
+
+      protected override async closeProbe(): Promise<void> {}
+    }
+
+    const client = new TestACPAgentClient({
+      provider: "gjc",
+      logger: createTestLogger(),
+      defaultCommand: ["gjc", "acp"],
+      defaultModes: [],
+      newSessionStarter,
+      probeSessionCloser,
+    });
+    const controller = new AbortController();
+    const refreshContext: ProviderRefreshContext = {
+      signal: controller.signal,
+      runActivity: async (_name, operation) => await operation(),
+    };
+
+    const refresh = client.fetchCatalog(
+      { scope: "workspace", cwd: "/tmp/acp-catalog-cwd", force: false },
+      refreshContext,
+    );
+    await started.promise;
+
+    controller.abort(new Error("refresh aborted"));
+    await expect(refresh).rejects.toThrow("refresh aborted");
+
+    expect(probeSessionCloser).toHaveBeenCalledWith({
+      response: registeredResponse,
+      config: {
+        provider: "gjc",
+        cwd: "/tmp/acp-catalog-cwd",
+      },
+      mcpServers: [],
+    });
+  });
+
+  test("waits for late unregistered catalog probe cleanup after refresh abort", async () => {
+    const started = createDeferred<void>();
+    const session = createDeferred<SessionStateResponse>();
+    let startupSignal: AbortSignal | undefined;
+    const lateResponse: SessionStateResponse = {
+      sessionId: "late-probe-session",
+      modes: null,
+      models: null,
+      configOptions: [],
+    };
+    const newSessionStarter = vi.fn((context: { signal?: AbortSignal }) => {
+      startupSignal = context.signal;
+      started.resolve(undefined);
+      return session.promise;
+    });
+    const probeSessionCloser = vi.fn(async () => undefined);
+
+    class TestACPAgentClient extends ACPAgentClient {
+      protected override async spawnProcess(): Promise<SpawnedACPProcess> {
+        return {
+          child: { kill: vi.fn(), exitCode: 0, signalCode: null, once: vi.fn() },
+          connection: {
+            newSession: vi.fn().mockRejectedValue(new Error("newSession should not be called")),
+          } as unknown as ClientSideConnection,
+          initialize: { agentCapabilities: {} },
+        } as SpawnedACPProcess;
+      }
+
+      protected override async closeProbe(): Promise<void> {}
+    }
+
+    const client = new TestACPAgentClient({
+      provider: "gjc",
+      logger: createTestLogger(),
+      defaultCommand: ["gjc", "acp"],
+      defaultModes: [],
+      newSessionStarter,
+      probeSessionCloser,
+    });
+    const controller = new AbortController();
+    const refreshContext: ProviderRefreshContext = {
+      signal: controller.signal,
+      runActivity: async (_name, operation) => await operation(),
+    };
+
+    const refresh = client.fetchCatalog(
+      { scope: "workspace", cwd: "/tmp/acp-catalog-cwd", force: false },
+      refreshContext,
+    );
+    await started.promise;
+
+    controller.abort(new Error("refresh aborted"));
+    let settled = false;
+    void refresh.then(
+      () => {
+        settled = true;
+        return undefined;
+      },
+      () => {
+        settled = true;
+        return undefined;
+      },
+    );
+    await vi.waitFor(() => expect(startupSignal?.aborted).toBe(true));
+
+    expect(settled).toBe(false);
+    expect(probeSessionCloser).not.toHaveBeenCalled();
+    session.resolve(lateResponse);
+    await expect(refresh).rejects.toThrow("refresh aborted");
+
+    expect(probeSessionCloser).toHaveBeenCalledWith({
+      response: lateResponse,
+      config: {
+        provider: "gjc",
+        cwd: "/tmp/acp-catalog-cwd",
+      },
+      mcpServers: [],
+    });
+  });
+
+  test("rejects refresh aborts with late unregistered cleanup failures", async () => {
+    const started = createDeferred<void>();
+    const session = createDeferred<SessionStateResponse>();
+    const lateResponse: SessionStateResponse = {
+      sessionId: "late-probe-session",
+      modes: null,
+      models: null,
+      configOptions: [],
+    };
+    const newSessionStarter = vi.fn((_context: { signal?: AbortSignal }) => {
+      started.resolve(undefined);
+      return session.promise;
+    });
+    const probeSessionCloser = vi.fn(async () => {
+      throw new Error("late close failed");
+    });
+
+    class TestACPAgentClient extends ACPAgentClient {
+      protected override async spawnProcess(): Promise<SpawnedACPProcess> {
+        return {
+          child: { kill: vi.fn(), exitCode: 0, signalCode: null, once: vi.fn() },
+          connection: {
+            newSession: vi.fn().mockRejectedValue(new Error("newSession should not be called")),
+          } as unknown as ClientSideConnection,
+          initialize: { agentCapabilities: {} },
+        } as SpawnedACPProcess;
+      }
+
+      protected override async closeProbe(): Promise<void> {}
+    }
+
+    const client = new TestACPAgentClient({
+      provider: "gjc",
+      logger: createTestLogger(),
+      defaultCommand: ["gjc", "acp"],
+      defaultModes: [],
+      newSessionStarter,
+      probeSessionCloser,
+    });
+    const controller = new AbortController();
+    const refreshContext: ProviderRefreshContext = {
+      signal: controller.signal,
+      runActivity: async (_name, operation) => await operation(),
+    };
+
+    const refresh = client.fetchCatalog(
+      { scope: "workspace", cwd: "/tmp/acp-catalog-cwd", force: false },
+      refreshContext,
+    );
+    await started.promise;
+
+    controller.abort(new Error("refresh aborted"));
+    session.resolve(lateResponse);
+
+    let thrown: unknown;
+    try {
+      await refresh;
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).message).toBe(
+      "gjc ACP catalog probe failed and cleanup failed: refresh aborted; cleanup: late close failed",
+    );
+    expect(probeSessionCloser).toHaveBeenCalledWith({
+      response: lateResponse,
+      config: {
+        provider: "gjc",
+        cwd: "/tmp/acp-catalog-cwd",
+      },
+      mcpServers: [],
+    });
+  });
+
   test("returns an empty modes array when no ACP modes are reported and fallback modes are empty", async () => {
     class TestACPAgentClient extends ACPAgentClient {
       protected override async spawnProcess(): Promise<SpawnedACPProcess> {
@@ -2142,6 +2752,84 @@ describe("ACPAgentClient fetchCatalog", () => {
       models: [],
       modes: [],
     });
+  });
+});
+
+describe("ACPAgentClient probe diagnostics", () => {
+  test("closes custom probe sessions that finish after diagnostic session timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const started = createDeferred<void>();
+      const session = createDeferred<SessionStateResponse>();
+      const lateResponse: SessionStateResponse = {
+        sessionId: "late-diagnostic-session",
+        modes: null,
+        models: null,
+        configOptions: [],
+      };
+      const newSessionStarter = vi.fn(
+        (context: { registerProbeSession?: (response: SessionStateResponse) => void }) => {
+          context.registerProbeSession?.(lateResponse);
+          started.resolve(undefined);
+          return session.promise;
+        },
+      );
+      const probeSessionCloser = vi.fn(async () => undefined);
+      const terminator = new FakeTerminator();
+
+      class TestACPAgentClient extends ACPAgentClient {
+        async buildDiagnosticRows() {
+          return await this.buildACPProbeDiagnosticRows({
+            cwd: "/tmp/acp-diagnostic-cwd",
+            phaseTimeoutMs: 1,
+          });
+        }
+
+        protected override async spawnTransport() {
+          return {
+            child: createProbeChildStub(),
+            connection: {
+              initialize: vi.fn(async () => ({ agentCapabilities: {} })),
+            } as unknown as ClientSideConnection,
+            stderrChunks: [],
+            spawnReady: Promise.resolve(),
+            spawnError: new Promise<never>(() => undefined),
+          };
+        }
+      }
+
+      const client = new TestACPAgentClient({
+        provider: "gjc",
+        logger: createTestLogger(),
+        defaultCommand: ["gjc", "acp"],
+        defaultModes: [],
+        newSessionStarter,
+        probeSessionCloser,
+        terminateProcess: terminator.terminate,
+      });
+
+      const rowsPromise = client.buildDiagnosticRows();
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(1);
+
+      const rows = await rowsPromise;
+
+      expect(rows).toContainEqual({
+        label: "ACP session/new",
+        value: "error: ACP session/new timed out after 1ms",
+      });
+      expect(probeSessionCloser).toHaveBeenCalledWith({
+        response: lateResponse,
+        config: {
+          provider: "gjc",
+          cwd: "/tmp/acp-diagnostic-cwd",
+        },
+        mcpServers: [],
+      });
+      expect(terminator.terminated).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -3355,6 +4043,93 @@ describe("ACPAgentSession close() tree-kill", () => {
     await close;
   });
 
+  test("close() closes custom lifecycle sessions when ACP close is not advertised", async () => {
+    const terminator = new FakeTerminator();
+    const child = createProbeChildStub();
+    const sessionCloser = vi.fn(async () => undefined) satisfies ACPProbeSessionCloser;
+    const unstableCloseSession = vi.fn(async () => undefined);
+    const session = new ACPAgentSession(
+      {
+        provider: "gjc",
+        cwd: "/tmp/paseo-acp-test",
+      },
+      {
+        provider: "gjc",
+        logger: createTestLogger(),
+        defaultCommand: ["gjc", "acp"],
+        defaultModes: [],
+        sessionCloser,
+        launchEnv: {
+          PASEO_AGENT_ID: "agent-1",
+        },
+        capabilities: {
+          supportsStreaming: true,
+          supportsSessionPersistence: true,
+        },
+        terminateProcess: terminator.terminate,
+      },
+    );
+    const internals = asInternals<ACPCloseInternals>(session);
+    internals.child = child;
+    internals.connection = {
+      unstable_closeSession: unstableCloseSession,
+    } as unknown as ClientSideConnection;
+    internals.sessionId = "lifecycle-session-1";
+
+    await session.close();
+
+    expect(sessionCloser).toHaveBeenCalledWith({
+      response: { sessionId: "lifecycle-session-1" },
+      config: {
+        provider: "gjc",
+        cwd: "/tmp/paseo-acp-test",
+      },
+      launchEnv: {
+        PASEO_AGENT_ID: "agent-1",
+      },
+      mcpServers: [],
+    });
+    expect(unstableCloseSession).not.toHaveBeenCalled();
+    expect(terminator.terminated).toContain(child);
+  });
+
+  test("close() terminates the ACP process when custom lifecycle close fails", async () => {
+    const terminator = new FakeTerminator();
+    const child = createProbeChildStub();
+    const closeError = new Error("lifecycle close failed");
+    const sessionCloser = vi.fn(async () => {
+      throw closeError;
+    }) satisfies ACPProbeSessionCloser;
+    const session = new ACPAgentSession(
+      {
+        provider: "gjc",
+        cwd: "/tmp/paseo-acp-test",
+      },
+      {
+        provider: "gjc",
+        logger: createTestLogger(),
+        defaultCommand: ["gjc", "acp"],
+        defaultModes: [],
+        sessionCloser,
+        capabilities: {
+          supportsStreaming: true,
+          supportsSessionPersistence: true,
+        },
+        terminateProcess: terminator.terminate,
+      },
+    );
+    const internals = asInternals<ACPCloseInternals>(session);
+    internals.child = child;
+    internals.connection = {} as ClientSideConnection;
+    internals.sessionId = "lifecycle-session-1";
+
+    await expect(session.close()).rejects.toThrow("lifecycle close failed");
+
+    expect(terminator.terminated).toContain(child);
+    expect(internals.connection).toBeNull();
+    expect(internals.child).toBeNull();
+  });
+
   test("killTerminal terminates the terminal process tree without a direct SIGTERM", async () => {
     const terminator = new FakeTerminator();
     const session = createSession(terminator.terminate);
@@ -3419,6 +4194,77 @@ describe("ACPAgentSession initialization cleanup", () => {
 
     await expect(session.initializeNewSession()).rejects.toThrow("session/new failed");
 
+    expect(terminator.terminated).toContain(child);
+  });
+
+  test("closes custom lifecycle sessions when post-load initialization fails", async () => {
+    const terminator = new FakeTerminator();
+    const child = createProbeChildStub();
+    const configOptions = [selectConfigOption("thought_level", ["low"], "low")];
+    const response: SessionStateResponse = {
+      sessionId: "lifecycle-session-1",
+      configOptions,
+    };
+    const newSessionStarter = vi.fn(async () => response);
+    const newSessionFailureCloser = vi.fn(async () => undefined);
+    const sessionCloser = vi.fn(async () => undefined);
+    const thinkingOptionWriter = vi.fn(async () => {
+      throw new Error("thinking override failed");
+    });
+
+    class FailingConfiguredOverride extends ACPAgentSession {
+      protected override async spawnProcess(): Promise<SpawnedACPProcess> {
+        return {
+          child,
+          connection: {
+            newSession: vi.fn().mockRejectedValue(new Error("newSession should not be called")),
+          } as unknown as ClientSideConnection,
+          initialize: { agentCapabilities: {} },
+        };
+      }
+    }
+
+    const session = new FailingConfiguredOverride(
+      {
+        provider: "gjc",
+        cwd: "/tmp/paseo-acp-test",
+        thinkingOptionId: "xhigh",
+      },
+      {
+        provider: "gjc",
+        logger: createTestLogger(),
+        defaultCommand: ["gjc", "acp"],
+        defaultModes: [],
+        newSessionStarter,
+        newSessionFailureCloser,
+        sessionCloser,
+        thinkingOptionWriter,
+        launchEnv: {
+          PASEO_AGENT_ID: "agent-1",
+        },
+        capabilities: {
+          supportsStreaming: true,
+          supportsSessionPersistence: true,
+        },
+        terminateProcess: terminator.terminate,
+      },
+    );
+
+    await expect(session.initializeNewSession()).rejects.toThrow("thinking override failed");
+
+    expect(newSessionFailureCloser).toHaveBeenCalledWith({
+      response,
+      config: {
+        provider: "gjc",
+        cwd: "/tmp/paseo-acp-test",
+        thinkingOptionId: "xhigh",
+      },
+      launchEnv: {
+        PASEO_AGENT_ID: "agent-1",
+      },
+      mcpServers: [],
+    });
+    expect(sessionCloser).not.toHaveBeenCalled();
     expect(terminator.terminated).toContain(child);
   });
 

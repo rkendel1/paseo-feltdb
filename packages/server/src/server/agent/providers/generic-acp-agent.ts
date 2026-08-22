@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import { z } from "zod";
+import type { SessionConfigOption } from "@agentclientprotocol/sdk";
 
 import type { AgentCapabilityFlags } from "../agent-sdk-types.js";
 import { checkProviderLaunchAvailable, resolveProviderLaunch } from "../provider-launch-config.js";
@@ -10,6 +11,9 @@ import {
   type ACPConfigFeatureOption,
   DEFAULT_ACP_CAPABILITIES,
   type ACPExtensionCommandsParser,
+  type ACPNewSessionStarter,
+  type ACPProbeSessionCloser,
+  type SessionStateResponse,
 } from "./acp-agent.js";
 import {
   buildBinaryDiagnosticRows,
@@ -47,10 +51,19 @@ interface GenericACPAgentClientOptions {
   waitForInitialCommands?: boolean;
   initialCommandsWaitTimeoutMs?: number;
   diagnosticPhaseTimeoutMs?: number;
+  clientCapabilities?: GenericACPProviderParams["clientCapabilities"];
+  probeClientCapabilities?: GenericACPProviderParams["clientCapabilities"];
   clientCapabilityMeta?: ACPClientCapabilityMeta;
   configFeatureOptions?: ACPConfigFeatureOption[];
   extensionCommandsParser?: ACPExtensionCommandsParser;
   catalogModelResolver?: ACPCatalogModelResolver;
+  newSessionStarter?: ACPNewSessionStarter;
+  newSessionFailureCloser?: ACPProbeSessionCloser;
+  sessionCloser?: ACPProbeSessionCloser;
+  probeSessionCloser?: ACPProbeSessionCloser;
+  sessionResponseTransformer?: (response: SessionStateResponse) => SessionStateResponse;
+  configOptionsTransformer?: (configOptions: SessionConfigOption[]) => SessionConfigOption[];
+  modeIdTransformer?: (modeId: string) => string | null;
 }
 
 export class GenericACPAgentClient extends ACPAgentClient {
@@ -61,6 +74,13 @@ export class GenericACPAgentClient extends ACPAgentClient {
 
   constructor(options: GenericACPAgentClientOptions) {
     const providerParams = parseGenericACPProviderParams(options.providerParams);
+    const clientCapabilities = mergeGenericACPClientCapabilities(
+      options.clientCapabilities,
+      providerParams.clientCapabilities,
+    );
+    const probeClientCapabilities = options.probeClientCapabilities
+      ? mergeGenericACPClientCapabilities(clientCapabilities, options.probeClientCapabilities)
+      : undefined;
     super({
       provider: "acp",
       logger: options.logger,
@@ -69,13 +89,39 @@ export class GenericACPAgentClient extends ACPAgentClient {
       },
       defaultCommand: options.command,
       capabilities: buildGenericACPCapabilities(providerParams),
-      waitForInitialCommands: options.waitForInitialCommands,
-      initialCommandsWaitTimeoutMs: options.initialCommandsWaitTimeoutMs,
-      clientCapabilities: providerParams.clientCapabilities,
-      clientCapabilityMeta: options.clientCapabilityMeta,
-      configFeatureOptions: options.configFeatureOptions,
-      extensionCommandsParser: options.extensionCommandsParser,
-      catalogModelResolver: options.catalogModelResolver,
+      ...(options.waitForInitialCommands !== undefined
+        ? { waitForInitialCommands: options.waitForInitialCommands }
+        : {}),
+      ...(options.initialCommandsWaitTimeoutMs !== undefined
+        ? { initialCommandsWaitTimeoutMs: options.initialCommandsWaitTimeoutMs }
+        : {}),
+      ...(clientCapabilities ? { clientCapabilities } : {}),
+      ...(probeClientCapabilities ? { probeClientCapabilities } : {}),
+      ...(options.clientCapabilityMeta
+        ? { clientCapabilityMeta: options.clientCapabilityMeta }
+        : {}),
+      ...(options.configFeatureOptions
+        ? { configFeatureOptions: options.configFeatureOptions }
+        : {}),
+      ...(options.extensionCommandsParser
+        ? { extensionCommandsParser: options.extensionCommandsParser }
+        : {}),
+      ...(options.catalogModelResolver
+        ? { catalogModelResolver: options.catalogModelResolver }
+        : {}),
+      ...(options.sessionResponseTransformer
+        ? { sessionResponseTransformer: options.sessionResponseTransformer }
+        : {}),
+      ...(options.configOptionsTransformer
+        ? { configOptionsTransformer: options.configOptionsTransformer }
+        : {}),
+      ...(options.modeIdTransformer ? { modeIdTransformer: options.modeIdTransformer } : {}),
+      ...(options.newSessionStarter ? { newSessionStarter: options.newSessionStarter } : {}),
+      ...(options.newSessionFailureCloser
+        ? { newSessionFailureCloser: options.newSessionFailureCloser }
+        : {}),
+      ...(options.sessionCloser ? { sessionCloser: options.sessionCloser } : {}),
+      ...(options.probeSessionCloser ? { probeSessionCloser: options.probeSessionCloser } : {}),
     });
 
     this.command = options.command;
@@ -165,6 +211,28 @@ function buildGenericACPCapabilities(params: GenericACPProviderParams): AgentCap
   return {
     ...DEFAULT_ACP_CAPABILITIES,
     supportsMcpServers: params.supportsMcpServers ?? DEFAULT_ACP_CAPABILITIES.supportsMcpServers,
+  };
+}
+
+function mergeGenericACPClientCapabilities(
+  defaults: GenericACPProviderParams["clientCapabilities"],
+  overrides: GenericACPProviderParams["clientCapabilities"],
+): GenericACPProviderParams["clientCapabilities"] {
+  if (!defaults && !overrides) {
+    return undefined;
+  }
+
+  return {
+    ...defaults,
+    ...overrides,
+    ...(defaults?.fs || overrides?.fs
+      ? {
+          fs: {
+            ...defaults?.fs,
+            ...overrides?.fs,
+          },
+        }
+      : {}),
   };
 }
 

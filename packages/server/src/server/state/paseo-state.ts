@@ -12,12 +12,27 @@ import type { Repositories } from "./feltdb/repositories.js";
 import type { Project, Workspace, Agent, Task, Conversation, Run } from "./feltdb/schema.js";
 
 export interface PaseoState {
-  // Project/Repository operations
+  // Project operations
   projects: {
     create(data: { name: string; rootPath: string; kind: "git" | "non_git" }): Promise<Project>;
     getById(id: string): Promise<Project | null>;
     listAll(): Promise<Project[]>;
     update(id: string, data: Partial<Project>): Promise<Project>;
+    delete(id: string): Promise<void>;
+  };
+
+  // Repository operations
+  repositories: {
+    create(data: {
+      projectId: string;
+      name: string;
+      path: string;
+      remoteUrl?: string;
+      defaultBranch?: string;
+    }): Promise<any>;
+    getById(id: string): Promise<any | null>;
+    listByProject(projectId: string): Promise<any[]>;
+    update(id: string, data: Partial<any>): Promise<any>;
     delete(id: string): Promise<void>;
   };
 
@@ -127,6 +142,24 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
       },
       async delete(id) {
         return repos.projects.delete(id);
+      },
+    },
+
+    repositories: {
+      async create(data) {
+        return repos.repositories.create(data);
+      },
+      async getById(id) {
+        return repos.repositories.getById(id);
+      },
+      async listByProject(projectId) {
+        return repos.repositories.listByProject(projectId);
+      },
+      async update(id, data) {
+        return repos.repositories.update(id, data);
+      },
+      async delete(id) {
+        return repos.repositories.delete(id);
       },
     },
 

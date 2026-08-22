@@ -18,6 +18,7 @@ import type {
 } from "../workspace-registry.js";
 import type { AgentStorage } from "../agent/agent-storage.js";
 import type { PaseoState } from "./paseo-state.js";
+import { discoverOrCreateRepository } from "./repository-discovery.js";
 
 interface MigrationResult {
   success: boolean;
@@ -116,7 +117,7 @@ export async function runMigration(
       hasAgents: legacy.hasAgents,
     });
 
-    const startTime = new Date().toISOString();
+    const startedAt = new Date().toISOString();
     let projectsMigrated = 0;
     let workspacesMigrated = 0;
     let agentsMigrated = 0;
@@ -164,7 +165,7 @@ export async function runMigration(
       }
     }
 
-    // Migrate workspaces
+    // Migrate workspaces with repository discovery
     if (legacy.hasWorkspaces) {
       try {
         const workspacesPath = path.join(paseoHome, "projects", "workspaces.json");
@@ -179,9 +180,18 @@ export async function runMigration(
               continue;
             }
 
+            // Discover or create Repository entity for this workspace
+            const repositoryId = await discoverOrCreateRepository(
+              legacyWorkspace.cwd,
+              legacyWorkspace.projectId,
+              repos.repositories,
+              logger,
+            );
+
             await repos.workspaces.create({
               id: legacyWorkspace.workspaceId,
               projectId: legacyWorkspace.projectId,
+              repositoryId, // Link workspace to repository
               name: legacyWorkspace.displayName,
               cwd: legacyWorkspace.cwd,
               kind: legacyWorkspace.kind,
@@ -191,7 +201,14 @@ export async function runMigration(
               archivedAt: legacyWorkspace.archivedAt,
             });
             workspacesMigrated++;
-            log.debug({ workspaceId: legacyWorkspace.workspaceId }, "Workspace migrated");
+            log.debug(
+              {
+                workspaceId: legacyWorkspace.workspaceId,
+                repositoryId,
+                cwd: legacyWorkspace.cwd,
+              },
+              "Workspace migrated",
+            );
           } catch (err) {
             const error = err instanceof Error ? err.message : String(err);
             errors.push({ entity: "workspace", id: legacyWorkspace.workspaceId, error });

@@ -650,6 +650,52 @@ process.stdin.on("data", (chunk) => {
   }
 }
 
+describe("Codex foreground teardown wait (replace path)", () => {
+  // The replace path can call startTurn while the interrupted turn is still
+  // tearing down: the manager's force-cancel settles its run record before
+  // this provider clears activeForegroundTurnId, and refusing immediately
+  // loses the incoming prompt and marks the agent errored.
+  it("waits out a clearing foreground turn instead of refusing", async () => {
+    const session = createSession();
+    const internals = castInternals<{
+      activeForegroundTurnId: string | null;
+      flushForegroundTurnClearWaiters: () => void;
+    }>(session);
+    const attempt = session.startTurn("after teardown");
+    const raced = await Promise.race([
+      attempt.catch((error: unknown) => error),
+      new Promise((resolve) => setTimeout(resolve, 25, "pending")),
+    ]);
+    expect(raced).toBe("pending");
+    internals.activeForegroundTurnId = null;
+    internals.flushForegroundTurnClearWaiters();
+    // Getting past the foreground guard is the assertion; the harness spawns
+    // no app-server, so the next gate is the client-initialization error.
+    await expect(attempt).rejects.toThrow("Codex client not initialized");
+  });
+
+  it("refuses only when the teardown never completes, retaining no waiter", async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createSession();
+      const internals = castInternals<{ foregroundTurnClearWaiters: Array<() => void> }>(
+        session,
+      );
+      const attempt = session.startTurn("never clears");
+      const expectation = expect(attempt).rejects.toThrow(
+        "A foreground turn is already active",
+      );
+      expect(internals.foregroundTurnClearWaiters).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expectation;
+      // A stuck turn plus retrying prompts must not accumulate dead closures.
+      expect(internals.foregroundTurnClearWaiters).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("Codex app-server provider", () => {
   test("getAvailableModes includes auto-review when the Codex version supports it", async () => {
     const session = createSession({}, { autoReviewEnabled: true });

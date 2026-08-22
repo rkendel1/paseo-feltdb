@@ -181,6 +181,13 @@ export function routeKeyboardShortcut(
 ): ShortcutAction {
   const passthrough = PASSTHROUGH_DISPATCH[input.action];
   if (passthrough) {
+    if (
+      input.action === "agent.interrupt" &&
+      ctx.pathname.startsWith("/settings") &&
+      !ctx.isMobile
+    ) {
+      return { kind: "navigate-last-workspace" };
+    }
     return dispatch(passthrough);
   }
 

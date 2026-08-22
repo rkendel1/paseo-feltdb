@@ -28,6 +28,7 @@ import {
   OmpRuntimeEventSchema,
   OmpSessionStateSchema,
   OmpSessionStatsSchema,
+  OmpSubagentsResultSchema,
   type OmpThinkingLevel,
   type OmpAgentMessage,
   type OmpModel,
@@ -40,6 +41,7 @@ import {
   type OmpRuntimeEvent,
   type OmpSessionState,
   type OmpSessionStats,
+  type OmpSubagentSnapshot,
   type OmpSubagentSubscriptionLevel,
 } from "./rpc-types.js";
 
@@ -273,6 +275,11 @@ class OmpCliRuntimeSession implements OmpRuntimeSession {
 
   async setSubagentSubscription(level: OmpSubagentSubscriptionLevel): Promise<void> {
     await this.request({ type: "set_subagent_subscription", level });
+  }
+
+  async getSubagents(): Promise<OmpSubagentSnapshot[]> {
+    const data = OmpSubagentsResultSchema.parse(await this.request({ type: "get_subagents" }));
+    return data.subagents ?? [];
   }
 
   async setHostTools(tools: OmpRpcHostToolDefinition[]): Promise<string[]> {

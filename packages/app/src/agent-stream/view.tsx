@@ -105,6 +105,8 @@ import { isWeb } from "@/constants/platform";
 import type { Theme } from "@/styles/theme";
 import { recordRenderProfileReasons } from "@/utils/render-profiler";
 import { useRetainedPanelActive } from "@/components/retained-panel";
+import { projectCompletedResponseFolds } from "./completed-response-fold";
+import { CompletedResponseFoldRow } from "./completed-response-fold-row";
 import { useStreamHistoryWindow } from "./use-stream-history-window";
 
 function renderLiveAuxiliaryNode(input: {
@@ -318,6 +320,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
   ) {
     const { t } = useTranslation();
     const autoExpandReasoning = useSettings((settings) => settings.autoExpandReasoning);
+    const collapseCompletedResponses = useSettings(
+      (settings) => settings.collapseCompletedResponses,
+    );
     const toolCallDetailLevel = useSettings((settings) => settings.toolCallDetailLevel);
     const chatOutlineEnabled = useSettings((settings) => settings.chatOutlineEnabled);
     const viewportRef = useRef<StreamViewportHandle | null>(null);
@@ -339,6 +344,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       new Set(),
     );
     const [expandedToolCallGroupIds, setExpandedToolCallGroupIds] = useState<Set<string>>(
+      new Set(),
+    );
+    const [expandedCompletedResponseIds, setExpandedCompletedResponseIds] = useState<Set<string>>(
       new Set(),
     );
 
@@ -404,6 +412,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       setIsNearBottom(true);
       setExpandedInlineToolCallIds(new Set());
       setExpandedToolCallGroupIds(new Set());
+      setExpandedCompletedResponseIds(new Set());
     }, [agentId]);
 
     const handleInlinePathPress = useStableEvent(
@@ -539,24 +548,50 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const isLoadingOlder = remoteIsLoadingOlder;
     const hasOlder = hasLocalHistory || remoteHasOlder;
     const progressKey = `${remoteProgressKey ?? "local"}:${historyWindowStart}`;
+    const mountedToolCallTail = useMemo(
+      () =>
+        historyWindowStart > 0
+          ? projectedToolCalls.tail.slice(historyWindowStart)
+          : projectedToolCalls.tail,
+      [historyWindowStart, projectedToolCalls.tail],
+    );
+    const completedResponseProjection = useMemo(
+      () =>
+        projectCompletedResponseFolds({
+          enabled: collapseCompletedResponses,
+          tail: mountedToolCallTail,
+          head: projectedToolCalls.head,
+          isTurnActive,
+          expandedResponseIds: expandedCompletedResponseIds,
+          preserveLeadingResponse: hasOlder,
+          toolCallGroupsByHostId: projectedToolCalls.groupsByHostId,
+        }),
+      [
+        expandedCompletedResponseIds,
+        collapseCompletedResponses,
+        hasOlder,
+        isTurnActive,
+        mountedToolCallTail,
+        projectedToolCalls.head,
+        projectedToolCalls.groupsByHostId,
+      ],
+    );
 
     const baseRenderModel = useMemo(() => {
       return buildAgentStreamRenderModel({
         isTurnActive,
         activeTurnStartedAt: effectiveTurnPresentation.startedAt,
-        tail: projectedToolCalls.tail,
-        head: projectedToolCalls.head,
+        tail: completedResponseProjection.tail,
+        head: completedResponseProjection.head,
         platform: isWeb ? "web" : "native",
         isMobileBreakpoint: isMobile,
-        historyStart: historyWindowStart,
       });
     }, [
       isMobile,
       isTurnActive,
-      projectedToolCalls.head,
-      projectedToolCalls.tail,
+      completedResponseProjection.head,
+      completedResponseProjection.tail,
       effectiveTurnPresentation.startedAt,
-      historyWindowStart,
     ]);
     const streamLayout = useMemo(
       () =>
@@ -651,6 +686,18 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           next.add(groupId);
         } else {
           next.delete(groupId);
+        }
+        return next;
+      });
+    }, []);
+
+    const toggleCompletedResponse = useCallback((responseId: string) => {
+      setExpandedCompletedResponseIds((previous) => {
+        const next = new Set(previous);
+        if (next.has(responseId)) {
+          next.delete(responseId);
+        } else {
+          next.add(responseId);
         }
         return next;
       });
@@ -821,21 +868,27 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const renderStreamItemContent = useCallback(
       (layoutItem: StreamLayoutItem) => {
         const item = layoutItem.item;
+        const fold = completedResponseProjection.foldsByAnchorItemId.get(item.id);
+        let content: ReactNode;
         switch (item.kind) {
           case "user_message":
-            return renderUserMessageItem(layoutItem, item);
+            content = renderUserMessageItem(layoutItem, item);
+            break;
 
           case "assistant_message":
-            return renderAssistantMessageItem(layoutItem, item);
+            content = renderAssistantMessageItem(layoutItem, item);
+            break;
 
           case "thought":
-            return renderThoughtItem(layoutItem, item);
+            content = renderThoughtItem(layoutItem, item);
+            break;
 
           case "tool_call":
-            return renderToolCallItem(layoutItem, item);
+            content = renderToolCallItem(layoutItem, item);
+            break;
 
           case "activity_log":
-            return (
+            content = (
               <ActivityLog
                 type={item.activityType}
                 message={item.message}
@@ -843,24 +896,43 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
                 metadata={item.metadata}
               />
             );
+            break;
 
           case "todo_list":
-            return <TodoListCard items={item.items} activity={item.activity} />;
+            content = <TodoListCard items={item.items} activity={item.activity} />;
+            break;
 
           case "compaction":
-            return (
+            content = (
               <CompactionMarker
                 status={item.status}
                 trigger={item.trigger}
                 preTokens={item.preTokens}
               />
             );
+            break;
 
           default:
-            return null;
+            content = null;
         }
+
+        if (!fold) {
+          return content;
+        }
+        return (
+          <CompletedResponseFoldRow fold={fold} onToggle={toggleCompletedResponse}>
+            {content}
+          </CompletedResponseFoldRow>
+        );
       },
-      [renderUserMessageItem, renderAssistantMessageItem, renderThoughtItem, renderToolCallItem],
+      [
+        completedResponseProjection.foldsByAnchorItemId,
+        renderUserMessageItem,
+        renderAssistantMessageItem,
+        renderThoughtItem,
+        renderToolCallItem,
+        toggleCompletedResponse,
+      ],
     );
 
     const bottomTurnFooterHost = streamLayout.auxiliaryTurnFooter;

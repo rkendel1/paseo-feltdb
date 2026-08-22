@@ -197,6 +197,15 @@ export const en = {
     empty: "Start chatting with this agent...",
     scrollToBottom: "Scroll to bottom",
     historyLoadFailed: "Couldn't load agent history",
+    completedResponse: {
+      messages: {
+        one: "{{count}} message",
+        other: "{{count}} messages",
+      },
+      workDetails: "Work details",
+      showSummary: "Show {{summary}}",
+      hideSummary: "Hide {{summary}}",
+    },
     permission: {
       plan: "Plan",
       required: "Permission Required",
@@ -1766,6 +1775,12 @@ export const en = {
     output: "Output",
   },
   toolCallGroup: {
+    calls: {
+      one: "{{count}} tool call",
+      other: "{{count}} tool calls",
+    },
+    showSummary: "Show {{summary}}",
+    hideSummary: "Hide {{summary}}",
     editedFiles: {
       one: "edited {{count}} file",
       other: "edited {{count}} files",
@@ -2001,6 +2016,10 @@ export const en = {
       autoExpandReasoning: {
         label: "Always expand reasoning",
         description: "Show agent thinking and chain-of-thought blocks fully expanded by default",
+      },
+      collapseCompletedResponses: {
+        label: "Collapse completed responses",
+        description: "Show a work summary and the final answer after the agent finishes",
       },
       toolCallDetail: {
         label: "Tool call display",

@@ -420,6 +420,7 @@ export const es: TranslationResources = {
     },
     fileActions: {
       openFile: "Abrir archivo",
+      openIn: "Abrir en {{target}}",
       copyPath: "Copiar ruta",
       copyRelativePath: "Copiar ruta relativa",
       revealIn: "Mostrar en {{target}}",

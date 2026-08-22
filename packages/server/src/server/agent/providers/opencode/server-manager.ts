@@ -20,6 +20,7 @@ import {
   type OpenCodeEventConsumerFactory,
   type OpenCodeEventSource,
 } from "./event-consumer.js";
+import type { ProcessEnvRecord } from "../../../paseo-env.js";
 
 /**
  * Budget for an OpenCode server to become usable after spawn. Plugin-heavy installs
@@ -39,7 +40,7 @@ export interface OpenCodeServerAcquisition {
 export interface OpenCodeServerManagerLike {
   acquireCurrent(signal?: AbortSignal): Promise<OpenCodeServerAcquisition>;
   acquireNew(signal?: AbortSignal): Promise<OpenCodeServerAcquisition>;
-  acquireDedicated(env: Record<string, string>): Promise<OpenCodeServerAcquisition>;
+  acquireDedicated(env: ProcessEnvRecord): Promise<OpenCodeServerAcquisition>;
   acquireExisting(url: string): OpenCodeServerAcquisition | null;
   shutdown(): Promise<void>;
 }
@@ -168,7 +169,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     return this.acquireServer(server);
   }
 
-  async acquireDedicated(env: Record<string, string>): Promise<OpenCodeServerAcquisition> {
+  async acquireDedicated(env: ProcessEnvRecord): Promise<OpenCodeServerAcquisition> {
     const server = await this.startServer(env);
     server.retired = true;
     this.retiredServers.add(server);
@@ -307,7 +308,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     }
   }
 
-  private async startServer(launchEnv?: Record<string, string>): Promise<OpenCodeServerGeneration> {
+  private async startServer(launchEnv?: ProcessEnvRecord): Promise<OpenCodeServerGeneration> {
     const port = await this.portAllocator();
     const url = `http://127.0.0.1:${port}`;
     const launchPrefix = await this.resolveCommandPrefix();

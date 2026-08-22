@@ -115,6 +115,7 @@ import {
   type VoiceMcpSocketBridgeManager,
 } from "./voice-mcp-bridge.js";
 import { resolveVoiceMcpBridgeFromRuntime } from "./voice-mcp-bridge-command.js";
+import { initializeState, type PaseoState } from "./state/index.js";
 
 type AgentMcpTransportMap = Map<string, StreamableHTTPServerTransport>;
 
@@ -190,6 +191,7 @@ export interface PaseoDaemon {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   terminalManager: TerminalManager;
+  paseoState: PaseoState;
   start(): Promise<void>;
   stop(): Promise<void>;
   getListenTarget(): ListenTarget | null;
@@ -216,6 +218,14 @@ export async function createPaseoDaemon(
   }
 
   try {
+    // Initialize Paseo state (FeltDB) early, before other services
+    const paseoStateInit = await initializeState({
+      paseoHome: config.paseoHome,
+      logger,
+    });
+    const paseoState = paseoStateInit.state;
+    logger.info({ elapsed: elapsed() }, "Paseo state initialized");
+
     const serverId = getOrCreateServerId(config.paseoHome, { logger });
     const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
     let relayTransport: RelayTransportController | null = null;
@@ -753,6 +763,7 @@ export async function createPaseoDaemon(
       agentManager,
       agentStorage,
       terminalManager,
+      paseoState,
       start,
       stop,
       getListenTarget: () => boundListenTarget,

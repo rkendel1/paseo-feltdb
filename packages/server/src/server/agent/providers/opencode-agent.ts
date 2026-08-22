@@ -96,6 +96,7 @@ import {
 } from "./diagnostic-utils.js";
 import { runProviderTurn } from "./provider-runner.js";
 import { renderPromptAttachmentAsText } from "../prompt-attachments.js";
+import { PASEO_MCP_SERVER_NAME, isInternalPaseoMcpServer } from "../runtime-mcp-config.js";
 import { composeSystemPromptParts } from "../system-prompt.js";
 import { normalizeProviderReplayTimestamp } from "../provider-history-timestamps.js";
 import { revertOpenCodeConversationAndFiles } from "./opencode/rewind.js";
@@ -591,6 +592,31 @@ function isOpenCodeHeadersTimeoutFailure(error: unknown): boolean {
 function isAlreadyPresentMcpError(error: unknown): boolean {
   const normalized = toDiagnosticErrorMessage(error).toLowerCase();
   return MCP_ALREADY_PRESENT_ERROR_TOKENS.some((token) => normalized.includes(token));
+}
+
+/**
+ * OpenCode MCP tool permission names use `server.tool` format (e.g.
+ * `paseo.create_agent`). Returns true when the permission name refers to a
+ * tool on the internal Paseo MCP server.
+ *
+ * Verifies the server config is actually the internal Paseo MCP server (by
+ * URL), not just that the name matches — a user-configured external server
+ * named `paseo` must not get auto-approved.
+ */
+function isInternalPaseoMcpPermissionName(
+  name: string,
+  mcpServers: Record<string, McpServerConfig> | undefined,
+): boolean {
+  const dotIndex = name.indexOf(".");
+  if (dotIndex === -1) {
+    return false;
+  }
+  const serverName = name.slice(0, dotIndex);
+  if (serverName !== PASEO_MCP_SERVER_NAME) {
+    return false;
+  }
+  const serverConfig = mcpServers?.[serverName];
+  return serverConfig != null && isInternalPaseoMcpServer(serverConfig);
 }
 
 function readOpenCodeMcpOperationError(data: unknown, name: string): unknown {
@@ -5204,6 +5230,31 @@ class OpenCodeAgentSession implements AgentSession {
     request: AgentPermissionRequest,
     directory: string,
   ): Promise<boolean> {
+    // Always auto-approve internal Paseo MCP tools. These are the daemon's own
+    // orchestration surface (create_agent, send_agent_prompt, browser tools,
+    // etc.) injected via the `paseo` MCP server. Without this, every call
+    // triggers a permission prompt and the model avoids the orchestration tools.
+    // Use "always" so the grant persists and subsequent calls don't re-prompt.
+    if (
+      request.kind === "tool" &&
+      isInternalPaseoMcpPermissionName(request.name, this.config.mcpServers)
+    ) {
+      try {
+        await this.client.permission.reply({
+          requestID: request.id,
+          directory,
+          reply: "always",
+        });
+        return true;
+      } catch (error) {
+        this.logger.warn(
+          { err: error, requestId: request.id, permission: request.name },
+          "Failed to auto-approve internal Paseo MCP tool permission",
+        );
+        return false;
+      }
+    }
+
     if (!this.autoAcceptEnabled || request.kind !== "tool") {
       return false;
     }

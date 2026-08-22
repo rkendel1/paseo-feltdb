@@ -2549,6 +2549,11 @@ export const es: TranslationResources = {
       },
     },
     project: {
+      commandFormat: {
+        title: "Formato del comando",
+        single: "Todas las plataformas",
+        platform: "Por plataforma",
+      },
       noEditableTarget: "Este proyecto no se puede editar en este host.",
       backToProjects: "Volver a proyectos",
       edit: {

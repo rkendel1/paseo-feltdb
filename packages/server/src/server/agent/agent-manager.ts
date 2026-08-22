@@ -76,6 +76,7 @@ export type AgentManagerOptions = {
   onAgentAttention?: AgentAttentionCallback;
   runManager?: any; // RunManager instance for durable run lifecycle
   paseoState?: any; // PaseoState instance for durable conversation/message persistence
+  contextService?: any; // AgentContextService instance for durable context injection
   logger: Logger;
 };
 
@@ -331,6 +332,7 @@ export class AgentManager {
   private onAgentAttention?: AgentAttentionCallback;
   private readonly runManager?: any; // RunManager instance
   private readonly paseoState?: any; // PaseoState instance for durable state
+  private readonly contextService?: any; // AgentContextService instance
   private logger: Logger;
 
   constructor(options: AgentManagerOptions) {
@@ -345,6 +347,7 @@ export class AgentManager {
     this.registry = options?.registry;
     this.runManager = options?.runManager;
     this.paseoState = options?.paseoState;
+    this.contextService = options?.contextService;
     this.onAgentAttention = options?.onAgentAttention;
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
     if (options?.clients) {
@@ -1215,16 +1218,6 @@ export class AgentManager {
 
     const self = this;
 
-    // Create durable Run entity if RunManager is available
-    const runPromise = self.runManager
-      ? self.runManager.createRun({
-          agentId,
-          provider: agent.provider,
-          cwd: agent.cwd,
-          prompt: typeof prompt === "string" ? prompt : JSON.stringify(prompt),
-        })
-      : Promise.resolve(null);
-
     const streamForwarder = (async function* streamForwarder() {
       const pendingRun = self.createPendingForegroundRun();
       self.pendingForegroundRuns.set(agentId, pendingRun);
@@ -1234,8 +1227,82 @@ export class AgentManager {
       let terminalEventType: "turn_completed" | "turn_failed" | "turn_canceled" | null = null;
       let terminalEventData: AgentStreamEvent | null = null;
 
+      // Create durable Run entity if RunManager is available
+      let createdRun = null;
       try {
-        const result = await agent.session.startTurn(prompt, options);
+        if (self.runManager) {
+          createdRun = await self.runManager.createRun({
+            agentId,
+            provider: agent.provider,
+            cwd: agent.cwd,
+            prompt: typeof prompt === "string" ? prompt : JSON.stringify(prompt),
+          });
+        }
+      } catch (error) {
+        self.logger.error({ agentId, err: error }, "Failed to create Run entity");
+      }
+
+      // Resolve durable context for this turn (after Run is created, before startTurn)
+      let injectedPrompt = prompt;
+      if (self.contextService && createdRun) {
+        const promptText = typeof prompt === "string" ? prompt : JSON.stringify(prompt);
+        const contextResolution = await self.contextService.resolveForTurn(
+          agentId,
+          promptText,
+          createdRun.id,
+        );
+
+        // Record context resolution status in Run
+        const resolutionStatus = contextResolution.success ? "resolved" : "fallback";
+        const resolutionPolicy = self.contextService.getFailurePolicy();
+        const policyName =
+          resolutionPolicy.toString() === "block" ? "block" : "fallback";
+
+        if (self.runManager) {
+          await self.runManager.recordContextResolution(agentId, {
+            status: resolutionStatus,
+            policy: policyName,
+            summary: contextResolution.success
+              ? contextResolution.turnContext?.projection?.summary?.project
+              : contextResolution.error,
+          });
+        }
+
+        // Handle resolution based on policy
+        if (!contextResolution.success && policyName === "block") {
+          const errorMsg = `Context resolution failed (BLOCK policy): ${contextResolution.error}`;
+          self.logger.error({ agentId, reason: contextResolution.reason }, errorMsg);
+          self.handleStreamEvent(agent, {
+            type: "turn_failed",
+            provider: agent.provider,
+            error: errorMsg,
+          });
+          self.finalizeForegroundTurn(agent);
+          if (self.runManager) {
+            await self.runManager.markRunFailed(agentId, errorMsg);
+          }
+          throw new Error(errorMsg);
+        }
+
+        // Inject context into prompt if resolution succeeded
+        if (contextResolution.success && contextResolution.turnContext?.projection?.text) {
+          const contextText = contextResolution.turnContext.projection.text;
+          if (typeof prompt === "string") {
+            injectedPrompt = `${contextText}\n\n---\n\n${prompt}`;
+          } else {
+            // For structured prompts, we'd need provider-specific adapters
+            // For now, just use the original prompt
+            self.logger.debug(
+              { agentId },
+              "Context injection: structured prompts not yet supported, using original prompt",
+            );
+          }
+        }
+      }
+
+      // Now start the turn with potentially injected context
+      try {
+        const result = await agent.session.startTurn(injectedPrompt, options);
         turnId = result.turnId;
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : "Failed to start turn";
@@ -1246,21 +1313,16 @@ export class AgentManager {
         });
         self.finalizeForegroundTurn(agent);
         // Mark Run as failed
-        if (self.runManager) {
-          await runPromise;
+        if (self.runManager && createdRun) {
           await self.runManager.markRunFailed(agentId, errorMsg);
         }
         throw error;
       }
 
       // Mark Run as started and capture runId for message provenance
-      let createdRun = null;
-      if (self.runManager) {
-        createdRun = await runPromise;
+      if (self.runManager && createdRun) {
         await self.runManager.markRunStarted(agentId);
-        if (createdRun) {
-          agent.currentRunId = createdRun.id;
-        }
+        agent.currentRunId = createdRun.id;
       }
 
       pendingRun.started = true;
@@ -1324,8 +1386,7 @@ export class AgentManager {
         }
       } finally {
         // Update Run entity based on terminal event
-        if (self.runManager) {
-          await runPromise;
+        if (self.runManager && createdRun) {
           if (terminalEventType === "turn_completed" && terminalEventData) {
             const result = (terminalEventData as any).result;
             await self.runManager.markRunCompleted(agentId, {

@@ -114,6 +114,42 @@ export class RunManager {
   }
 
   /**
+   * Record context resolution outcome for this Run.
+   *
+   * Called after AgentContextService.resolveForTurn() to track whether
+   * context was successfully resolved, failed, or fell back to empty context.
+   */
+  async recordContextResolution(
+    agentId: string,
+    outcome: {
+      status: "resolved" | "failed" | "fallback";
+      policy: "block" | "fallback";
+      summary?: string;
+    },
+  ): Promise<void> {
+    try {
+      const tracked = this.activeRuns.get(agentId);
+      if (!tracked) {
+        return;
+      }
+
+      await this.paseoState.runs.update(tracked.run.id, {
+        contextResolution: outcome,
+      });
+
+      this.logger.debug(
+        { agentId, runId: tracked.run.id, ...outcome },
+        "Context resolution recorded",
+      );
+    } catch (error) {
+      this.logger.error(
+        { agentId, err: error },
+        "Failed to record context resolution",
+      );
+    }
+  }
+
+  /**
    * Update Run when agent execution completes with success.
    *
    * Called when agent finishes normally.

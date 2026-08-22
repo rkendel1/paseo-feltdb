@@ -201,6 +201,13 @@ export const RunSchema = z.object({
       totalTokens: z.number().optional(),
     })
     .optional(),
+  contextResolution: z
+    .object({
+      status: z.enum(["resolved", "failed", "fallback"]),
+      policy: z.enum(["block", "fallback"]),
+      summary: z.string().optional(),
+    })
+    .optional(),
   createdAt: z.string().datetime(),
   metadata: z.record(z.any()).optional(),
 });

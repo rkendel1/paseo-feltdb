@@ -619,8 +619,11 @@ function SidebarChrome({
     selectIsAgentListOpen(state, { isCompact: isCompactLayout }),
   );
   const active = visible && isOpen;
+  const {
+    settings: { workspaceTitleSource },
+  } = useAppSettings();
   return (
-    <SidebarModelProvider active={active}>
+    <SidebarModelProvider active={active} workspaceTitleSource={workspaceTitleSource}>
       {mounted ? <LeftSidebar active={active} /> : null}
       <WorkspaceShortcutTargetsSubscriber enabled={keyboardShortcutsEnabled} />
     </SidebarModelProvider>

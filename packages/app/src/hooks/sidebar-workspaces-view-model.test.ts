@@ -13,6 +13,7 @@ import {
   deriveProjectStatusBucket,
   deriveSidebarLoadingState,
   shouldShowSidebarHostLabels,
+  sortSidebarProjects,
   type ProjectStatusSession,
   type SidebarProjectEntry,
   type SidebarWorkspacePlacement,
@@ -65,6 +66,54 @@ describe("createSidebarWorkspaceEntry forge threading", () => {
       workspace: workspaceWithForge(undefined, "https://github.com/acme/repo/pull/42"),
     });
     expect(entry.prHint).toMatchObject({ number: 42, forge: "github" });
+  });
+});
+
+describe("createSidebarWorkspaceEntry activity", () => {
+  it("keeps workspace activity separate from newer status-entry time", () => {
+    const descriptor = workspaceWithForge(undefined, "https://github.com/acme/repo/pull/42");
+    descriptor.statusEnteredAt = new Date("2026-05-12T11:30:00.000Z");
+    descriptor.activityAt = new Date("2026-05-12T10:30:00.000Z");
+
+    const entry = createSidebarWorkspaceEntry({ serverId: "srv", workspace: descriptor });
+
+    expect(entry.statusEnteredAt).toEqual(new Date("2026-05-12T11:30:00.000Z"));
+    expect(entry.activityAt).toEqual(new Date("2026-05-12T10:30:00.000Z"));
+  });
+
+  it("leaves activity empty when only a status-entry time exists", () => {
+    const descriptor = workspaceWithForge(undefined, "https://github.com/acme/repo/pull/42");
+    descriptor.statusEnteredAt = new Date("2026-05-12T11:30:00.000Z");
+    descriptor.activityAt = null;
+
+    const entry = createSidebarWorkspaceEntry({ serverId: "srv", workspace: descriptor });
+
+    expect(entry.statusEnteredAt).toEqual(new Date("2026-05-12T11:30:00.000Z"));
+    expect(entry.activityAt).toBeNull();
+  });
+
+  it("uses live agent activity when the daemon omits workspace activity", () => {
+    const descriptor = workspaceWithForge(undefined, "https://github.com/acme/repo/pull/42");
+    descriptor.statusEnteredAt = new Date("2026-05-12T09:30:00.000Z");
+    descriptor.activityAt = null;
+
+    const entry = createSidebarWorkspaceEntry({
+      serverId: "srv",
+      workspace: descriptor,
+      workspaceAgentActivity: new Map([
+        [
+          descriptor.id,
+          {
+            agentId: "agent-1",
+            status: "done",
+            enteredAt: descriptor.statusEnteredAt,
+            activityAt: new Date("2026-05-12T10:30:00.000Z"),
+          },
+        ],
+      ]),
+    });
+
+    expect(entry.activityAt).toEqual(new Date("2026-05-12T10:30:00.000Z"));
   });
 });
 
@@ -937,5 +986,117 @@ describe("deriveProjectStatusBucket", () => {
         },
       }),
     ).toBe("done");
+  });
+});
+
+describe("sortSidebarProjects", () => {
+  function placement(name: string): SidebarWorkspacePlacement {
+    return {
+      workspaceKey: `srv:${name}`,
+      serverId: "srv",
+      workspaceId: name,
+      projectViewKey: "proj",
+      projectName: "proj",
+      projectKind: "git",
+      workspaceKind: "worktree",
+      name,
+    };
+  }
+
+  function projectEntry(projectName: string, workspaceNames: string[]): SidebarProjectEntry {
+    return {
+      viewKey: projectName,
+      projectName,
+      projectKind: "git",
+      iconWorkingDir: `/repo/${projectName}`,
+      hosts: [],
+      workspaces: workspaceNames.map(placement),
+    };
+  }
+
+  const NO_LABELS: ReadonlyMap<string, string> = new Map();
+  const NO_ACTIVITY: ReadonlyMap<string, number> = new Map();
+
+  it("returns the input unchanged in manual mode", () => {
+    const projects = [projectEntry("bravo", ["b", "a"]), projectEntry("alpha", ["z"])];
+    expect(
+      sortSidebarProjects({
+        projects,
+        sortMode: "manual",
+        labelByKey: NO_LABELS,
+        activityByKey: NO_ACTIVITY,
+      }),
+    ).toBe(projects);
+  });
+
+  it("sorts projects and workspaces by name", () => {
+    const projects = [projectEntry("bravo", ["beta", "alpha"]), projectEntry("alpha", ["one"])];
+    const sorted = sortSidebarProjects({
+      projects,
+      sortMode: "name",
+      labelByKey: NO_LABELS,
+      activityByKey: NO_ACTIVITY,
+    });
+
+    expect(sorted.map((entry) => entry.projectName)).toEqual(["alpha", "bravo"]);
+    expect(sorted[1]?.workspaces.map((entry) => entry.name)).toEqual(["alpha", "beta"]);
+  });
+
+  it("sorts workspaces by their displayed label", () => {
+    const projects = [projectEntry("proj", ["ws-a", "ws-b"])];
+    const sorted = sortSidebarProjects({
+      projects,
+      sortMode: "name",
+      labelByKey: new Map([
+        ["srv:ws-a", "zeta-branch"],
+        ["srv:ws-b", "alpha-branch"],
+      ]),
+      activityByKey: NO_ACTIVITY,
+    });
+
+    expect(sorted[0]?.workspaces.map((entry) => entry.workspaceKey)).toEqual([
+      "srv:ws-b",
+      "srv:ws-a",
+    ]);
+  });
+
+  it("sorts projects and workspaces by recent activity", () => {
+    const projects = [projectEntry("old", ["old-ws"]), projectEntry("recent", ["stale", "fresh"])];
+    const sorted = sortSidebarProjects({
+      projects,
+      sortMode: "activity",
+      labelByKey: NO_LABELS,
+      activityByKey: new Map([
+        ["srv:old-ws", 100],
+        ["srv:stale", 200],
+        ["srv:fresh", 900],
+      ]),
+    });
+
+    expect(sorted.map((entry) => entry.projectName)).toEqual(["recent", "old"]);
+    expect(sorted[0]?.workspaces.map((entry) => entry.name)).toEqual(["fresh", "stale"]);
+  });
+
+  it("keeps stable order for equal or missing activity", () => {
+    const projects = [projectEntry("first", ["a"]), projectEntry("second", ["b"])];
+    const sorted = sortSidebarProjects({
+      projects,
+      sortMode: "activity",
+      labelByKey: NO_LABELS,
+      activityByKey: new Map([
+        ["srv:a", 42],
+        ["srv:b", 42],
+      ]),
+    });
+
+    expect(sorted.map((entry) => entry.projectName)).toEqual(["first", "second"]);
+    expect(
+      sortSidebarProjects({
+        projects: [projectEntry("p", ["active", "unknown"])],
+        sortMode: "activity",
+        labelByKey: NO_LABELS,
+        activityByKey: new Map([["srv:active", 500]]),
+      })[0]?.workspaces.map((entry) => entry.name),
+    ).toEqual(["active", "unknown"]);
   });
 });

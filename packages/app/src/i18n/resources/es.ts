@@ -126,6 +126,7 @@ export const es: TranslationResources = {
       addImage: "Agregar imagen",
       pasteImage: "Pegar imagen",
       addFile: "Upload file",
+      addAgent: "Adjuntar agente",
       addIssueOrPr: "Agregar problema oPR",
       addIssueOrPr_mr: "Agregar problema o MR",
       dropImagesHere: "Suelta imágenes aquí",
@@ -135,6 +136,7 @@ export const es: TranslationResources = {
       openImage: "Abrir imagen adjunta",
       removeImage: "Quitar imagen adjunta",
       removeFile: "Remove file attachment",
+      removeAgent: "Eliminar contexto del agente de {{title}}",
       openGithub: "Abrir {{kind}} {{number}}",
       removeGithub: "Quitar {{kind}} {{number}}",
       element: "Elemento",
@@ -317,6 +319,7 @@ export const es: TranslationResources = {
       textAttachment: "Adjunto de texto",
       text: "Texto",
       file: "Archivo",
+      agent: "Contexto del agente",
     },
     speak: {
       header: "Habló",
@@ -375,6 +378,8 @@ export const es: TranslationResources = {
     },
     actions: {
       refresh: "Actualizar sesiones",
+      resumeOriginal: "Reanudar original",
+      continueHere: "Continuar aquí",
     },
     preview: {
       untitledSession: "Sesión sin título",
@@ -387,6 +392,9 @@ export const es: TranslationResources = {
     },
     row: {
       importing: "Importador...",
+      continuing: "Continuando...",
+      continueHint:
+        "Crea una nueva conversación aquí. Los archivos y cambios de origen permanecen en el worktree de origen.",
     },
   },
   workspace: {
@@ -1472,10 +1480,41 @@ export const es: TranslationResources = {
   },
   agentAutocomplete: {
     searchingWorkspace: "Buscando espacio de trabajo...",
+    searchingMentions: "Buscando agentes y espacio de trabajo...",
     loadingCommands: "Cargando comandos...",
     noFiles: "No se encontraron archivos ni directorios",
+    noMentionResults: "No se encontraron agentes, archivos ni directorios",
     noCommands: "No se encontraron comandos",
+    agents: "Agentes",
+    filesAndFolders: "Archivos y carpetas",
+    agent: "Agente",
     failedToLoad: "No se pudo cargar",
+  },
+  agentContext: {
+    title: "Adjuntar agentes",
+    subtitle: "Da a este agente contexto de otro agente en este host.",
+    searchPlaceholder: "Buscar agentes...",
+    groups: {
+      workspace: "Este espacio de trabajo",
+      project: "Este proyecto",
+      other: "Otros proyectos",
+    },
+    status: {
+      attached: "Ya adjunto",
+      updateHost: "Actualiza el host para adjuntar contexto de agente.",
+      wrongHost: "Solo puedes adjuntar agentes del host seleccionado.",
+      loading: "Cargando agentes...",
+      failed: "No se pudieron cargar los agentes.",
+      noMatches: "No hay agentes coincidentes",
+      empty: "No hay agentes disponibles",
+      limitReached: "Puedes adjuntar hasta {{count}} agentes.",
+    },
+    selectionCount: "{{count}} seleccionados",
+    actions: {
+      attach: "Adjuntar",
+      loadMore: "Cargar más",
+    },
+    sameHostNote: "El contexto del agente se captura al enviar el mensaje.",
   },
   loadOlderHistory: {
     failed: "No se pudo cargar el historial anterior",

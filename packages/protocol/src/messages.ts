@@ -880,6 +880,13 @@ export const RecentProviderSessionDescriptorPayloadSchema = z.object({
   firstPromptPreview: z.string().nullable(),
   lastPromptPreview: z.string().nullable(),
   lastActivityAt: z.string(),
+  // COMPAT(providerSessionContinue): added in v0.2.1, remove optional parsing after 2027-01-22.
+  // The daemon determines this from the provider adapter; clients never infer
+  // native fork support from a provider ID.
+  canContinueHere: z.boolean().optional(),
+  // COMPAT(providerSessionContinue): added in v0.2.1, remove optional parsing after 2027-01-22.
+  // Only present when the listing is scoped to a target workspace.
+  isTargetCwd: z.boolean().optional(),
 });
 
 export type RecentProviderSessionDescriptorPayload = z.infer<
@@ -1118,6 +1125,18 @@ export const TextAttachmentSchema = z
     ...(contextKind === "chat_history" ? { contextKind } : {}),
   }));
 
+/**
+ * A daemon-local reference to an existing Paseo agent. The client deliberately
+ * sends only identity/display metadata: the destination daemon resolves and
+ * curates retained history at submission time, so transcript bodies never
+ * travel through the client.
+ */
+export const AgentContextAttachmentSchema = z.object({
+  type: z.literal("agent_context"),
+  agentId: z.string().min(1),
+  title: z.string().optional(),
+});
+
 export const ReviewAttachmentContextLineSchema = z.object({
   oldLineNumber: z.number().int().positive().nullable(),
   newLineNumber: z.number().int().positive().nullable(),
@@ -1161,6 +1180,7 @@ export const AgentAttachmentSchema = z.discriminatedUnion("type", [
   GitHubPrAttachmentSchema,
   GitHubIssueAttachmentSchema,
   TextAttachmentSchema,
+  AgentContextAttachmentSchema,
   ReviewAttachmentSchema,
   UploadedFileAttachmentSchema,
 ]);
@@ -1172,9 +1192,18 @@ function normalizeAgentAttachments(input: unknown): AgentAttachment[] {
   const normalized: AgentAttachment[] = [];
   for (const item of input) {
     const parsed = AgentAttachmentSchema.safeParse(item);
-    if (parsed.success) {
-      normalized.push(parsed.data);
+    if (!parsed.success) {
+      continue;
     }
+    if (parsed.data.type === "agent_context") {
+      const agentId = parsed.data.agentId.trim();
+      if (!agentId) {
+        continue;
+      }
+      normalized.push({ ...parsed.data, agentId });
+      continue;
+    }
+    normalized.push(parsed.data);
   }
   return normalized;
 }
@@ -1335,6 +1364,10 @@ export const FetchRecentProviderSessionsRequestMessageSchema = z.object({
   type: z.literal("fetch_recent_provider_sessions_request"),
   requestId: z.string(),
   cwd: z.string().optional(),
+  // COMPAT(providerSessionContinue): added in v0.2.1, remove optional parsing after 2027-01-22.
+  // A target workspace cwd asks the daemon to return source sessions that can
+  // safely be continued in that workspace's local Git working copy.
+  targetCwd: z.string().optional(),
   providers: z.array(z.string()).optional(),
   since: z.string().optional(),
   limit: z.number().int().positive().max(200).optional(),
@@ -1673,6 +1706,15 @@ export const ImportAgentRequestMessageSchema = z.object({
   workspaceId: z.string().optional(),
   labels: z.record(z.string(), z.string()).optional(),
   requestId: z.string(),
+});
+
+export const ProviderSessionContinueRequestMessageSchema = z.object({
+  type: z.literal("provider.session.continue.request"),
+  requestId: z.string(),
+  providerId: z.string(),
+  providerHandleId: z.string(),
+  sourceCwd: z.string(),
+  workspaceId: z.string(),
 });
 
 export const RefreshAgentRequestMessageSchema = z.object({
@@ -3012,6 +3054,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ProviderUsageListRequestMessageSchema,
   ResumeAgentRequestMessageSchema,
   ImportAgentRequestMessageSchema,
+  ProviderSessionContinueRequestMessageSchema,
   RefreshAgentRequestMessageSchema,
   CancelAgentRequestMessageSchema,
   ShutdownServerRequestMessageSchema,
@@ -3371,6 +3414,8 @@ export const ServerInfoStatusPayloadSchema = z
         agentForkContext: z.boolean().optional(),
         // COMPAT(agentForkContextCursor): added in v0.1.108, remove gate after 2027-01-14.
         agentForkContextCursor: z.boolean().optional(),
+        // COMPAT(agentContextAttachments): added in v0.2.0, remove gate after 2027-01-18.
+        agentContextAttachments: z.boolean().optional(),
         // COMPAT(providerSubagents): added in v0.1.107, remove gate after 2027-01-12.
         providerSubagents: z.boolean().optional(),
         // COMPAT(workspacePinning): added in v0.1.107, remove gate after 2027-01-12.
@@ -3393,6 +3438,8 @@ export const ServerInfoStatusPayloadSchema = z
         providerRemoval: z.boolean().optional(),
         // COMPAT(importSessionWorkspaceTarget): added in v0.1.110, remove gate after 2027-01-16.
         importSessionWorkspaceTarget: z.boolean().optional(),
+        // COMPAT(providerSessionContinue): added in v0.2.1, remove gate after 2027-01-22.
+        providerSessionContinue: z.boolean().optional(),
         // COMPAT(forgeProviders): added in v0.1.106, drop the gate when daemon floor >= v0.1.106.
         // Daemon advertises pluggable non-GitHub forge support (the forge registry);
         // the client gates non-GitHub setup UI on it.
@@ -3862,6 +3909,14 @@ export const FetchRecentProviderSessionsResponseMessageSchema = z.object({
     requestId: z.string(),
     entries: z.array(RecentProviderSessionDescriptorPayloadSchema),
     filteredAlreadyImportedCount: z.number().int().nonnegative().optional(),
+  }),
+});
+
+export const ProviderSessionContinueResponseMessageSchema = z.object({
+  type: z.literal("provider.session.continue.response"),
+  payload: z.object({
+    requestId: z.string(),
+    agent: AgentSnapshotPayloadSchema,
   }),
 });
 
@@ -6208,6 +6263,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   FetchAgentsResponseMessageSchema,
   FetchAgentHistoryResponseMessageSchema,
   FetchRecentProviderSessionsResponseMessageSchema,
+  ProviderSessionContinueResponseMessageSchema,
   FetchWorkspacesResponseMessageSchema,
   ProjectAddResponseSchema,
   ProjectCreateDirectoryResponseSchema,
@@ -6399,6 +6455,9 @@ export type FetchAgentHistoryResponseMessage = z.infer<
 export type FetchRecentProviderSessionsResponseMessage = z.infer<
   typeof FetchRecentProviderSessionsResponseMessageSchema
 >;
+export type ProviderSessionContinueResponseMessage = z.infer<
+  typeof ProviderSessionContinueResponseMessageSchema
+>;
 export type FetchWorkspacesResponseMessage = z.infer<typeof FetchWorkspacesResponseMessageSchema>;
 export type ProjectAddResponse = z.infer<typeof ProjectAddResponseSchema>;
 export type ProjectCreateDirectoryResponse = z.infer<typeof ProjectCreateDirectoryResponseSchema>;
@@ -6539,6 +6598,9 @@ export type FetchAgentHistoryRequestMessage = z.infer<typeof FetchAgentHistoryRe
 export type FetchRecentProviderSessionsRequestMessage = z.infer<
   typeof FetchRecentProviderSessionsRequestMessageSchema
 >;
+export type ProviderSessionContinueRequestMessage = z.infer<
+  typeof ProviderSessionContinueRequestMessageSchema
+>;
 export type FetchWorkspacesRequestMessage = z.infer<typeof FetchWorkspacesRequestMessageSchema>;
 export type ProjectListRequestMessage = z.infer<typeof ProjectListRequestMessageSchema>;
 export type FetchAgentRequestMessage = z.infer<typeof FetchAgentRequestMessageSchema>;
@@ -6551,6 +6613,7 @@ export type DictationStreamFinishMessage = z.infer<typeof DictationStreamFinishM
 export type DictationStreamCancelMessage = z.infer<typeof DictationStreamCancelMessageSchema>;
 export type CreateAgentRequestMessage = z.infer<typeof CreateAgentRequestMessageSchema>;
 export type AgentAttachment = z.infer<typeof AgentAttachmentSchema>;
+export type AgentContextAttachment = z.infer<typeof AgentContextAttachmentSchema>;
 export type ForgeChangeRequestAttachment = z.infer<typeof ForgeChangeRequestAttachmentSchema>;
 export type ForgeIssueAttachment = z.infer<typeof ForgeIssueAttachmentSchema>;
 export type UploadedFileAttachment = z.infer<typeof UploadedFileAttachmentSchema>;

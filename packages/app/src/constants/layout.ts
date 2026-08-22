@@ -1,5 +1,6 @@
 import { useUnistyles } from "react-native-unistyles";
 import { isWeb } from "@/constants/platform";
+import { LAYOUT } from "@/styles/theme";
 
 export const FOOTER_HEIGHT = 75;
 
@@ -11,8 +12,11 @@ export const HEADER_INNER_HEIGHT_MOBILE = 56;
 export const WORKSPACE_SECONDARY_HEADER_HEIGHT = 36;
 export const HEADER_TOP_PADDING_MOBILE = 8;
 
-// Max width for chat content (stream view, input area, new agent form)
-export const MAX_CONTENT_WIDTH = 820;
+// Authored max width for chat content (stream view, input area, new agent form).
+// This is the default only. The live value is `theme.layout.maxContentWidth`, which
+// the Content width appearance setting patches — read the theme token in styles, not
+// this constant, or the surface will not follow the setting.
+export const MAX_CONTENT_WIDTH = LAYOUT.maxContentWidth;
 export const COMPACT_FORM_FACTOR_WIDTH = 500;
 
 // Settings uses the canonical desktop list + detail layout. Its sidebar and

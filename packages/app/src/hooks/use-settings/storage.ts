@@ -17,6 +17,7 @@ import {
 import { isNative } from "@/constants/platform";
 import {
   FONT_SIZE,
+  LAYOUT,
   PLUGIN_THEME_PREFERENCE,
   THEME_OPTIONS,
   type ThemePreference,
@@ -74,6 +75,13 @@ export const MIN_CODE_FONT_SIZE = 9;
 export const MAX_CODE_FONT_SIZE = 22; // line-height 1.5×22=33 stays safe
 export const MAX_FONT_FAMILY_LENGTH = 200;
 
+// Reading measure for chat and rendered Markdown. Bounded on both ends on purpose:
+// the column exists so the eye does not track wide horizontal distances
+// (docs/design.md §7), so this widens or narrows the measure rather than removing it.
+export const DEFAULT_CONTENT_WIDTH = LAYOUT.maxContentWidth;
+export const MIN_CONTENT_WIDTH = 600;
+export const MAX_CONTENT_WIDTH_SETTING = 1600;
+
 export interface AppSettings {
   theme: ThemePreference;
   /** Which contributed theme `theme: "plugin"` selects. */
@@ -88,6 +96,7 @@ export interface AppSettings {
   uiBaseFontSize: number; // clamped px, platform default 14 or 15
   contentFontSize: number; // clamped px, default 15
   codeFontSize: number; // clamped px, default 12
+  contentWidth: number; // clamped px, default 820
   syntaxTheme: SyntaxThemeId; // default "one"
   workspaceTitleSource: WorkspaceTitleSource;
   sidebarWorkspaceTrailing: SidebarWorkspaceTrailing;
@@ -138,6 +147,7 @@ const StoredAppSettingsSchema = z.strictObject({
   // COMPAT(uiFontSizeScale): replaced by the literal base size in v0.4, remove after 2027-08-17.
   uiFontSize: z.union([z.number(), z.string()]).optional(),
   codeFontSize: z.union([z.number(), z.string()]).optional(),
+  contentWidth: z.union([z.number(), z.string()]).optional(),
   syntaxTheme: z.string().refine(isSyntaxThemeId).optional(),
   workspaceTitleSource: z.enum(["title", "branch"]).optional(),
   sidebarWorkspaceTrailing: z.enum(["diff", "timestamp", "none"]).optional(),
@@ -171,6 +181,7 @@ export const DEFAULT_CLIENT_SETTINGS: AppSettings = {
   uiBaseFontSize: DEFAULT_UI_BASE_FONT_SIZE,
   contentFontSize: DEFAULT_CONTENT_FONT_SIZE,
   codeFontSize: DEFAULT_CODE_FONT_SIZE,
+  contentWidth: DEFAULT_CONTENT_WIDTH,
   syntaxTheme: "one",
   workspaceTitleSource: "title",
   sidebarWorkspaceTrailing: "diff",
@@ -454,6 +465,13 @@ function pickAppSettings(stored: StoredAppSettings): Partial<AppSettings> {
   if (codeFontSize !== null) {
     result.codeFontSize = codeFontSize;
   }
+  const contentWidth = parseClampedInteger(stored.contentWidth, {
+    min: MIN_CONTENT_WIDTH,
+    max: MAX_CONTENT_WIDTH_SETTING,
+  });
+  if (contentWidth !== null) {
+    result.contentWidth = contentWidth;
+  }
   Object.assign(result, pickBooleanAppSettings(stored));
   if (typeof stored.autoExpandReasoning === "boolean") {
     result.autoExpandReasoning = stored.autoExpandReasoning;
@@ -498,7 +516,12 @@ export function parseTerminalScrollbackLines(value: unknown): number | null {
   );
 }
 
-export function parseClampedFontSize(
+/**
+ * Parse a stored number-or-string preference into a clamped integer, or null when
+ * the value is absent or not numeric. Stored appearance numbers accept strings
+ * because the settings inputs commit raw text.
+ */
+export function parseClampedInteger(
   value: unknown,
   bounds: { min: number; max: number },
 ): number | null {
@@ -512,6 +535,13 @@ export function parseClampedFontSize(
     return null;
   }
   return Math.min(bounds.max, Math.max(bounds.min, Math.floor(numericValue)));
+}
+
+export function parseClampedFontSize(
+  value: unknown,
+  bounds: { min: number; max: number },
+): number | null {
+  return parseClampedInteger(value, bounds);
 }
 
 export function sanitizeFontFamily(value: unknown): string | null {

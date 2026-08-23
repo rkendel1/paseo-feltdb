@@ -234,7 +234,7 @@ export class PaseoDB {
   }
 
   /**
-   * Get a database-like interface with adapted collections.
+   * Get a database-like interface with adapted collections and F1/F2/F3 APIs.
    * Must call initialize() first.
    */
   getDatabase(): any {
@@ -242,7 +242,7 @@ export class PaseoDB {
       throw new Error("Database not initialized. Call initialize() first.");
     }
 
-    const db = this.db;
+    const db = this.db as any;
     return {
       collection: (name: string) => {
         if (!this.collections.has(name)) {
@@ -251,6 +251,18 @@ export class PaseoDB {
         }
         return this.collections.get(name);
       },
+      // F1: Atomic scoped sequence allocation
+      allocateSequence: (params: { scope: string; scopeId: string }): Promise<number> =>
+        db.allocateSequence(params),
+      // F2: Durable idempotent mutation
+      putIfAbsent: (key: string, value: string): Promise<{ inserted: boolean; value: string }> =>
+        db.putIfAbsent(key, value),
+      // F3: Compare-and-set with version detection
+      cas: (params: {
+        key: string;
+        expectedVersion: number;
+        value: string;
+      }): Promise<{ updated: boolean; currentVersion: number }> => db.cas(params),
     };
   }
 

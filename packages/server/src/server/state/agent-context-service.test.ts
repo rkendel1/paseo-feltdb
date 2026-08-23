@@ -44,6 +44,9 @@ describe("AgentContextService", () => {
       runs: { listByAgent: vi.fn() },
       conversations: { listByAgent: vi.fn() },
       messages: { listByConversation: vi.fn() },
+      observations: { listByProject: vi.fn().mockResolvedValue([]) },
+      decisions: { listByProject: vi.fn().mockResolvedValue([]) },
+      tasks: { listByProject: vi.fn().mockResolvedValue([]) },
     } as any;
 
     service = createAgentContextService({

@@ -1,26 +1,42 @@
 /**
  * ContextPolicy - Deterministic Context Selection & Relevance
  *
- * Phase 3.2: Transform complete AgentContext (3.1) into bounded context
- * by applying deterministic selection policy based on relevance signals.
+ * Phase 3.6: Transform complete AgentContext into bounded context by applying
+ * deterministic, request-aware selection policy.
  *
  * Key principles:
- * - Deterministic: Same state + same policy → same selection (no embeddings, no LLM judge)
+ * - Deterministic: Same input + same policy → same selection (no randomness)
+ * - Request-driven: Request text determines which entities are relevant
  * - Inspectable: Selection metadata explains WHY each item was included
- * - Precedence-based: Explicit hierarchy of relevance signals
- * - Conservative: Explicit relationships only (no text inference for tasks)
- * - Separated: Policy applied independently of provider injection (3.3)
+ * - Hierarchical: Explicit state outranks conversation
+ * - Bounded: Character/token budgets enforced
  *
- * Relevance precedence (highest to lowest):
- * 1. Current run
- * 2. Current task
- * 3. Same conversation
- * 4. Recent agent activity
- * 5. Repository/project activity
+ * Selection hierarchy:
+ * Tier 1 — Current work (current run, current task, current conversation)
+ * Tier 2 — Direct history (recent runs, observations from those runs)
+ * Tier 3 — Project knowledge (approved decisions, open/blocked tasks)
+ * Tier 4 — Broader context (older messages, observations, runs)
+ *
+ * Truth hierarchy:
+ * 1. Approved Decisions (explicit, user-approved state)
+ * 2. Verified Observations (from execution)
+ * 3. Recent Runs (execution history)
+ * 4. Conversation (model and user communication)
+ * 5. Inference (derived or inferred state)
  */
 
-import type { Message, Run } from "./feltdb/schema.js";
+import type {
+  Decision,
+  Message,
+  Observation,
+  Run,
+  Task,
+} from "./feltdb/schema.js";
 import type { AgentContext } from "./context-resolver.js";
+import {
+  RequestRelevanceScorer,
+  createRequestRelevanceScorer,
+} from "./request-relevance-scorer.js";
 
 // ============================================================================
 // Policy Configuration
@@ -41,21 +57,33 @@ export interface ContextPolicy {
 
   /**
    * Maximum number of decisions to include.
-   * Active decisions prioritized, then by recency.
+   * Approved decisions prioritized, then by recency.
    */
   maxDecisions: number;
 
   /**
    * Maximum number of observations to include.
-   * By relevance signal, then recency.
+   * By request relevance and recency.
    */
   maxObservations: number;
+
+  /**
+   * Maximum number of tasks to include.
+   * Open/in_progress tasks prioritized by request relevance.
+   */
+  maxTasks: number;
 
   /**
    * Maximum number of handoffs to include.
    * By recency and status.
    */
   maxHandoffs: number;
+
+  /**
+   * Maximum character budget for entire context.
+   * Enforced after selection, items trimmed if needed.
+   */
+  maxCharacters: number;
 }
 
 export const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
@@ -63,7 +91,9 @@ export const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
   maxMessages: 50,
   maxDecisions: 10,
   maxObservations: 20,
+  maxTasks: 10,
   maxHandoffs: 5,
+  maxCharacters: 50000,
 };
 
 // ============================================================================
@@ -95,6 +125,7 @@ export interface BoundedContextSelection {
   messages: ContextSelection;
   decisions: ContextSelection;
   observations: ContextSelection;
+  tasks: ContextSelection;
   handoffs: ContextSelection;
 }
 
@@ -120,68 +151,165 @@ interface RelevanceScore {
   signals: string[];
 }
 
+// Type alias for request signals
+type RequestSignals = ReturnType<RequestRelevanceScorer["extractSignals"]>;
+
 // ============================================================================
 // Context Policy Engine
 // ============================================================================
 
 export class ContextPolicyEngine {
   private policy: ContextPolicy;
+  private scorer: RequestRelevanceScorer;
 
   constructor(policy: ContextPolicy = DEFAULT_CONTEXT_POLICY) {
     this.policy = policy;
+    this.scorer = createRequestRelevanceScorer();
   }
 
   /**
    * Apply policy to AgentContext to produce BoundedAgentContext.
    *
    * Process:
-   * 1. Score all available items by relevance signals
-   * 2. Select top N by score (respecting policy limits)
-   * 3. Track selection metadata (why each item was included)
-   * 4. Return bounded context with selection
+   * 1. Extract request signals
+   * 2. Score all available items by relevance, authority, recency
+   * 3. Select top N by score (respecting policy limits)
+   * 4. Enforce character budget
+   * 5. Track selection metadata (why each item was included)
+   * 6. Return bounded context with selection
+   *
+   * Request is now the primary driver of context selection.
+   * For backward compatibility, currentRunId is second parameter.
    */
   apply(
     context: AgentContext,
-    _currentRunId?: string
+    currentRunId?: string,
+    request: string = ""
   ): BoundedAgentContext {
+    // Extract request signals
+    const signals = this.scorer.extractSignals(request);
+
     // Apply selection policies to each category
     const runSelection = this.selectRuns(
       context.recentRuns,
-      _currentRunId
+      currentRunId
     );
     const messageSelection = this.selectMessages(
       context.recentMessages,
       context.conversation?.id,
-      _currentRunId
+      currentRunId
     );
     const decisionSelection = this.selectDecisions(
-      context.project.id
+      context.projectDecisions,
+      signals
     );
     const observationSelection = this.selectObservations(
-      context.project.id
+      context.projectObservations,
+      signals
+    );
+    const taskSelection = this.selectTasks(
+      context.projectTasks,
+      signals
     );
     const handoffSelection = this.selectHandoffs(
       context.project.id,
       context.identity.id
     );
 
-    // Filter actual items based on selection
-    const boundedRuns = context.recentRuns.filter((r) =>
-      runSelection.selected.includes(r.id)
-    );
-    const boundedMessages = context.recentMessages.filter((m) =>
+    // Reorder to maintain relevance ranking (from selectRuns/selectMessages/etc.)
+    const reorderBySelection = <T extends { id: string }>(
+      items: T[],
+      selectedIds: string[]
+    ): T[] => {
+      return selectedIds
+        .map((id) => items.find((item) => item.id === id))
+        .filter((item) => item !== undefined) as T[];
+    };
+
+    // Filter and reorder by relevance (selection order reflects scoring)
+    let boundedRuns = reorderBySelection(context.recentRuns, runSelection.selected);
+    let boundedMessages = context.recentMessages.filter((m) =>
       messageSelection.selected.includes(m.id)
     );
+    let boundedDecisions = context.projectDecisions.filter((d) =>
+      decisionSelection.selected.includes(d.id)
+    );
+    let boundedObservations = context.projectObservations.filter((o) =>
+      observationSelection.selected.includes(o.id)
+    );
+    let boundedTasks = context.projectTasks.filter((t) =>
+      taskSelection.selected.includes(t.id)
+    );
+
+    // Enforce character budget by truncating low-relevance items
+    const enforceCharacterBudget = (): void => {
+      let totalChars = 0;
+
+      // Count characters in selected items
+      boundedRuns.forEach((r) => {
+        totalChars += (r.prompt?.length ?? 0) + r.id.length;
+      });
+      boundedMessages.forEach((m) => {
+        totalChars += (m.content?.length ?? 0) + m.id.length;
+      });
+      boundedDecisions.forEach((d) => {
+        totalChars += (d.content?.length ?? 0) + d.id.length;
+      });
+      boundedObservations.forEach((o) => {
+        totalChars += (o.content?.length ?? 0) + o.id.length;
+      });
+      boundedTasks.forEach((t) => {
+        totalChars +=
+          (t.title?.length ?? 0) + (t.description?.length ?? 0) + t.id.length;
+      });
+
+      // If over budget, start dropping low-priority items
+      if (totalChars > this.policy.maxCharacters) {
+        // Drop non-current runs first
+        boundedRuns = boundedRuns.filter((r) => r.id === context.recentRuns[0]?.id);
+
+        // Recalculate
+        totalChars = 0;
+        boundedRuns.forEach((r) => {
+          totalChars += (r.prompt?.length ?? 0) + r.id.length;
+        });
+        boundedMessages.forEach((m) => {
+          totalChars += (m.content?.length ?? 0) + m.id.length;
+        });
+        boundedDecisions.forEach((d) => {
+          totalChars += (d.content?.length ?? 0) + d.id.length;
+        });
+        boundedObservations.forEach((o) => {
+          totalChars += (o.content?.length ?? 0) + o.id.length;
+        });
+        boundedTasks.forEach((t) => {
+          totalChars +=
+            (t.title?.length ?? 0) + (t.description?.length ?? 0) + t.id.length;
+        });
+
+        // Still over? Drop messages and observations
+        if (totalChars > this.policy.maxCharacters) {
+          boundedMessages = boundedMessages.slice(0, Math.max(1, Math.floor(boundedMessages.length / 2)));
+          boundedObservations = boundedObservations.slice(0, Math.max(1, Math.floor(boundedObservations.length / 2)));
+        }
+      }
+    };
+
+    enforceCharacterBudget();
 
     return {
       ...context,
       recentRuns: boundedRuns,
       recentMessages: boundedMessages,
+      projectDecisions: boundedDecisions,
+      projectObservations: boundedObservations,
+      projectTasks: boundedTasks,
       selection: {
         runs: runSelection,
         messages: messageSelection,
         decisions: decisionSelection,
         observations: observationSelection,
+        tasks: taskSelection,
         handoffs: handoffSelection,
       },
     };
@@ -259,7 +387,21 @@ export class ContextPolicyEngine {
       };
     }
 
-    const scored: RelevanceScore[] = messages.map((msg) => {
+    // Hard filter: only include messages from the agent's conversation
+    // This prevents Agent B's private messages from leaking into Agent A's context
+    const conversationMessages = conversationId
+      ? messages.filter((m) => m.conversationId === conversationId)
+      : messages;
+
+    if (conversationMessages.length === 0) {
+      return {
+        selected: [],
+        total: messages.length,
+        reason: "No messages from current conversation",
+      };
+    }
+
+    const scored: RelevanceScore[] = conversationMessages.map((msg) => {
       const signals: string[] = [];
       let score = 0;
 
@@ -269,9 +411,9 @@ export class ContextPolicyEngine {
         signals.push("current-run");
       }
 
-      // Signal 2: From same conversation
+      // Signal 2: From same conversation (already filtered, so add smaller bonus)
       if (conversationId && msg.conversationId === conversationId) {
-        score += 100;
+        score += 50;
         signals.push("same-conversation");
       }
 
@@ -296,40 +438,203 @@ export class ContextPolicyEngine {
     return {
       selected,
       total: messages.length,
-      reason: `Selected ${selected.length}/${messages.length} messages by relevance (current-run, conversation, recency)`,
+      reason: `Selected ${selected.length}/${conversationMessages.length} messages by relevance (same-conversation, current-run, recency)`,
     };
   }
 
   /**
-   * Decision selection - stub for Phase 3.3.
-   * In 3.2, decisions are not yet populated from FeltDB.
-   * Returning empty for now; will integrate with Observation/Decision entities.
+   * Decision selection - Phase 3.6.
+   * Approved decisions are authoritative and score highest.
+   * Request relevance determines which decisions to include.
+   * This implements "explicit state outranks conversation".
    */
-  private selectDecisions(_projectId: string): ContextSelection {
+  private selectDecisions(
+    decisions: Decision[],
+    signals: RequestSignals
+  ): ContextSelection {
+    if (decisions.length === 0) {
+      return {
+        selected: [],
+        total: 0,
+        reason: "No decisions available",
+      };
+    }
+
+    interface DecisionScore {
+      itemId: string;
+      score: number;
+      signals: string[];
+    }
+
+    const scored: DecisionScore[] = decisions.map((dec) => {
+      const baseScore = this.scorer.scoreDecision(
+        dec.id,
+        dec.content,
+        dec.status,
+        signals
+      );
+
+      let totalScore = baseScore.score;
+      const allSignals = [...baseScore.reasons];
+
+      // Recency bonus
+      const recency = this.scorer.scoreRecency(dec.createdAt);
+      totalScore += recency;
+
+      if (recency > 0) {
+        allSignals.push(`recency:${recency}`);
+      }
+
+      return {
+        itemId: dec.id,
+        score: totalScore,
+        signals: allSignals,
+      };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+
+    const selected = scored
+      .slice(0, this.policy.maxDecisions)
+      .map((s) => s.itemId);
+
     return {
-      selected: [],
-      total: 0,
-      reason: "Decisions not yet integrated (Phase 3.3+)",
+      selected,
+      total: decisions.length,
+      reason: `Selected ${selected.length}/${decisions.length} decisions (approved decisions prioritized by request relevance)`,
     };
   }
 
   /**
-   * Observation selection - stub for Phase 3.4.
-   * In 3.2, observations are not yet populated from FeltDB.
-   * Returning empty for now; will integrate with Observation entities.
+   * Observation selection - Phase 3.6.
+   * Observations are verified facts from execution.
+   * Request relevance determines which observations matter for this request.
    */
-  private selectObservations(_projectId: string): ContextSelection {
+  private selectObservations(
+    observations: Observation[],
+    signals: RequestSignals
+  ): ContextSelection {
+    if (observations.length === 0) {
+      return {
+        selected: [],
+        total: 0,
+        reason: "No observations available",
+      };
+    }
+
+    interface ObservationScore {
+      itemId: string;
+      score: number;
+      signals: string[];
+    }
+
+    const scored: ObservationScore[] = observations.map((obs) => {
+      const baseScore = this.scorer.scoreObservation(
+        obs.id,
+        obs.content,
+        obs.type,
+        signals
+      );
+
+      let totalScore = baseScore.score;
+      const allSignals = [...baseScore.reasons];
+
+      // Recency bonus
+      const recency = this.scorer.scoreRecency(obs.createdAt);
+      totalScore += recency;
+
+      if (recency > 0) {
+        allSignals.push(`recency:${recency}`);
+      }
+
+      return {
+        itemId: obs.id,
+        score: totalScore,
+        signals: allSignals,
+      };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+
+    const selected = scored
+      .slice(0, this.policy.maxObservations)
+      .map((s) => s.itemId);
+
     return {
-      selected: [],
-      total: 0,
-      reason: "Observations not yet integrated (Phase 3.4+)",
+      selected,
+      total: observations.length,
+      reason: `Selected ${selected.length}/${observations.length} observations (by request relevance and recency)`,
     };
   }
 
   /**
-   * Handoff selection - stub for Phase 3.5.
-   * In 3.2, handoffs are not yet populated from FeltDB.
-   * Returning empty for now; will integrate with Handoff entities.
+   * Task selection - Phase 3.6.
+   * Open and in_progress tasks are prioritized.
+   * Request relevance determines which tasks matter for this request.
+   * This is Tier 1 context: current work.
+   */
+  private selectTasks(
+    tasks: Task[],
+    signals: RequestSignals
+  ): ContextSelection {
+    if (tasks.length === 0) {
+      return {
+        selected: [],
+        total: 0,
+        reason: "No tasks available",
+      };
+    }
+
+    interface TaskScore {
+      itemId: string;
+      score: number;
+      signals: string[];
+    }
+
+    const scored: TaskScore[] = tasks.map((task) => {
+      const baseScore = this.scorer.scoreTask(
+        task.id,
+        task.title,
+        task.description,
+        task.status,
+        signals
+      );
+
+      let totalScore = baseScore.score;
+      const allSignals = [...baseScore.reasons];
+
+      // Recency bonus
+      const recency = this.scorer.scoreRecency(task.updatedAt);
+      totalScore += recency;
+
+      if (recency > 0) {
+        allSignals.push(`recency:${recency}`);
+      }
+
+      return {
+        itemId: task.id,
+        score: totalScore,
+        signals: allSignals,
+      };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+
+    const selected = scored
+      .slice(0, this.policy.maxTasks)
+      .map((s) => s.itemId);
+
+    return {
+      selected,
+      total: tasks.length,
+      reason: `Selected ${selected.length}/${tasks.length} tasks (active tasks by request relevance)`,
+    };
+  }
+
+  /**
+   * Handoff selection - stub for future phases.
+   * Handoffs represent agent-to-agent transitions.
+   * To be integrated when multi-agent coordination is added.
    */
   private selectHandoffs(
     _projectId: string,
@@ -338,7 +643,7 @@ export class ContextPolicyEngine {
     return {
       selected: [],
       total: 0,
-      reason: "Handoffs not yet integrated (Phase 3.5+)",
+      reason: "Handoffs not yet integrated (future phases)",
     };
   }
 }

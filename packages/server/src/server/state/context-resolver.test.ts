@@ -66,6 +66,15 @@ describe("ContextResolver", () => {
       messages: {
         listByConversation: vi.fn(),
       },
+      observations: {
+        listByProject: vi.fn().mockResolvedValue([]),
+      },
+      decisions: {
+        listByProject: vi.fn().mockResolvedValue([]),
+      },
+      tasks: {
+        listByProject: vi.fn().mockResolvedValue([]),
+      },
     } as any;
   });
 

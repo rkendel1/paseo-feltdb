@@ -121,8 +121,8 @@ export class AgentContextService {
         runId,
       });
 
-      // 2. Apply policy
-      const boundedContext = this.policyEngine.apply(agentContext, runId);
+      // 2. Apply policy (request now drives context selection in 3.6)
+      const boundedContext = this.policyEngine.apply(agentContext, runId, request);
 
       // 3. Project to canonical format
       const projection = this.presenter.project(boundedContext);

@@ -92,6 +92,9 @@ describe("ContextPolicyEngine", () => {
         updatedAt: "2024-01-01T00:00:00Z",
       } as any,
       recentMessages: [],
+      projectObservations: [],
+      projectDecisions: [],
+      projectTasks: [],
       ...overrides,
     };
   }

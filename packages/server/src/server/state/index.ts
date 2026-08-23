@@ -125,6 +125,11 @@ export {
   DEFAULT_CONTEXT_POLICY,
 } from "./context-policy.js";
 export {
+  createRequestRelevanceScorer,
+  type RelevanceScore,
+  RequestRelevanceScorer,
+} from "./request-relevance-scorer.js";
+export {
   createContextPresenter,
   type ContextProjection,
   type AgentTurnContext,

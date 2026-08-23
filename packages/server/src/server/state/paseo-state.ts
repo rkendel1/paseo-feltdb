@@ -193,7 +193,10 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
 
     repositories: {
       async create(data) {
-        return repos.repositories.create(data);
+        return repos.repositories.create({
+          ...data,
+          defaultBranch: data.defaultBranch || "main",
+        });
       },
       async getById(id) {
         return repos.repositories.getById(id);
@@ -236,12 +239,12 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
 
     agents: {
       async create(data) {
-        console.error(`[PASEO-STATE] agents.create called with data:`, JSON.stringify({ ...data, status: "closed" }).substring(0, 200));
         const result = await repos.agents.create({
           ...data,
           status: "closed",
+          labels: {},
+          internal: false,
         });
-        console.error(`[PASEO-STATE] agents.create returned agent ${result.id}`);
         return result;
       },
       async getById(id) {

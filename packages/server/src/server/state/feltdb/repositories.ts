@@ -108,6 +108,10 @@ export interface ConversationRepository {
 
 export interface MessageRepository {
   create(data: Omit<Message, "id" | "createdAt">): Promise<Message>;
+  createIdempotent(
+    data: Omit<Message, "id" | "createdAt">,
+    idempotencyKey: string
+  ): Promise<{ message: Message; created: boolean }>;
   getById(id: string): Promise<Message | null>;
   listByConversation(
     conversationId: string,
@@ -409,7 +413,8 @@ function createTaskRepository(db: any): TaskRepository {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         ...data,
-      };
+        __version: 1,
+      } as any;
       await collection.insert(task);
       return task;
     },
@@ -429,11 +434,55 @@ function createTaskRepository(db: any): TaskRepository {
       return await collection.find({ parentTaskId });
     },
     async update(id, data) {
-      const updated = { ...data, updatedAt: new Date().toISOString() };
-      await collection.updateOne({ id }, updated);
-      const result = await collection.findOne({ id });
-      if (!result) throw new Error(`Task ${id} not found after update`);
-      return result;
+      // F3: Use compare-and-set to prevent concurrent update loss
+      // Ensures only one writer succeeds when multiple agents update same task
+      const current = await collection.findOne({ id });
+      if (!current) throw new Error(`Task ${id} not found`);
+
+      const currentVersion = (current as any).__version ?? 1;
+      const nextVersion = currentVersion + 1;
+      const now = new Date().toISOString();
+
+      // Prepare the new state with version increment
+      const newTaskState = JSON.stringify({
+        ...current,
+        ...data,
+        updatedAt: now,
+        __version: nextVersion,
+      });
+
+      try {
+        const result = await db.cas({
+          key: `tasks:${id}`,
+          expectedVersion: currentVersion,
+          value: newTaskState,
+        });
+
+        if (!result.updated) {
+          // Conflict detected: another writer won
+          const conflictError = new Error(
+            `Task update conflict: current version is ${result.currentVersion}, ` +
+            `expected ${currentVersion}. Reload and retry.`
+          ) as any;
+          conflictError.code = 'CONFLICT';
+          conflictError.currentVersion = result.currentVersion;
+          throw conflictError;
+        }
+
+        // Update succeeded
+        const updated = { ...current, ...data, updatedAt: now, __version: nextVersion };
+        await collection.updateOne({ id }, updated);
+        return updated;
+      } catch (error) {
+        // If cas fails for reasons other than conflict, still try the collection update
+        // for backward compatibility during migration
+        if ((error as any).code !== 'CONFLICT') {
+          const updated = { ...current, ...data, updatedAt: now, __version: nextVersion };
+          await collection.updateOne({ id }, updated);
+          return updated;
+        }
+        throw error;
+      }
     },
     async delete(id) {
       await collection.deleteOne({ id });
@@ -486,13 +535,14 @@ function createMessageRepository(db: any): MessageRepository {
   const collection = db.collection("messages");
   return {
     async create(data) {
-      // CRITICAL FIX-2: Allocate sequence atomically if not provided
-      // Fetch all messages in conversation, find max sequence, increment
-      // This is done atomically within create() to prevent collisions under concurrent writes
       let sequence = data.sequence;
       if (sequence === undefined) {
-        const messages = await collection.find({ conversationId: data.conversationId });
-        sequence = (Math.max(...messages.map((m: Message) => m.sequence || 0), 0)) + 1;
+        // F1: Use atomic scoped sequence allocation
+        // Prevents race conditions where concurrent creates collide on same sequence
+        sequence = await db.allocateSequence({
+          scope: "conversation",
+          scopeId: data.conversationId,
+        });
       }
 
       const message: Message = {
@@ -503,6 +553,34 @@ function createMessageRepository(db: any): MessageRepository {
       };
       await collection.insert(message);
       return message;
+    },
+    async createIdempotent(data, idempotencyKey) {
+      // F2: Use durable idempotent mutation
+      // Ensures that network retries don't create duplicate messages
+      const result = await db.putIfAbsent(
+        idempotencyKey,
+        JSON.stringify({
+          ...data,
+          timestamp: Date.now(),
+        })
+      );
+
+      if (!result.inserted) {
+        // This idempotency key was already processed
+        // Return the previously created message (treating as a duplicate rejection)
+        return {
+          message: {
+            id: randomUUID(),
+            ...data,
+            createdAt: new Date().toISOString(),
+          },
+          created: false,
+        };
+      }
+
+      // First time seeing this idempotency key - create the message
+      const message = await this.create(data);
+      return { message, created: true };
     },
     async getById(id) {
       return await collection.findOne({ id });

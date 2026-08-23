@@ -9,7 +9,7 @@
 
 import type { Logger } from "pino";
 import type { Repositories } from "./feltdb/repositories.js";
-import type { Project, Workspace, Agent, Task, Conversation, Message, Run } from "./feltdb/schema.js";
+import type { Project, Workspace, Agent, Task, Conversation, Message, Run, Observation } from "./feltdb/schema.js";
 
 export interface PaseoState {
   // Project operations
@@ -130,6 +130,17 @@ export interface PaseoState {
     listByAgent(agentId: string): Promise<Run[]>;
     listByTask(taskId: string): Promise<Run[]>;
     update(id: string, data: Partial<Run>): Promise<Run>;
+    delete(id: string): Promise<void>;
+  };
+
+  // Observation operations (Phase 3.5.2: Durable execution feedback)
+  observations: {
+    create(data: Omit<Observation, "id" | "createdAt" | "updatedAt">): Promise<Observation>;
+    getById(id: string): Promise<Observation | null>;
+    listByProject(projectId: string): Promise<Observation[]>;
+    listByTask(taskId: string): Promise<Observation[]>;
+    listByAgent(agentId: string): Promise<Observation[]>;
+    update(id: string, data: Partial<Observation>): Promise<Observation>;
     delete(id: string): Promise<void>;
   };
 
@@ -325,6 +336,30 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
       },
       async delete(id) {
         return repos.runs.delete(id);
+      },
+    },
+
+    observations: {
+      async create(data) {
+        return repos.observations.create(data);
+      },
+      async getById(id) {
+        return repos.observations.getById(id);
+      },
+      async listByProject(projectId) {
+        return repos.observations.listByProject(projectId);
+      },
+      async listByTask(taskId) {
+        return repos.observations.listByTask(taskId);
+      },
+      async listByAgent(agentId) {
+        return repos.observations.listByAgent(agentId);
+      },
+      async update(id, data) {
+        return repos.observations.update(id, data);
+      },
+      async delete(id) {
+        return repos.observations.delete(id);
       },
     },
 

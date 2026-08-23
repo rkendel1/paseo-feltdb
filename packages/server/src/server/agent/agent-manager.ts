@@ -32,10 +32,7 @@ import type {
 } from "./agent-sdk-types.js";
 import type { AgentStorage } from "./agent-storage.js";
 import { AGENT_PROVIDER_IDS } from "./provider-manifest.js";
-import type {
-  ExecutionFeedbackNormalizer,
-  ExecutionFeedbackEvent,
-} from "../state/index.js";
+import type { ExecutionFeedbackNormalizer } from "../state/index.js";
 
 export { AGENT_LIFECYCLE_STATUSES, type AgentLifecycleStatus };
 
@@ -1383,7 +1380,7 @@ export class AgentManager {
             collectedEvents.push(event);
             yield event;
             if (isTurnTerminalEvent(event)) {
-              terminalEventType = event.type as typeof terminalEventType;
+              terminalEventType = event.type as "turn_completed" | "turn_failed" | "turn_canceled";
               terminalEventData = event;
               done = true;
               break;

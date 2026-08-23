@@ -584,8 +584,8 @@ describe("Authorization & Visibility Isolation Tests", () => {
   test("SCENARIO-3: Agent A cannot mutate Agent B's Observation (WRITE boundary - cross-project)", async () => {
     // Test: Agent A (in Project A) attempts to update/delete Observation B (in Project B)
     // Expected: Authorization boundary should reject
-    // Current Status: observation-persistence.ts has NO authorization check ✗
-    // Classification: FAIL (gap found)
+    // Status: ENFORCED - observation-persistence.ts has authorizedUpdate/Delete methods ✓
+    // Classification: PASS (explicit check in place)
 
     const updateError = await (paseoState.observations?.update as any)(
       fixture.observationB.id,

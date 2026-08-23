@@ -1,5 +1,5 @@
 /**
- * ObservationPersistence - Durable Execution Observations
+ * ObservationPersistence - Durable Execution Observations + Authorization
  *
  * Phase 3.5.2: Convert ExecutionFeedbackEvent into durable FeltDB Observation
  * entities. Routes different event types to appropriate persistence paths:
@@ -8,11 +8,16 @@
  * - timeline.message → Message (delegated to message persistence)
  * - run.terminal → Run (already handled)
  *
+ * Phase 2 Addition: Authorization checks for observation mutations
+ * - Agent can only update/delete observations in their project
+ * - Validates agent.workspace.projectId === observation.projectId
+ *
  * Design principles:
  * - Complete graph association (resolve Project/Repo/Workspace/Agent from Run)
  * - Safe deduplication (stable keys, not timestamps)
  * - Visible failure handling (don't silently fail)
  * - Non-blocking (enqueue, don't wait for persistence)
+ * - Authorization at domain layer (not FeltDB, not provider)
  */
 
 import { createHash } from "node:crypto";
@@ -22,7 +27,7 @@ import type {
   ExecutionFeedbackEvent,
 } from "./execution-feedback-normalizer.js";
 import type { PaseoState } from "./paseo-state.js";
-import type { Run } from "./feltdb/schema.js";
+import type { Run, Observation } from "./feltdb/schema.js";
 
 export interface ObservationPersistenceOptions {
   paseoState: PaseoState;
@@ -239,6 +244,126 @@ export class ObservationPersistence {
     if (index >= 0) {
       this.failureQueue.splice(index, 1);
     }
+  }
+
+  /**
+   * Update observation with authorization check.
+   *
+   * Authorization: Agent must be in the same project as the observation.
+   * This prevents cross-project mutation (SCENARIO-3 from audit).
+   *
+   * @throws Error if agent is not authorized to modify observation
+   */
+  async authorizedUpdate(
+    observationId: string,
+    agentId: string,
+    data: Partial<Observation>,
+  ): Promise<Observation> {
+    // 1. Fetch the observation
+    const observation = await this.paseoState.observations.getById(observationId);
+    if (!observation) {
+      this.logger.warn({ observationId, agentId }, "Cannot update observation: Observation not found");
+      throw new Error(`Observation ${observationId} not found`);
+    }
+
+    // 2. Fetch agent to validate project membership
+    const agent = await this.paseoState.repos.agents.getById(agentId);
+    if (!agent) {
+      this.logger.warn({ agentId, observationId }, "Cannot update observation: Agent not found");
+      throw new Error(`Agent ${agentId} not found`);
+    }
+
+    // 3. Fetch workspace to establish project authority
+    const workspace = await this.paseoState.repos.workspaces.getById(agent.workspaceId);
+    if (!workspace) {
+      this.logger.warn(
+        { agentId, workspaceId: agent.workspaceId, observationId },
+        "Cannot update observation: Workspace not found",
+      );
+      throw new Error(`Workspace ${agent.workspaceId} not found`);
+    }
+
+    // 4. Authorization check: Agent's project must match observation's project
+    if (workspace.projectId !== observation.projectId) {
+      this.logger.warn(
+        {
+          agentId,
+          agentProject: workspace.projectId,
+          observationProject: observation.projectId,
+          observationId,
+        },
+        "Cannot update observation: Agent not authorized (different project)",
+      );
+      throw new Error(
+        `Agent ${agentId} cannot update observation in project ${observation.projectId} ` +
+          `(agent is in project ${workspace.projectId})`,
+      );
+    }
+
+    // 5. Perform authorized update
+    const updated = await this.paseoState.observations.update(observationId, data);
+    this.logger.debug(
+      { observationId, agentId, projectId: observation.projectId },
+      "Observation updated (authorized)",
+    );
+    return updated;
+  }
+
+  /**
+   * Delete observation with authorization check.
+   *
+   * Authorization: Agent must be in the same project as the observation.
+   *
+   * @throws Error if agent is not authorized to delete observation
+   */
+  async authorizedDelete(observationId: string, agentId: string): Promise<void> {
+    // 1. Fetch the observation
+    const observation = await this.paseoState.observations.getById(observationId);
+    if (!observation) {
+      this.logger.warn({ observationId, agentId }, "Cannot delete observation: Observation not found");
+      throw new Error(`Observation ${observationId} not found`);
+    }
+
+    // 2. Fetch agent to validate project membership
+    const agent = await this.paseoState.repos.agents.getById(agentId);
+    if (!agent) {
+      this.logger.warn({ agentId, observationId }, "Cannot delete observation: Agent not found");
+      throw new Error(`Agent ${agentId} not found`);
+    }
+
+    // 3. Fetch workspace to establish project authority
+    const workspace = await this.paseoState.repos.workspaces.getById(agent.workspaceId);
+    if (!workspace) {
+      this.logger.warn(
+        { agentId, workspaceId: agent.workspaceId, observationId },
+        "Cannot delete observation: Workspace not found",
+      );
+      throw new Error(`Workspace ${agent.workspaceId} not found`);
+    }
+
+    // 4. Authorization check: Agent's project must match observation's project
+    if (workspace.projectId !== observation.projectId) {
+      this.logger.warn(
+        {
+          agentId,
+          agentProject: workspace.projectId,
+          observationProject: observation.projectId,
+          observationId,
+        },
+        "Cannot delete observation: Agent not authorized (different project)",
+      );
+      throw new Error(
+        `Agent ${agentId} cannot delete observation in project ${observation.projectId} ` +
+          `(agent is in project ${workspace.projectId})`,
+      );
+    }
+
+    // 5. Perform authorized delete
+    await this.paseoState.observations.delete(observationId);
+    this.logger.debug(
+      { observationId, agentId, projectId: observation.projectId },
+      "Observation deleted (authorized)",
+    );
   }
 }
 

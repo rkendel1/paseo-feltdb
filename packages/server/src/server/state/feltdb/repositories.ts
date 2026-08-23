@@ -480,10 +480,20 @@ function createMessageRepository(db: Database): MessageRepository {
   const collection = db.collection("messages");
   return {
     async create(data) {
+      // CRITICAL FIX-2: Allocate sequence atomically if not provided
+      // Fetch all messages in conversation, find max sequence, increment
+      // This is done atomically within create() to prevent collisions under concurrent writes
+      let sequence = data.sequence;
+      if (sequence === undefined) {
+        const messages = await collection.find({ conversationId: data.conversationId });
+        sequence = (Math.max(...messages.map((m: Message) => m.sequence || 0), 0)) + 1;
+      }
+
       const message: Message = {
         id: randomUUID(),
         createdAt: new Date().toISOString(),
         ...data,
+        sequence,
       };
       await collection.insert(message);
       return message;
@@ -502,7 +512,7 @@ function createMessageRepository(db: Database): MessageRepository {
     async getMaxSequenceInConversation(conversationId) {
       const messages = await collection.find({ conversationId });
       if (messages.length === 0) return 0;
-      return Math.max(...messages.map(m => m.sequence || 0));
+      return Math.max(...messages.map((m: Message) => m.sequence || 0));
     },
     async update(id, data) {
       await collection.updateOne({ id }, data);

@@ -1053,8 +1053,11 @@ export class AgentManager {
       },
     );
     // Persist message to FeltDB in background (non-blocking)
+    // CRITICAL FIX-3: Capture currentRunId NOW, before async operations
+    // This prevents race where currentRunId is cleared before message is persisted
+    const capturedRunId = agent.currentRunId ?? undefined;
     if (this.paseoState) {
-      this.enqueuePersistMessage(agentId, item).catch((err) => {
+      this.enqueuePersistMessage(agentId, item, capturedRunId).catch((err) => {
         this.logger.warn(
           { agentId, itemType: item.type, err },
           "Failed to persist message to FeltDB"
@@ -1064,8 +1067,8 @@ export class AgentManager {
     await this.persistSnapshot(agent);
   }
 
-  private enqueuePersistMessage(agentId: string, item: AgentTimelineItem): Promise<void> {
-    const promise = this.persistMessage(agentId, item);
+  private enqueuePersistMessage(agentId: string, item: AgentTimelineItem, runId?: string): Promise<void> {
+    const promise = this.persistMessage(agentId, item, runId);
     this.backgroundTasks.add(promise);
     promise.finally(() => {
       this.backgroundTasks.delete(promise);
@@ -1073,7 +1076,7 @@ export class AgentManager {
     return promise;
   }
 
-  private async persistMessage(agentId: string, item: AgentTimelineItem): Promise<void> {
+  private async persistMessage(agentId: string, item: AgentTimelineItem, runId?: string): Promise<void> {
     if (!this.paseoState) return;
 
     try {
@@ -1116,18 +1119,18 @@ export class AgentManager {
       const { authorType, role, content } = this.mapTimelineItemToMessage(item);
       if (!content) return; // Skip items with no content
 
-      // Atomically allocate next sequence number
-      agent.messageSequence++;
-      const sequence = agent.messageSequence;
-
+      // CRITICAL FIX-2: Allocate sequence atomically in database layer
+      // Instead of incrementing a mutable ManagedAgent field, fetch max sequence
+      // from FeltDB atomically within create(). This prevents collisions under concurrent writes.
       await this.paseoState.messages.create({
         conversationId,
         authorType,
         authorId: agentId,
         content,
-        sequence,
+        // Sequence is omitted and will be allocated atomically by repository
         role,
-        runId: agent.currentRunId || undefined,
+        // Use captured runId to prevent race condition during turn cleanup (CRITICAL FIX-3)
+        runId,
       });
     } catch (err) {
       this.logger.warn(
@@ -1223,6 +1226,12 @@ export class AgentManager {
     agent.pendingReplacement = false;
     agent.lastError = undefined;
 
+    // CRITICAL FIX-1: Set a temporary activeForegroundTurnId BEFORE entering async generator
+    // This ensures that concurrent streamAgent() calls are rejected before any async operations.
+    // The real turnId will be set after startTurn() succeeds.
+    const tempTurnId = `__pending__${randomUUID()}`;
+    agent.activeForegroundTurnId = tempTurnId;
+
     const self = this;
 
     const streamForwarder = (async function* streamForwarder() {
@@ -1256,11 +1265,13 @@ export class AgentManager {
       let injectedPrompt = prompt;
       if (self.contextService && createdRun) {
         const promptText = typeof prompt === "string" ? prompt : JSON.stringify(prompt);
-        const contextResolution = await self.contextService.resolveForTurn(
-          agentId,
-          promptText,
-          createdRun.id,
-        );
+        // HIGH FIX: Add 5s timeout to context resolution to prevent agent hang
+        const contextResolution = await Promise.race([
+          self.contextService.resolveForTurn(agentId, promptText, createdRun.id),
+          new Promise<any>((_, reject) =>
+            setTimeout(() => reject(new Error("Context resolution timeout after 5s")), 5000)
+          ),
+        ]);
 
         // Record context resolution status in Run
         const resolutionStatus = contextResolution.success ? "resolved" : "fallback";

@@ -236,10 +236,13 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
 
     agents: {
       async create(data) {
-        return repos.agents.create({
+        console.error(`[PASEO-STATE] agents.create called with data:`, JSON.stringify({ ...data, status: "closed" }).substring(0, 200));
+        const result = await repos.agents.create({
           ...data,
           status: "closed",
         });
+        console.error(`[PASEO-STATE] agents.create returned agent ${result.id}`);
+        return result;
       },
       async getById(id) {
         return repos.agents.getById(id);

@@ -1076,6 +1076,81 @@ export class AgentManager {
     return promise;
   }
 
+  private async persistAgentToFeltDB(agent: ManagedAgent, config: AgentSessionConfig): Promise<void> {
+    if (!this.paseoState) {
+      this.logger.debug({ agentId: agent.id }, "persistAgentToFeltDB: paseoState not available, skipping");
+      return;
+    }
+
+    try {
+      this.logger.debug({ agentId: agent.id, cwd: config.cwd }, "persistAgentToFeltDB: starting");
+
+      // Ensure workspace exists for this cwd
+      let workspace = await this.paseoState.workspaces.getByCwd(config.cwd);
+      if (!workspace) {
+        this.logger.debug({ cwd: config.cwd }, "persistAgentToFeltDB: workspace not found, creating");
+        // Need to get or create project first
+        const projects = await this.paseoState.projects.listAll();
+        let project = projects.length > 0 ? projects[0] : null;
+        if (!project) {
+          this.logger.debug("persistAgentToFeltDB: no project found, creating default");
+          project = await this.paseoState.projects.create({
+            name: "Default Project",
+            rootPath: config.cwd,
+            kind: "non_git",
+          });
+        }
+
+        // Generate stable workspace ID based on cwd so it's the same across restarts
+        const { createHash } = await import("node:crypto");
+        const workspaceId = createHash("sha256").update(config.cwd).digest("hex").substring(0, 8);
+
+        workspace = await (this.paseoState.workspaces.create as any)({
+          id: `ws_${workspaceId}`,
+          projectId: project.id,
+          name: `Workspace for ${config.cwd}`,
+          cwd: config.cwd,
+          kind: "directory",
+        });
+        this.logger.debug({ agentId: agent.id, workspaceId: workspace.id }, "persistAgentToFeltDB: workspace created");
+      }
+
+      // Check if agent already exists in FeltDB
+      console.error(`[PERSIST-AGENT] Checking if agent ${agent.id} already exists in FeltDB`);
+      const existingAgent = await this.paseoState.agents.getById(agent.id);
+      if (existingAgent) {
+        this.logger.debug({ agentId: agent.id }, "persistAgentToFeltDB: agent already exists in FeltDB");
+        console.error(`[PERSIST-AGENT] Agent ${agent.id} already exists, skipping create`);
+        return;
+      }
+
+      // Create agent in FeltDB - IMPORTANT: pass the agent ID so it matches the in-memory agent
+      console.error(`[PERSIST-AGENT] Creating agent ${agent.id} in FeltDB with workspaceId ${workspace.id}`);
+      await (this.paseoState.agents.create as any)({
+        id: agent.id,
+        workspaceId: workspace.id,
+        provider: config.provider,
+        model: config.model || undefined,
+        config: {
+          title: config.title || undefined,
+          modeId: config.modeId || undefined,
+          thinkingOptionId: config.thinkingOptionId || undefined,
+          systemPrompt: config.systemPrompt || undefined,
+          mcpServers: config.mcpServers || undefined,
+          extra: config.extra || undefined,
+        },
+      });
+
+      console.error(`[PERSIST-AGENT] Agent ${agent.id} created successfully in FeltDB`);
+      this.logger.debug({ agentId: agent.id, workspaceId: workspace.id }, "persistAgentToFeltDB: agent created in FeltDB");
+    } catch (err) {
+      this.logger.warn(
+        { agentId: agent.id, err },
+        "Error persisting agent to FeltDB"
+      );
+    }
+  }
+
   private async persistMessage(agentId: string, item: AgentTimelineItem, runId?: string): Promise<void> {
     if (!this.paseoState) {
       this.logger.debug({ agentId }, "persistMessage: paseoState not available, skipping");
@@ -2122,6 +2197,11 @@ export class AgentManager {
     managed.lifecycle = "idle";
     await this.persistSnapshot(managed);
     this.emitState(managed);
+
+    // CRITICAL FIX-1: Persist agent to FeltDB so it survives restart
+    // Timeline items can't be persisted to FeltDB without the agent existing there
+    await this.persistAgentToFeltDB(managed, config);
+
     this.subscribeToSession(managed);
     return { ...managed };
   }

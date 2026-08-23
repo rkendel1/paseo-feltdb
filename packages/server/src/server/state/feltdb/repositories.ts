@@ -325,7 +325,7 @@ function createWorkspaceRepository(db: any): WorkspaceRepository {
   return {
     async create(data) {
       const workspace: Workspace = {
-        id: randomUUID(),
+        id: (data as any).id || randomUUID(),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         ...data,
@@ -363,12 +363,19 @@ function createAgentRepository(db: any): AgentRepository {
   return {
     async create(data) {
       const agent: Agent = {
-        id: randomUUID(),
+        id: (data as any).id || randomUUID(),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         ...data,
       };
+      console.error(`[AGENT-REPO] Inserting agent ${agent.id} into FeltDB agents collection`);
       await collection.insert(agent);
+      console.error(`[AGENT-REPO] Agent ${agent.id} inserted successfully`);
+
+      // Verify the agent was actually inserted
+      const verify = await collection.findOne({ id: agent.id });
+      console.error(`[AGENT-REPO] Verification: agent ${agent.id} found in DB = ${!!verify}`);
+
       return agent;
     },
     async getById(id) {

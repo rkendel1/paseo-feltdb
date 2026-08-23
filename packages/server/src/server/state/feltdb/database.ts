@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import path from "node:path";
 import { mkdirSync } from "node:fs";
-import { createFeltDB, type StateFirstDB } from "@feltdb/core";
+import { FileJsDb, open, type StateFirstDB } from "@feltdb/core";
 
 export interface FeltDBConfig {
   dataPath: string;
@@ -82,16 +82,15 @@ export class PaseoDB {
 
   private async doInitialize(): Promise<void> {
     try {
-      // Ensure data directory exists (reserved for future persistent storage)
+      // Ensure data directory exists for file-based persistence
       mkdirSync(this.dataPath, { recursive: true });
-      this.logger.info({ dataPath: this.dataPath }, "Initializing FeltDB");
+      this.logger.info({ dataPath: this.dataPath }, "Initializing FeltDB with file-based persistence");
 
-      // Initialize FeltDB in memory mode
-      // TODO: Implement file-based persistence when @feltdb/core supports it
-      this.db = createFeltDB({
-        namespace: "paseo",
-        memory: true,
-      });
+      // Initialize FeltDB with file-based persistence via FileJsDb
+      // This ensures all state (agents, tasks, conversations, messages) survives daemon restarts
+      const dbPath = path.join(this.dataPath, "paseo.db");
+      const fileDb = new FileJsDb(dbPath);
+      this.db = await open(fileDb);
 
       // Define collections with schemas
       await this.setupCollections();
@@ -100,7 +99,7 @@ export class PaseoDB {
       await this.setupIndexes();
 
       this.initialized = true;
-      this.logger.info("FeltDB initialized successfully");
+      this.logger.info("FeltDB initialized successfully with file-based persistence");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error({ err: error }, `Failed to initialize FeltDB: ${message}`);

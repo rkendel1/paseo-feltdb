@@ -158,3 +158,9 @@ export {
   type RecordDecisionInput,
   DecisionPersistence,
 } from "./decision-persistence.js";
+export {
+  createTaskPersistence,
+  type TaskPersistenceOptions,
+  type UpdateTaskInput,
+  TaskPersistence,
+} from "./task-persistence.js";

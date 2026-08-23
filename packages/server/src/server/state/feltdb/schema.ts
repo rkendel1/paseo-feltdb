@@ -132,6 +132,8 @@ export const TaskSchema = z.object({
   createdBy: z.string().optional(), // user ID or agent ID
   assignedTo: z.string().optional(),
   parentTaskId: z.string().optional(),
+  lastUpdatedRunId: z.string().optional(), // Provenance: which run caused last update
+  lastUpdatedBy: z.string().optional(), // Agent or user ID who last updated
   metadata: z.record(z.any()).optional(),
 });
 

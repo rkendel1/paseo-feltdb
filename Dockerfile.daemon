@@ -1,0 +1,40 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache python3 make g++ bash
+
+# Copy workspace files
+COPY package.json package-lock.json ./
+COPY tsconfig.base.json tsconfig.json ./
+COPY packages/server ./packages/server
+COPY packages/highlight ./packages/highlight
+COPY packages/relay ./packages/relay
+
+# Install dependencies
+RUN npm ci
+
+# Build server and dependencies
+RUN npm run build --workspace=@getpaseo/server
+
+# Create data directories
+RUN mkdir -p /data/paseo /data/feltdb
+
+# FeltDB and Paseo data volumes
+VOLUME ["/data/paseo", "/data/feltdb"]
+
+# Set environment variables
+ENV NODE_ENV=production
+ENV PASEO_HOME=/data/paseo
+ENV FELTDB_PATH=/data/feltdb
+
+# Expose daemon port
+EXPOSE 6767
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "const http = require('http'); http.get('http://localhost:6767/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1));" || exit 1
+
+# Start daemon
+CMD ["npm", "--prefix", "packages/server", "run", "start"]

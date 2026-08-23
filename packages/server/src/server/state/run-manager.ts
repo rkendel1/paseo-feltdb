@@ -6,6 +6,12 @@
  * - Update Run status during execution
  * - Persist final result/error/timing on completion
  * - Query project/workspace context from durable state
+ *
+ * Phase 2 Addition: Authorization checks for Run creation
+ * - Agent can only create Runs in their own project
+ * - Project is derived from agent → workspace → project chain
+ * - Prevents cross-project Run creation (SCENARIO-6 from audit)
+ * - Preserves Run as provenance bridge for observations/decisions
  */
 
 import type { Logger } from "pino";
@@ -270,5 +276,88 @@ export class RunManager {
       result.set(agentId, tracked.run);
     }
     return result;
+  }
+
+  /**
+   * Create a Run with authorization check.
+   *
+   * Validates that the run's project is derived from agent's workspace,
+   * not from caller-supplied input. This ensures run.projectId is always
+   * consistent with the agent's actual authorization context.
+   *
+   * Authorization flow:
+   * 1. Fetch agent
+   * 2. Fetch workspace for that agent
+   * 3. Derive projectId from workspace.projectId
+   * 4. Create run with derived projectId
+   *
+   * This prevents cross-project run creation (SCENARIO-6 from audit).
+   *
+   * @throws Error if agent is not authorized to create run in supplied project
+   */
+  async authorizedCreateRun(
+    agentId: string,
+    requestedProjectId: string,
+    provider: AgentProvider,
+    prompt: string,
+  ): Promise<Run> {
+    // 1. Fetch the agent
+    const agent = await this.paseoState.repos.agents.getById(agentId);
+    if (!agent) {
+      this.logger.warn({ agentId, requestedProjectId }, "Cannot create run: Agent not found");
+      throw new Error(`Agent ${agentId} not found`);
+    }
+
+    // 2. Fetch the agent's workspace
+    const workspace = await this.paseoState.repos.workspaces.getById(agent.workspaceId);
+    if (!workspace) {
+      this.logger.warn(
+        { agentId, workspaceId: agent.workspaceId, requestedProjectId },
+        "Cannot create run: Workspace not found",
+      );
+      throw new Error(`Workspace ${agent.workspaceId} not found`);
+    }
+
+    // 3. Derive the agent's actual project (authority comes from workspace)
+    const derivedProjectId = workspace.projectId;
+
+    // 4. Authorization check: requested project must match derived project
+    if (derivedProjectId !== requestedProjectId) {
+      this.logger.warn(
+        {
+          agentId,
+          requestedProjectId,
+          derivedProjectId,
+          workspaceId: agent.workspaceId,
+        },
+        "Cannot create run: Agent not authorized for requested project",
+      );
+      throw new Error(
+        `Agent ${agentId} cannot create run in project ${requestedProjectId} ` +
+          `(agent is in project ${derivedProjectId})`,
+      );
+    }
+
+    // 5. Perform authorized create with derived projectId
+    const run = await this.paseoState.runs.create({
+      projectId: derivedProjectId,
+      workspaceId: workspace.id,
+      agentId,
+      provider,
+      prompt,
+    });
+
+    // Track active run for completion handling
+    this.activeRuns.set(agentId, {
+      run,
+      startedAt: Date.now(),
+    });
+
+    this.logger.debug(
+      { agentId, runId: run.id, projectId: derivedProjectId },
+      "Run created (authorized)",
+    );
+
+    return run;
   }
 }

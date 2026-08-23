@@ -2,21 +2,6 @@ import type { Logger } from "pino";
 import path from "node:path";
 import { mkdirSync } from "node:fs";
 import { createFeltDB, type StateFirstDB } from "@feltdb/core";
-import {
-  ProjectSchema,
-  RepositorySchema,
-  WorkspaceSchema,
-  AgentSchema,
-  TaskSchema,
-  ConversationSchema,
-  MessageSchema,
-  RunSchema,
-  ObservationSchema,
-  DecisionSchema,
-  HandoffSchema,
-  RelationshipSchema,
-  MigrationMarkerSchema,
-} from "./schema.js";
 
 export interface FeltDBConfig {
   dataPath: string;
@@ -56,11 +41,11 @@ class CollectionAdapter<T extends { id: string }> {
     }
   }
 
-  createIndex(field: string, options?: { unique?: boolean }): void {
-    this.collection.createIndex({ field, ...options });
+  createIndex(field: string): void {
+    this.collection.createIndex({ field });
   }
 
-  async list(options?: { limit?: number }): Promise<T[]> {
+  async list(): Promise<T[]> {
     return await this.collection.find({});
   }
 }
@@ -238,10 +223,10 @@ export class PaseoDB {
       { collection: "migration_markers", field: "status" },
     ];
 
-    for (const { collection, field, unique } of indexes) {
+    for (const { collection, field } of indexes) {
       try {
-        this.db.collection(collection).createIndex(field, { unique });
-        this.logger.debug({ collection, field, unique }, "Index created");
+        this.db.collection(collection).createIndex({ field } as any);
+        this.logger.debug({ collection, field }, "Index created");
       } catch (error) {
         this.logger.debug({ collection, field, err: error }, "Index may already exist");
       }

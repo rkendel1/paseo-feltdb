@@ -1263,62 +1263,78 @@ export class AgentManager {
 
       // Resolve durable context for this turn (after Run is created, before startTurn)
       let injectedPrompt = prompt;
-      if (self.contextService && createdRun) {
-        const promptText = typeof prompt === "string" ? prompt : JSON.stringify(prompt);
-        // HIGH FIX: Add 5s timeout to context resolution to prevent agent hang
-        const contextResolution = await Promise.race([
-          self.contextService.resolveForTurn(agentId, promptText, createdRun.id),
-          new Promise<any>((_, reject) =>
-            setTimeout(() => reject(new Error("Context resolution timeout after 5s")), 5000)
-          ),
-        ]);
+      try {
+        if (self.contextService && createdRun) {
+          const promptText = typeof prompt === "string" ? prompt : JSON.stringify(prompt);
+          // HIGH FIX: Add 5s timeout to context resolution to prevent agent hang
+          const contextResolution = await Promise.race([
+            self.contextService.resolveForTurn(agentId, promptText, createdRun.id),
+            new Promise<any>((_, reject) =>
+              setTimeout(() => reject(new Error("Context resolution timeout after 5s")), 5000)
+            ),
+          ]);
 
-        // Record context resolution status in Run
-        const resolutionStatus = contextResolution.success ? "resolved" : "fallback";
-        const resolutionPolicy = self.contextService.getFailurePolicy();
-        const policyName =
-          resolutionPolicy.toString() === "block" ? "block" : "fallback";
+          // Record context resolution status in Run
+          const resolutionStatus = contextResolution.success ? "resolved" : "fallback";
+          const resolutionPolicy = self.contextService.getFailurePolicy();
+          const policyName =
+            resolutionPolicy.toString() === "block" ? "block" : "fallback";
 
-        if (self.runManager) {
-          await self.runManager.recordContextResolution(agentId, {
-            status: resolutionStatus,
-            policy: policyName,
-            summary: contextResolution.success
-              ? contextResolution.turnContext?.projection?.summary?.project
-              : contextResolution.error,
-          });
-        }
-
-        // Handle resolution based on policy
-        if (!contextResolution.success && policyName === "block") {
-          const errorMsg = `Context resolution failed (BLOCK policy): ${contextResolution.error}`;
-          self.logger.error({ agentId, reason: contextResolution.reason }, errorMsg);
-          self.handleStreamEvent(agent, {
-            type: "turn_failed",
-            provider: agent.provider,
-            error: errorMsg,
-          });
-          self.finalizeForegroundTurn(agent);
           if (self.runManager) {
-            await self.runManager.markRunFailed(agentId, errorMsg);
+            await self.runManager.recordContextResolution(agentId, {
+              status: resolutionStatus,
+              policy: policyName,
+              summary: contextResolution.success
+                ? contextResolution.turnContext?.projection?.summary?.project
+                : contextResolution.error,
+            });
           }
-          throw new Error(errorMsg);
-        }
 
-        // Inject context into prompt if resolution succeeded
-        if (contextResolution.success && contextResolution.turnContext?.projection?.text) {
-          const contextText = contextResolution.turnContext.projection.text;
-          if (typeof prompt === "string") {
-            injectedPrompt = `${contextText}\n\n---\n\n${prompt}`;
-          } else {
-            // For structured prompts, we'd need provider-specific adapters
-            // For now, just use the original prompt
-            self.logger.debug(
-              { agentId },
-              "Context injection: structured prompts not yet supported, using original prompt",
-            );
+          // Handle resolution based on policy
+          if (!contextResolution.success && policyName === "block") {
+            const errorMsg = `Context resolution failed (BLOCK policy): ${contextResolution.error}`;
+            self.logger.error({ agentId, reason: contextResolution.reason }, errorMsg);
+            self.handleStreamEvent(agent, {
+              type: "turn_failed",
+              provider: agent.provider,
+              error: errorMsg,
+            });
+            self.finalizeForegroundTurn(agent);
+            if (self.runManager) {
+              await self.runManager.markRunFailed(agentId, errorMsg);
+            }
+            throw new Error(errorMsg);
+          }
+
+          // Inject context into prompt if resolution succeeded
+          if (contextResolution.success && contextResolution.turnContext?.projection?.text) {
+            const contextText = contextResolution.turnContext.projection.text;
+            if (typeof prompt === "string") {
+              injectedPrompt = `${contextText}\n\n---\n\n${prompt}`;
+            } else {
+              // For structured prompts, we'd need provider-specific adapters
+              // For now, just use the original prompt
+              self.logger.debug(
+                { agentId },
+                "Context injection: structured prompts not yet supported, using original prompt",
+              );
+            }
           }
         }
+      } catch (error) {
+        // Handle any errors during context resolution (including timeout)
+        const errorMsg = error instanceof Error ? error.message : "Context resolution failed";
+        self.logger.error({ agentId, err: error }, errorMsg);
+        self.handleStreamEvent(agent, {
+          type: "turn_failed",
+          provider: agent.provider,
+          error: errorMsg,
+        });
+        self.finalizeForegroundTurn(agent);
+        if (self.runManager && createdRun) {
+          await self.runManager.markRunFailed(agentId, errorMsg);
+        }
+        throw error;
       }
 
       // Now start the turn with potentially injected context

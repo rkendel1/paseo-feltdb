@@ -16,7 +16,7 @@
 
 import type { Logger } from "pino";
 import type { PaseoState } from "./paseo-state.js";
-import type { Run, AgentProvider } from "./feltdb/schema.js";
+import type { Run } from "./feltdb/schema.js";
 
 export interface RunManagerOptions {
   paseoState: PaseoState;
@@ -51,7 +51,7 @@ export class RunManager {
    */
   async createRun(input: {
     agentId: string;
-    provider: AgentProvider;
+    provider: "claude" | "codex" | "opencode";
     cwd: string;
     prompt: string;
   }): Promise<Run | null> {
@@ -298,7 +298,7 @@ export class RunManager {
   async authorizedCreateRun(
     agentId: string,
     requestedProjectId: string,
-    provider: AgentProvider,
+    provider: "claude" | "codex" | "opencode",
     prompt: string,
   ): Promise<Run> {
     // 1. Fetch the agent

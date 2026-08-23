@@ -7,7 +7,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { dirname } from "node:path";
+
 import type { Logger } from "pino";
 import type { RepositoryRepository } from "./feltdb/repositories.js";
 
@@ -146,7 +146,7 @@ export async function discoverOrCreateRepository(
       name,
       path: repositoryRoot,
       remoteUrl: remoteUrl || undefined,
-      defaultBranch: defaultBranch || undefined,
+      defaultBranch: defaultBranch || "main",
     });
 
     log.info(

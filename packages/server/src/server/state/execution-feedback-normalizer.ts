@@ -161,20 +161,26 @@ export class ExecutionFeedbackNormalizer {
 
         // Tool calls: extract tool execution facts
         if ("toolName" in item && item.toolName) {
+          const status = "status" in item ? item.status : "running";
+          // Filter valid status values only
+          const validStatus = ["running", "completed", "failed", "canceled"].includes(status)
+            ? (status as "running" | "completed" | "failed" | "canceled")
+            : "running";
+
           const toolEvent: ToolExecutedEvent = {
             type: "tool.executed",
             runId,
             timestamp: new Date().toISOString(),
-            toolName: item.toolName,
-            input: "input" in item ? item.input : undefined,
-            status: "status" in item ? item.status : "running",
+            toolName: String(item.toolName),
+            input: "input" in item ? item.input : {},
+            status: validStatus,
           };
 
           if ("result" in item && item.result !== undefined && item.result !== null) {
             toolEvent.result = item.result;
           }
-          if ("error" in item && item.error !== undefined) {
-            toolEvent.error = item.error;
+          if ("error" in item && item.error !== undefined && item.error !== null) {
+            toolEvent.error = String(item.error);
           }
 
           result.push(toolEvent);

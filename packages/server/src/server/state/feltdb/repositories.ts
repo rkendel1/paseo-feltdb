@@ -809,7 +809,6 @@ function createMigrationMarkerRepository(db: any): MigrationMarkerRepository {
     async create(data) {
       const marker: MigrationMarker = {
         id: randomUUID(),
-        createdAt: new Date().toISOString(),
         ...data,
       };
       await collection.insert(marker);

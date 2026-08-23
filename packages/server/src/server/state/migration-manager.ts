@@ -111,11 +111,14 @@ export async function runMigration(
       };
     }
 
-    log.info("Starting legacy JSON → FeltDB migration", {
-      hasProjects: legacy.hasProjects,
-      hasWorkspaces: legacy.hasWorkspaces,
-      hasAgents: legacy.hasAgents,
-    });
+    log.info(
+      {
+        hasProjects: legacy.hasProjects,
+        hasWorkspaces: legacy.hasWorkspaces,
+        hasAgents: legacy.hasAgents,
+      },
+      "Starting legacy JSON → FeltDB migration"
+    );
 
     const startedAt = new Date().toISOString();
     let projectsMigrated = 0;
@@ -138,13 +141,10 @@ export async function runMigration(
             }
 
             await repos.projects.create({
-              id: legacyProject.projectId,
               name: legacyProject.displayName,
               kind: legacyProject.kind,
               rootPath: legacyProject.rootPath,
               status: legacyProject.archivedAt ? "archived" : "active",
-              createdAt: legacyProject.createdAt,
-              updatedAt: legacyProject.updatedAt,
               archivedAt: legacyProject.archivedAt,
             });
             projectsMigrated++;
@@ -189,15 +189,12 @@ export async function runMigration(
             );
 
             await repos.workspaces.create({
-              id: legacyWorkspace.workspaceId,
               projectId: legacyWorkspace.projectId,
-              repositoryId, // Link workspace to repository
+              repositoryId: repositoryId || undefined, // Link workspace to repository
               name: legacyWorkspace.displayName,
               cwd: legacyWorkspace.cwd,
               kind: legacyWorkspace.kind,
               status: legacyWorkspace.archivedAt ? "archived" : "active",
-              createdAt: legacyWorkspace.createdAt,
-              updatedAt: legacyWorkspace.updatedAt,
               archivedAt: legacyWorkspace.archivedAt,
             });
             workspacesMigrated++;
@@ -255,7 +252,6 @@ export async function runMigration(
 
             // Migrate agent to FeltDB
             await repos.agents.create({
-              id: legacyAgent.id,
               workspaceId: workspace.id,
               provider: (legacyAgent.provider || "claude") as "claude" | "codex" | "opencode",
               model: legacyAgent.runtimeInfo?.model || undefined,
@@ -274,8 +270,6 @@ export async function runMigration(
                     extra: legacyAgent.config.extra || undefined,
                   }
                 : undefined,
-              createdAt: legacyAgent.createdAt,
-              updatedAt: legacyAgent.updatedAt,
               lastActivityAt: legacyAgent.lastActivityAt,
               lastUserMessageAt: legacyAgent.lastUserMessageAt || undefined,
               persistenceHandle: legacyAgent.persistence || undefined,
@@ -332,12 +326,15 @@ export async function runMigration(
       },
     });
 
-    log.info("Migration completed", {
-      projectsMigrated,
-      workspacesMigrated,
-      agentsMigrated,
-      errorCount: errors.length,
-    });
+    log.info(
+      {
+        projectsMigrated,
+        workspacesMigrated,
+        agentsMigrated,
+        errorCount: errors.length,
+      },
+      "Migration completed"
+    );
 
     return {
       success: errors.length === 0,

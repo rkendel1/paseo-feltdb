@@ -115,6 +115,9 @@ import {
   type VoiceMcpSocketBridgeManager,
 } from "./voice-mcp-bridge.js";
 import { resolveVoiceMcpBridgeFromRuntime } from "./voice-mcp-bridge-command.js";
+import { initializeState, type PaseoState } from "./state/index.js";
+import { RunManager } from "./state/run-manager.js";
+import { RunRecoveryManager } from "./state/run-recovery.js";
 
 type AgentMcpTransportMap = Map<string, StreamableHTTPServerTransport>;
 
@@ -190,6 +193,7 @@ export interface PaseoDaemon {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   terminalManager: TerminalManager;
+  paseoState: PaseoState;
   start(): Promise<void>;
   stop(): Promise<void>;
   getListenTarget(): ListenTarget | null;
@@ -216,6 +220,14 @@ export async function createPaseoDaemon(
   }
 
   try {
+    // Initialize Paseo state (FeltDB) early, before other services
+    const paseoStateInit = await initializeState({
+      paseoHome: config.paseoHome,
+      logger,
+    });
+    const paseoState = paseoStateInit.state;
+    logger.info({ elapsed: elapsed() }, "Paseo state initialized");
+
     const serverId = getOrCreateServerId(config.paseoHome, { logger });
     const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
     let relayTransport: RelayTransportController | null = null;
@@ -373,6 +385,31 @@ export async function createPaseoDaemon(
       path.join(config.paseoHome, "projects", "workspaces.json"),
       logger,
     );
+
+    // Initialize agent storage before recovery
+    await agentStorage.initialize();
+    logger.info({ elapsed: elapsed() }, "Agent storage initialized");
+
+    // Create RunManager for durable run lifecycle integration
+    const runManager = new RunManager({
+      paseoState,
+      logger,
+    });
+
+    // Run crash recovery: reconcile durable Runs against runtime state
+    const runRecoveryManager = new RunRecoveryManager({
+      paseoState,
+      logger,
+    });
+    const recoverySummary = await runRecoveryManager.reconcileAll();
+    logger.info(
+      {
+        orphanedRuns: recoverySummary.orphanedRunsMarked,
+        errors: recoverySummary.recoveryErrors.length,
+      },
+      "Run recovery completed",
+    );
+
     const agentManager = new AgentManager({
       clients: {
         ...createAllClients(logger, {
@@ -381,6 +418,8 @@ export async function createPaseoDaemon(
         ...config.agentClients,
       },
       registry: agentStorage,
+      runManager,
+      paseoState,
       logger,
     });
 
@@ -391,8 +430,6 @@ export async function createPaseoDaemon(
       agentManager,
       agentStorage,
     );
-    await agentStorage.initialize();
-    logger.info({ elapsed: elapsed() }, "Agent storage initialized");
     await bootstrapWorkspaceRegistries({
       paseoHome: config.paseoHome,
       agentStorage,
@@ -753,6 +790,7 @@ export async function createPaseoDaemon(
       agentManager,
       agentStorage,
       terminalManager,
+      paseoState,
       start,
       stop,
       getListenTarget: () => boundListenTarget,

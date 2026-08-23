@@ -32,6 +32,7 @@ import type {
 } from "./agent-sdk-types.js";
 import type { AgentStorage } from "./agent-storage.js";
 import { AGENT_PROVIDER_IDS } from "./provider-manifest.js";
+import type { ExecutionFeedbackNormalizer } from "../state/index.js";
 
 export { AGENT_LIFECYCLE_STATUSES, type AgentLifecycleStatus };
 
@@ -74,6 +75,11 @@ export type AgentManagerOptions = {
   idFactory?: () => string;
   registry?: AgentStorage;
   onAgentAttention?: AgentAttentionCallback;
+  runManager?: any; // RunManager instance for durable run lifecycle
+  paseoState?: any; // PaseoState instance for durable conversation/message persistence
+  contextService?: any; // AgentContextService instance for durable context injection
+  executionFeedbackNormalizer?: ExecutionFeedbackNormalizer; // For Phase 3.5.1 normalization
+  observationPersistence?: any; // ObservationPersistence instance for Phase 3.5.2 persistence
   logger: Logger;
 };
 
@@ -183,6 +189,9 @@ type ManagedAgentBase = {
   attention: AttentionState;
   foregroundTurnWaiters: Set<ForegroundTurnWaiter>;
   unsubscribeSession: (() => void) | null;
+  conversationId: string | null; // Durable conversation for this agent
+  messageSequence: number; // Sequence number for messages within conversation
+  currentRunId: string | null; // Current Run ID for message provenance
   /**
    * Internal agents are hidden from listings and don't trigger notifications.
    */
@@ -324,6 +333,11 @@ export class AgentManager {
   private readonly previousStatuses = new Map<string, AgentLifecycleStatus>();
   private readonly backgroundTasks = new Set<Promise<void>>();
   private onAgentAttention?: AgentAttentionCallback;
+  private readonly runManager?: any; // RunManager instance
+  private readonly paseoState?: any; // PaseoState instance for durable state
+  private readonly contextService?: any; // AgentContextService instance
+  private readonly executionFeedbackNormalizer?: ExecutionFeedbackNormalizer; // Phase 3.5.1
+  private readonly observationPersistence?: any; // Phase 3.5.2: ObservationPersistence
   private logger: Logger;
 
   constructor(options: AgentManagerOptions) {
@@ -336,6 +350,11 @@ export class AgentManager {
         : null;
     this.idFactory = options?.idFactory ?? (() => randomUUID());
     this.registry = options?.registry;
+    this.runManager = options?.runManager;
+    this.paseoState = options?.paseoState;
+    this.contextService = options?.contextService;
+    this.executionFeedbackNormalizer = options?.executionFeedbackNormalizer;
+    this.observationPersistence = options?.observationPersistence;
     this.onAgentAttention = options?.onAgentAttention;
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
     if (options?.clients) {
@@ -769,6 +788,8 @@ export class AgentManager {
     const preservedLastUsage = existing.lastUsage;
     const preservedLastError = existing.lastError;
     const preservedAttention = existing.attention;
+    const preservedConversationId = existing.conversationId;
+    const preservedMessageSequence = existing.messageSequence;
     const handle = existing.persistence;
     const provider = handle?.provider ?? existing.provider;
     const client = this.requireClient(provider);
@@ -801,7 +822,7 @@ export class AgentManager {
       this.logger.warn({ err: error, agentId }, "Failed to close previous session during refresh");
     }
 
-    // Preserve existing labels and timeline during reload.
+    // Preserve existing labels, timeline, and durable conversation state during reload.
     return this.registerSession(session, normalizedConfig, agentId, {
       labels: existing.labels,
       createdAt: existing.createdAt,
@@ -815,6 +836,8 @@ export class AgentManager {
       lastUsage: preservedLastUsage,
       lastError: preservedLastError,
       attention: preservedAttention,
+      conversationId: preservedConversationId,
+      messageSequence: preservedMessageSequence,
     });
   }
 
@@ -1029,7 +1052,135 @@ export class AgentManager {
         epoch: this.ensureTimelineState(agent).epoch,
       },
     );
+    // Persist message to FeltDB in background (non-blocking)
+    // CRITICAL FIX-3: Capture currentRunId NOW, before async operations
+    // This prevents race where currentRunId is cleared before message is persisted
+    const capturedRunId = agent.currentRunId ?? undefined;
+    if (this.paseoState) {
+      this.enqueuePersistMessage(agentId, item, capturedRunId).catch((err) => {
+        this.logger.warn(
+          { agentId, itemType: item.type, err },
+          "Failed to persist message to FeltDB"
+        );
+      });
+    }
     await this.persistSnapshot(agent);
+  }
+
+  private enqueuePersistMessage(agentId: string, item: AgentTimelineItem, runId?: string): Promise<void> {
+    const promise = this.persistMessage(agentId, item, runId);
+    this.backgroundTasks.add(promise);
+    promise.finally(() => {
+      this.backgroundTasks.delete(promise);
+    });
+    return promise;
+  }
+
+  private async persistMessage(agentId: string, item: AgentTimelineItem, runId?: string): Promise<void> {
+    if (!this.paseoState) return;
+
+    try {
+      const agent = this.agents.get(agentId);
+      if (!agent) return;
+
+      // Ensure conversation exists for this agent
+      let conversationId = agent.conversationId;
+      if (!conversationId) {
+        const feltdbAgent = await this.paseoState.agents.getById(agentId);
+        if (!feltdbAgent) {
+          this.logger.warn({ agentId }, "Agent not found in FeltDB, skipping message persistence");
+          return;
+        }
+
+        // Resolve workspace to get projectId
+        const workspace = feltdbAgent.workspaceId
+          ? await this.paseoState.workspaces.getById(feltdbAgent.workspaceId)
+          : null;
+
+        if (!workspace || !workspace.projectId) {
+          this.logger.warn({ agentId, workspaceId: feltdbAgent.workspaceId },
+            "Workspace or projectId not found, skipping conversation creation");
+          return;
+        }
+
+        // Create conversation on first message
+        const conversation = await this.paseoState.conversations.create({
+          projectId: workspace.projectId,
+          workspaceId: feltdbAgent.workspaceId,
+          agentId,
+        });
+        conversationId = conversation.id;
+        agent.conversationId = conversationId;
+        // Initialize sequence from durable storage (crash-safe)
+        agent.messageSequence = await this.paseoState.messages.getMaxSequenceInConversation(conversationId);
+      }
+
+      // Map timeline item to message
+      const { authorType, role, content } = this.mapTimelineItemToMessage(item);
+      if (!content) return; // Skip items with no content
+
+      // CRITICAL FIX-2: Allocate sequence atomically in database layer
+      // Instead of incrementing a mutable ManagedAgent field, fetch max sequence
+      // from FeltDB atomically within create(). This prevents collisions under concurrent writes.
+      await this.paseoState.messages.create({
+        conversationId,
+        authorType,
+        authorId: agentId,
+        content,
+        // Sequence is omitted and will be allocated atomically by repository
+        role,
+        // Use captured runId to prevent race condition during turn cleanup (CRITICAL FIX-3)
+        runId,
+      });
+    } catch (err) {
+      this.logger.warn(
+        { agentId, itemType: item.type, err },
+        "Error persisting message to FeltDB"
+      );
+    }
+  }
+
+  private mapTimelineItemToMessage(
+    item: AgentTimelineItem
+  ): { authorType: "user" | "agent" | "system" | "tool"; role?: string; content: string } {
+    switch (item.type) {
+      case "user_message":
+        return {
+          authorType: "user",
+          role: "user",
+          content: item.text || "",
+        };
+      case "assistant_message":
+        return {
+          authorType: "agent",
+          role: "assistant",
+          content: item.text || "",
+        };
+      case "error":
+        return {
+          authorType: "system",
+          role: "system",
+          content: `Error: ${item.message}`,
+        };
+      case "reasoning":
+        return {
+          authorType: "agent",
+          content: item.text || "",
+        };
+      case "todo":
+        return {
+          authorType: "agent",
+          content: item.items?.map((t) => `[${t.completed ? "x" : " "}] ${t.text}`).join("\n") || "",
+        };
+      case "tool_call":
+      case "compaction":
+      default:
+        // Skip tool calls and other non-message types
+        return {
+          authorType: "system",
+          content: "",
+        };
+    }
   }
 
   async emitLiveTimelineItem(agentId: string, item: AgentTimelineItem): Promise<void> {
@@ -1075,6 +1226,12 @@ export class AgentManager {
     agent.pendingReplacement = false;
     agent.lastError = undefined;
 
+    // CRITICAL FIX-1: Set a temporary activeForegroundTurnId BEFORE entering async generator
+    // This ensures that concurrent streamAgent() calls are rejected before any async operations.
+    // The real turnId will be set after startTurn() succeeds.
+    const tempTurnId = `__pending__${randomUUID()}`;
+    agent.activeForegroundTurnId = tempTurnId;
+
     const self = this;
 
     const streamForwarder = (async function* streamForwarder() {
@@ -1083,8 +1240,106 @@ export class AgentManager {
 
       let turnId: string;
       let waiter: ForegroundTurnWaiter | null = null;
+      let terminalEventType: "turn_completed" | "turn_failed" | "turn_canceled" | null = null;
+      let terminalEventData: AgentStreamEvent | null = null;
+
+      // Collect all events for Phase 3.5.2 persistence
+      const collectedEvents: AgentStreamEvent[] = [];
+
+      // Create durable Run entity if RunManager is available
+      let createdRun = null;
       try {
-        const result = await agent.session.startTurn(prompt, options);
+        if (self.runManager) {
+          createdRun = await self.runManager.createRun({
+            agentId,
+            provider: agent.provider,
+            cwd: agent.cwd,
+            prompt: typeof prompt === "string" ? prompt : JSON.stringify(prompt),
+          });
+        }
+      } catch (error) {
+        self.logger.error({ agentId, err: error }, "Failed to create Run entity");
+      }
+
+      // Resolve durable context for this turn (after Run is created, before startTurn)
+      let injectedPrompt = prompt;
+      try {
+        if (self.contextService && createdRun) {
+          const promptText = typeof prompt === "string" ? prompt : JSON.stringify(prompt);
+          // HIGH FIX: Add 5s timeout to context resolution to prevent agent hang
+          const contextResolution = await Promise.race([
+            self.contextService.resolveForTurn(agentId, promptText, createdRun.id),
+            new Promise<any>((_, reject) =>
+              setTimeout(() => reject(new Error("Context resolution timeout after 5s")), 5000)
+            ),
+          ]);
+
+          // Record context resolution status in Run
+          const resolutionStatus = contextResolution.success ? "resolved" : "fallback";
+          const resolutionPolicy = self.contextService.getFailurePolicy();
+          const policyName =
+            resolutionPolicy.toString() === "block" ? "block" : "fallback";
+
+          if (self.runManager) {
+            await self.runManager.recordContextResolution(agentId, {
+              status: resolutionStatus,
+              policy: policyName,
+              summary: contextResolution.success
+                ? contextResolution.turnContext?.projection?.summary?.project
+                : contextResolution.error,
+            });
+          }
+
+          // Handle resolution based on policy
+          if (!contextResolution.success && policyName === "block") {
+            const errorMsg = `Context resolution failed (BLOCK policy): ${contextResolution.error}`;
+            self.logger.error({ agentId, reason: contextResolution.reason }, errorMsg);
+            self.handleStreamEvent(agent, {
+              type: "turn_failed",
+              provider: agent.provider,
+              error: errorMsg,
+            });
+            self.finalizeForegroundTurn(agent);
+            if (self.runManager) {
+              await self.runManager.markRunFailed(agentId, errorMsg);
+            }
+            throw new Error(errorMsg);
+          }
+
+          // Inject context into prompt if resolution succeeded
+          if (contextResolution.success && contextResolution.turnContext?.projection?.text) {
+            const contextText = contextResolution.turnContext.projection.text;
+            if (typeof prompt === "string") {
+              injectedPrompt = `${contextText}\n\n---\n\n${prompt}`;
+            } else {
+              // For structured prompts, we'd need provider-specific adapters
+              // For now, just use the original prompt
+              self.logger.debug(
+                { agentId },
+                "Context injection: structured prompts not yet supported, using original prompt",
+              );
+            }
+          }
+        }
+      } catch (error) {
+        // Handle any errors during context resolution (including timeout)
+        const errorMsg = error instanceof Error ? error.message : "Context resolution failed";
+        self.logger.error({ agentId, err: error }, errorMsg);
+        self.handleStreamEvent(agent, {
+          type: "turn_failed",
+          provider: agent.provider,
+          error: errorMsg,
+        });
+        self.finalizeForegroundTurn(agent);
+        if (self.runManager && createdRun) {
+          await self.runManager.markRunFailed(agentId, errorMsg);
+        }
+        throw error;
+      }
+
+      // Now start the turn with potentially injected context
+      try {
+        const result = await agent.session.startTurn(injectedPrompt, options);
         turnId = result.turnId;
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : "Failed to start turn";
@@ -1094,7 +1349,17 @@ export class AgentManager {
           error: errorMsg,
         });
         self.finalizeForegroundTurn(agent);
+        // Mark Run as failed
+        if (self.runManager && createdRun) {
+          await self.runManager.markRunFailed(agentId, errorMsg);
+        }
         throw error;
+      }
+
+      // Mark Run as started and capture runId for message provenance
+      if (self.runManager && createdRun) {
+        await self.runManager.markRunStarted(agentId);
+        agent.currentRunId = createdRun.id;
       }
 
       pendingRun.started = true;
@@ -1139,8 +1404,11 @@ export class AgentManager {
         while (!done) {
           while (queue.length > 0) {
             const event = queue.shift()!;
+            collectedEvents.push(event);
             yield event;
             if (isTurnTerminalEvent(event)) {
+              terminalEventType = event.type as "turn_completed" | "turn_failed" | "turn_canceled";
+              terminalEventData = event;
               done = true;
               break;
             }
@@ -1155,6 +1423,63 @@ export class AgentManager {
           }
         }
       } finally {
+        // Update Run entity based on terminal event
+        if (self.runManager && createdRun) {
+          if (terminalEventType === "turn_completed" && terminalEventData) {
+            const result = (terminalEventData as any).result;
+            await self.runManager.markRunCompleted(agentId, {
+              text: result?.text || "",
+              usage: result?.usage,
+            });
+          } else if (terminalEventType === "turn_failed" && terminalEventData) {
+            const error = (terminalEventData as any).error || "Unknown error";
+            await self.runManager.markRunFailed(agentId, error);
+          } else if (terminalEventType === "turn_canceled") {
+            await self.runManager.markRunInterrupted(agentId);
+          } else if (!terminalEventType) {
+            self.runManager.forgetRun(agentId);
+          }
+        }
+
+        // Phase 3.5.2: Normalize and persist execution feedback events
+        if (
+          self.executionFeedbackNormalizer &&
+          self.observationPersistence &&
+          createdRun &&
+          collectedEvents.length > 0
+        ) {
+          try {
+            const normalizedEvents = self.executionFeedbackNormalizer.normalize(
+              collectedEvents,
+              createdRun.id,
+            );
+
+            for (const event of normalizedEvents) {
+              try {
+                await self.observationPersistence.persistEvent(event, createdRun);
+              } catch (persistError) {
+                self.logger.warn(
+                  {
+                    agentId,
+                    runId: createdRun.id,
+                    eventType: event.type,
+                    err: persistError,
+                  },
+                  "Failed to persist execution feedback event (non-blocking)",
+                );
+              }
+            }
+          } catch (normalizationError) {
+            self.logger.warn(
+              { agentId, runId: createdRun.id, err: normalizationError },
+              "Failed to normalize execution feedback events (non-blocking)",
+            );
+          }
+        }
+
+        // Clear currentRunId to prevent stale runId from leaking to subsequent messages
+        agent.currentRunId = null;
+
         if (waiter) {
           agent.foregroundTurnWaiters.delete(waiter);
           self.settleForegroundTurnWaiter(waiter);
@@ -1687,6 +2012,8 @@ export class AgentManager {
       lastUsage?: AgentUsage;
       lastError?: string;
       attention?: AttentionState;
+      conversationId?: string | null;
+      messageSequence?: number;
     },
   ): Promise<ManagedAgent> {
     const resolvedAgentId = validateAgentId(agentId, "registerSession");
@@ -1747,6 +2074,9 @@ export class AgentManager {
               }
             : { requiresAttention: false }
           : { requiresAttention: false },
+      conversationId: options?.conversationId ?? null,
+      messageSequence: options?.messageSequence ?? 0,
+      currentRunId: null,
       internal: config.internal ?? false,
       labels: options?.labels ?? {},
     } as ActiveManagedAgent;

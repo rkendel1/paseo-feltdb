@@ -1423,7 +1423,9 @@ describe("AgentManager", () => {
       | ({ pendingReplacement: boolean; activeForegroundTurnId: string | null; lifecycle: string })
       | undefined;
     expect(replaceGapSnapshot?.pendingReplacement).toBe(false);
-    expect(replaceGapSnapshot?.activeForegroundTurnId).toBeNull();
+    // CRITICAL FIX-1: activeForegroundTurnId is set to a temp value BEFORE startTurn to prevent concurrent streamAgent() calls
+    // This temp ID will be replaced with the real turnId after startTurn succeeds
+    expect(replaceGapSnapshot?.activeForegroundTurnId).toMatch(/^__pending__/);
     expect(replaceGapSnapshot?.lifecycle).toBe("running");
 
     capturedSession!.pushEvent({ type: "turn_completed", provider: "codex", turnId: "turn-1" });

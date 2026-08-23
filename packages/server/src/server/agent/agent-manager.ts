@@ -1077,20 +1077,33 @@ export class AgentManager {
   }
 
   private async persistMessage(agentId: string, item: AgentTimelineItem, runId?: string): Promise<void> {
-    if (!this.paseoState) return;
+    if (!this.paseoState) {
+      this.logger.debug({ agentId }, "persistMessage: paseoState not available, skipping");
+      return;
+    }
 
     try {
+      this.logger.debug({ agentId, itemType: item.type }, "persistMessage: starting");
+
       const agent = this.agents.get(agentId);
-      if (!agent) return;
+      if (!agent) {
+        this.logger.debug({ agentId }, "persistMessage: agent not found in local registry");
+        return;
+      }
 
       // Ensure conversation exists for this agent
       let conversationId = agent.conversationId;
       if (!conversationId) {
+        this.logger.debug({ agentId }, "persistMessage: no conversationId, fetching agent from FeltDB");
+
         const feltdbAgent = await this.paseoState.agents.getById(agentId);
         if (!feltdbAgent) {
           this.logger.warn({ agentId }, "Agent not found in FeltDB, skipping message persistence");
           return;
         }
+
+        this.logger.debug({ agentId, feltdbAgentId: feltdbAgent.id, workspaceId: feltdbAgent.workspaceId },
+          "persistMessage: found agent in FeltDB");
 
         // Resolve workspace to get projectId
         const workspace = feltdbAgent.workspaceId
@@ -1103,6 +1116,9 @@ export class AgentManager {
           return;
         }
 
+        this.logger.debug({ agentId, projectId: workspace.projectId, workspaceId: workspace.id },
+          "persistMessage: creating conversation");
+
         // Create conversation on first message
         const conversation = await this.paseoState.conversations.create({
           projectId: workspace.projectId,
@@ -1111,18 +1127,27 @@ export class AgentManager {
         });
         conversationId = conversation.id;
         agent.conversationId = conversationId;
+
+        this.logger.debug({ agentId, conversationId }, "persistMessage: conversation created");
+
         // Initialize sequence from durable storage (crash-safe)
         agent.messageSequence = await this.paseoState.messages.getMaxSequenceInConversation(conversationId);
       }
 
       // Map timeline item to message
       const { authorType, role, content } = this.mapTimelineItemToMessage(item);
-      if (!content) return; // Skip items with no content
+      if (!content) {
+        this.logger.debug({ agentId, itemType: item.type }, "persistMessage: no content to persist, skipping");
+        return; // Skip items with no content
+      }
+
+      this.logger.debug({ agentId, conversationId, authorType, contentLength: content.length },
+        "persistMessage: creating message");
 
       // CRITICAL FIX-2: Allocate sequence atomically in database layer
       // Instead of incrementing a mutable ManagedAgent field, fetch max sequence
       // from FeltDB atomically within create(). This prevents collisions under concurrent writes.
-      await this.paseoState.messages.create({
+      const message = await this.paseoState.messages.create({
         conversationId,
         authorType,
         authorId: agentId,
@@ -1132,6 +1157,9 @@ export class AgentManager {
         // Use captured runId to prevent race condition during turn cleanup (CRITICAL FIX-3)
         runId,
       });
+
+      this.logger.debug({ agentId, conversationId, messageId: message.id, sequence: message.sequence },
+        "persistMessage: message created successfully");
     } catch (err) {
       this.logger.warn(
         { agentId, itemType: item.type, err },

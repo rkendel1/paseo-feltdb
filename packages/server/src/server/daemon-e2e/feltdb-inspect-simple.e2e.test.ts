@@ -9,6 +9,7 @@ import { describe, test, expect } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import pino from "pino";
 
 import { createDaemonTestContext, type DaemonTestContext } from "../test-utils/index.js";
 
@@ -31,8 +32,9 @@ describe("FeltDB Persistence - Simple", () => {
     let ctx: DaemonTestContext | undefined;
 
     try {
-      // Setup
-      ctx = await createDaemonTestContext({ paseoHomeRoot, cleanup: false });
+      // Setup with debug logging
+      const logger = pino({ level: "debug" });
+      ctx = await createDaemonTestContext({ paseoHomeRoot, cleanup: false, logger });
       createFixtureRepository(projectCwd);
 
       const agent = await ctx.client.createAgent({

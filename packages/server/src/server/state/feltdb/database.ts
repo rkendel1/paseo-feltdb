@@ -1,22 +1,7 @@
 import type { Logger } from "pino";
 import path from "node:path";
 import { mkdirSync } from "node:fs";
-import { Database } from "@feltdb/core";
-import {
-  ProjectSchema,
-  RepositorySchema,
-  WorkspaceSchema,
-  AgentSchema,
-  TaskSchema,
-  ConversationSchema,
-  MessageSchema,
-  RunSchema,
-  ObservationSchema,
-  DecisionSchema,
-  HandoffSchema,
-  RelationshipSchema,
-  MigrationMarkerSchema,
-} from "./schema.js";
+import { createFeltDB, type StateFirstDB } from "@feltdb/core";
 
 export interface FeltDBConfig {
   dataPath: string;
@@ -24,11 +9,54 @@ export interface FeltDBConfig {
 }
 
 /**
+ * Adapter for StateFirstDB Collection to match the expected repository interface.
+ */
+class CollectionAdapter<T extends { id: string }> {
+  constructor(private collection: any) {}
+
+  async insert(data: T): Promise<void> {
+    await this.collection.insert(data, data.id);
+  }
+
+  async findOne(query: Record<string, any>): Promise<T | null> {
+    const results = await this.collection.find(query);
+    return results.length > 0 ? results[0] : null;
+  }
+
+  async find(query: Record<string, any> = {}): Promise<T[]> {
+    return await this.collection.find(query);
+  }
+
+  async updateOne(query: Record<string, any>, data: Partial<T>): Promise<void> {
+    const existing = await this.findOne(query);
+    if (existing) {
+      await this.collection.update(existing.id, data);
+    }
+  }
+
+  async deleteOne(query: Record<string, any>): Promise<void> {
+    const existing = await this.findOne(query);
+    if (existing) {
+      await this.collection.delete(existing.id);
+    }
+  }
+
+  createIndex(field: string): void {
+    this.collection.createIndex({ field });
+  }
+
+  async list(): Promise<T[]> {
+    return await this.collection.find({});
+  }
+}
+
+/**
  * PaseoDB wraps FeltDB with Paseo-specific initialization and access patterns.
  * Provides type-safe collections for all entities.
  */
 export class PaseoDB {
-  private db: Database | null = null;
+  private db: StateFirstDB | null = null;
+  private collections: Map<string, CollectionAdapter<any>> = new Map();
   private dataPath: string;
   private logger: Logger;
   private initialized = false;
@@ -54,12 +82,16 @@ export class PaseoDB {
 
   private async doInitialize(): Promise<void> {
     try {
-      // Ensure data directory exists
+      // Ensure data directory exists (reserved for future persistent storage)
       mkdirSync(this.dataPath, { recursive: true });
       this.logger.info({ dataPath: this.dataPath }, "Initializing FeltDB");
 
-      // Initialize FeltDB at the specified path
-      this.db = new Database({ dataDir: this.dataPath });
+      // Initialize FeltDB in memory mode
+      // TODO: Implement file-based persistence when @feltdb/core supports it
+      this.db = createFeltDB({
+        namespace: "paseo",
+        memory: true,
+      });
 
       // Define collections with schemas
       await this.setupCollections();
@@ -80,24 +112,24 @@ export class PaseoDB {
     if (!this.db) throw new Error("Database not initialized");
 
     const collections = [
-      { name: "projects", schema: ProjectSchema },
-      { name: "repositories", schema: RepositorySchema },
-      { name: "workspaces", schema: WorkspaceSchema },
-      { name: "agents", schema: AgentSchema },
-      { name: "tasks", schema: TaskSchema },
-      { name: "conversations", schema: ConversationSchema },
-      { name: "messages", schema: MessageSchema },
-      { name: "runs", schema: RunSchema },
-      { name: "observations", schema: ObservationSchema },
-      { name: "decisions", schema: DecisionSchema },
-      { name: "handoffs", schema: HandoffSchema },
-      { name: "relationships", schema: RelationshipSchema },
-      { name: "migration_markers", schema: MigrationMarkerSchema },
+      { name: "projects" },
+      { name: "repositories" },
+      { name: "workspaces" },
+      { name: "agents" },
+      { name: "tasks" },
+      { name: "conversations" },
+      { name: "messages" },
+      { name: "runs" },
+      { name: "observations" },
+      { name: "decisions" },
+      { name: "handoffs" },
+      { name: "relationships" },
+      { name: "migration_markers" },
     ];
 
-    for (const { name, schema } of collections) {
+    for (const { name } of collections) {
       try {
-        await this.db.collection(name, { schema });
+        this.db.collection(name);
         this.logger.debug({ collection: name }, "Collection initialized");
       } catch (error) {
         this.logger.warn({ collection: name, err: error }, "Collection may already exist");
@@ -191,10 +223,10 @@ export class PaseoDB {
       { collection: "migration_markers", field: "status" },
     ];
 
-    for (const { collection, field, unique } of indexes) {
+    for (const { collection, field } of indexes) {
       try {
-        await this.db.collection(collection).createIndex(field, { unique });
-        this.logger.debug({ collection, field, unique }, "Index created");
+        this.db.collection(collection).createIndex({ field } as any);
+        this.logger.debug({ collection, field }, "Index created");
       } catch (error) {
         this.logger.debug({ collection, field, err: error }, "Index may already exist");
       }
@@ -202,14 +234,24 @@ export class PaseoDB {
   }
 
   /**
-   * Get the underlying FeltDB instance.
+   * Get a database-like interface with adapted collections.
    * Must call initialize() first.
    */
-  getDatabase(): Database {
+  getDatabase(): any {
     if (!this.db) {
       throw new Error("Database not initialized. Call initialize() first.");
     }
-    return this.db;
+
+    const db = this.db;
+    return {
+      collection: (name: string) => {
+        if (!this.collections.has(name)) {
+          const actualCollection = db.collection(name);
+          this.collections.set(name, new CollectionAdapter(actualCollection));
+        }
+        return this.collections.get(name);
+      },
+    };
   }
 
   /**
@@ -223,8 +265,9 @@ export class PaseoDB {
       if (!this.db) {
         return { healthy: false, message: "Database instance not available" };
       }
-      // Try a simple ping operation
-      await this.db.collection("projects").list({ limit: 1 });
+      // Try a simple ping operation via find
+      const collection = new CollectionAdapter(this.db.collection("projects"));
+      await collection.find({});
       return { healthy: true, message: "Database operational" };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

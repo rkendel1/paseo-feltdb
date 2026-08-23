@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { Database } from "@feltdb/core";
 import type {
   Project,
   Repository,
@@ -232,7 +231,7 @@ export interface Repositories {
  * Create repository implementations for a FeltDB database.
  * Each repository provides type-safe access to its collection.
  */
-export function createRepositories(db: Database): Repositories {
+export function createRepositories(db: any): Repositories {
   return {
     projects: createProjectRepository(db),
     repositories: createRepositoryRepository(db),
@@ -254,7 +253,7 @@ export function createRepositories(db: Database): Repositories {
 // Implementation Helpers
 // ============================================================================
 
-function createProjectRepository(db: Database): ProjectRepository {
+function createProjectRepository(db: any): ProjectRepository {
   const collection = db.collection("projects");
   return {
     async create(data) {
@@ -289,7 +288,7 @@ function createProjectRepository(db: Database): ProjectRepository {
   };
 }
 
-function createRepositoryRepository(db: Database): RepositoryRepository {
+function createRepositoryRepository(db: any): RepositoryRepository {
   const collection = db.collection("repositories");
   return {
     async create(data) {
@@ -321,7 +320,7 @@ function createRepositoryRepository(db: Database): RepositoryRepository {
   };
 }
 
-function createWorkspaceRepository(db: Database): WorkspaceRepository {
+function createWorkspaceRepository(db: any): WorkspaceRepository {
   const collection = db.collection("workspaces");
   return {
     async create(data) {
@@ -359,7 +358,7 @@ function createWorkspaceRepository(db: Database): WorkspaceRepository {
   };
 }
 
-function createAgentRepository(db: Database): AgentRepository {
+function createAgentRepository(db: any): AgentRepository {
   const collection = db.collection("agents");
   return {
     async create(data) {
@@ -394,7 +393,7 @@ function createAgentRepository(db: Database): AgentRepository {
   };
 }
 
-function createTaskRepository(db: Database): TaskRepository {
+function createTaskRepository(db: any): TaskRepository {
   const collection = db.collection("tasks");
   return {
     async create(data) {
@@ -435,7 +434,7 @@ function createTaskRepository(db: Database): TaskRepository {
   };
 }
 
-function createConversationRepository(db: Database): ConversationRepository {
+function createConversationRepository(db: any): ConversationRepository {
   const collection = db.collection("conversations");
   return {
     async create(data) {
@@ -476,7 +475,7 @@ function createConversationRepository(db: Database): ConversationRepository {
   };
 }
 
-function createMessageRepository(db: Database): MessageRepository {
+function createMessageRepository(db: any): MessageRepository {
   const collection = db.collection("messages");
   return {
     async create(data) {
@@ -526,7 +525,7 @@ function createMessageRepository(db: Database): MessageRepository {
   };
 }
 
-function createRunRepository(db: Database): RunRepository {
+function createRunRepository(db: any): RunRepository {
   const collection = db.collection("runs");
   return {
     async create(data) {
@@ -565,7 +564,7 @@ function createRunRepository(db: Database): RunRepository {
   };
 }
 
-function createObservationRepository(db: Database): ObservationRepository {
+function createObservationRepository(db: any): ObservationRepository {
   const collection = db.collection("observations");
   return {
     async create(data) {
@@ -606,7 +605,7 @@ function createObservationRepository(db: Database): ObservationRepository {
   };
 }
 
-function createDecisionRepository(db: Database): DecisionRepository {
+function createDecisionRepository(db: any): DecisionRepository {
   const collection = db.collection("decisions");
   return {
     async create(data) {
@@ -644,7 +643,7 @@ function createDecisionRepository(db: Database): DecisionRepository {
   };
 }
 
-function createHandoffRepository(db: Database): HandoffRepository {
+function createHandoffRepository(db: any): HandoffRepository {
   const collection = db.collection("handoffs");
   return {
     async create(data) {
@@ -683,7 +682,7 @@ function createHandoffRepository(db: Database): HandoffRepository {
   };
 }
 
-function createRelationshipRepository(db: Database): RelationshipRepository {
+function createRelationshipRepository(db: any): RelationshipRepository {
   const collection = db.collection("relationships");
   return {
     async create(data) {
@@ -719,7 +718,7 @@ function createRelationshipRepository(db: Database): RelationshipRepository {
   };
 }
 
-function createMigrationMarkerRepository(db: Database): MigrationMarkerRepository {
+function createMigrationMarkerRepository(db: any): MigrationMarkerRepository {
   const collection = db.collection("migration_markers");
   return {
     async create(data) {

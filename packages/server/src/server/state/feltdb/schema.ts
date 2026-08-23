@@ -252,14 +252,17 @@ export type Observation = z.infer<typeof ObservationSchema>;
 export const DecisionSchema = z.object({
   id: z.string(),
   projectId: z.string(),
+  repositoryId: z.string().optional(),
   workspaceId: z.string().optional(),
   taskId: z.string().optional(),
+  runId: z.string().optional(), // Run where decision was recorded
   authorType: z.enum(["user", "agent", "system"]),
   authorId: z.string().optional(),
-  title: z.string(),
-  decision: z.string(),
+  content: z.string(), // The decision statement
   rationale: z.string().optional(),
-  status: z.enum(["active", "superseded", "archived"]).default("active"),
+  status: z.enum(["proposed", "approved", "rejected", "superseded"]).default("proposed"),
+  approvedBy: z.string().optional(), // userId who approved
+  approvedAt: z.string().datetime().optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   metadata: z.record(z.any()).optional(),

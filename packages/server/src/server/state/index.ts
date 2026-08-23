@@ -152,3 +152,9 @@ export {
   type ObservationPersistenceOptions,
   ObservationPersistence,
 } from "./observation-persistence.js";
+export {
+  createDecisionPersistence,
+  type DecisionPersistenceOptions,
+  type RecordDecisionInput,
+  DecisionPersistence,
+} from "./decision-persistence.js";

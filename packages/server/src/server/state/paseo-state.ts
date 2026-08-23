@@ -9,7 +9,7 @@
 
 import type { Logger } from "pino";
 import type { Repositories } from "./feltdb/repositories.js";
-import type { Project, Workspace, Agent, Task, Conversation, Message, Run, Observation } from "./feltdb/schema.js";
+import type { Project, Workspace, Agent, Task, Conversation, Message, Run, Observation, Decision } from "./feltdb/schema.js";
 
 export interface PaseoState {
   // Project operations
@@ -141,6 +141,18 @@ export interface PaseoState {
     listByTask(taskId: string): Promise<Observation[]>;
     listByAgent(agentId: string): Promise<Observation[]>;
     update(id: string, data: Partial<Observation>): Promise<Observation>;
+    delete(id: string): Promise<void>;
+  };
+
+  // Decision operations (Phase 3.5.3: Explicit durable decisions)
+  decisions: {
+    create(data: Omit<Decision, "id" | "createdAt" | "updatedAt">): Promise<Decision>;
+    getById(id: string): Promise<Decision | null>;
+    listByProject(projectId: string): Promise<Decision[]>;
+    listByTask(taskId: string): Promise<Decision[]>;
+    approve(id: string, approvedBy: string): Promise<Decision>;
+    reject(id: string): Promise<Decision>;
+    update(id: string, data: Partial<Decision>): Promise<Decision>;
     delete(id: string): Promise<void>;
   };
 
@@ -360,6 +372,47 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
       },
       async delete(id) {
         return repos.observations.delete(id);
+      },
+    },
+
+    decisions: {
+      async create(data) {
+        return repos.decisions.create(data);
+      },
+      async getById(id) {
+        return repos.decisions.getById(id);
+      },
+      async listByProject(projectId) {
+        return repos.decisions.listByProject(projectId);
+      },
+      async listByTask(taskId) {
+        return repos.decisions.listByTask(taskId);
+      },
+      async approve(id, approvedBy) {
+        const decision = await repos.decisions.getById(id);
+        if (!decision) {
+          throw new Error(`Decision ${id} not found`);
+        }
+        return repos.decisions.update(id, {
+          status: "approved",
+          approvedBy,
+          approvedAt: new Date().toISOString(),
+        });
+      },
+      async reject(id) {
+        const decision = await repos.decisions.getById(id);
+        if (!decision) {
+          throw new Error(`Decision ${id} not found`);
+        }
+        return repos.decisions.update(id, {
+          status: "rejected",
+        });
+      },
+      async update(id, data) {
+        return repos.decisions.update(id, data);
+      },
+      async delete(id) {
+        return repos.decisions.delete(id);
       },
     },
 

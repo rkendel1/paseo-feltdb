@@ -38,6 +38,7 @@ export type TestPaseoDaemon = {
   paseoHome: string;
   staticDir: string;
   close: () => Promise<void>;
+  paseoState: Awaited<ReturnType<typeof createPaseoDaemon>>["paseoState"];
 };
 
 const TEST_DAEMON_START_TIMEOUT_MS = 20_000;
@@ -129,6 +130,7 @@ export async function createTestPaseoDaemon(
         paseoHome,
         staticDir,
         close,
+        paseoState: daemon.paseoState,
       };
     } catch (error) {
       lastError = error;

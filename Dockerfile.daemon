@@ -1,22 +1,38 @@
-FROM node:20-alpine
+FROM node:20-alpine as builder
 
 WORKDIR /app
 
 # Install build dependencies
 RUN apk add --no-cache python3 make g++ bash
 
-# Copy workspace files
-COPY package.json package-lock.json ./
-COPY tsconfig.base.json tsconfig.json ./
-COPY packages/server ./packages/server
-COPY packages/highlight ./packages/highlight
-COPY packages/relay ./packages/relay
+# Copy everything for build
+COPY . .
 
-# Install dependencies
+# Install and build
 RUN npm ci
+RUN npm run build:daemon
 
-# Build server and dependencies
-RUN npm run build --workspace=@getpaseo/server
+
+# Final stage: runtime
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install runtime dependencies only
+RUN apk add --no-cache python3
+
+# Copy built artifacts from builder
+COPY --from=builder /app/packages/server/dist ./packages/server/dist
+COPY --from=builder /app/packages/relay/dist ./packages/relay/dist
+COPY --from=builder /app/packages/highlight/dist ./packages/highlight/dist
+COPY --from=builder /app/packages/cli/dist ./packages/cli/dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages/server/src/server/speech/providers/local/sherpa/assets ./packages/server/src/server/speech/providers/local/sherpa/assets
+
+# Copy package.json for runtime
+COPY packages/server/package.json ./packages/server/package.json
+COPY packages/relay/package.json ./packages/relay/package.json
+COPY packages/highlight/package.json ./packages/highlight/package.json
 
 # Create data directories
 RUN mkdir -p /data/paseo /data/feltdb
@@ -37,4 +53,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "const http = require('http'); http.get('http://localhost:6767/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1));" || exit 1
 
 # Start daemon
-CMD ["npm", "--prefix", "packages/server", "run", "start"]
+CMD ["node", "packages/server/dist/server/server/index.js"]

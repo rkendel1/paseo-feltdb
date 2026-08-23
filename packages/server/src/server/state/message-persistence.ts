@@ -20,7 +20,7 @@
 
 import type { Logger } from "pino";
 import type { PaseoState } from "./paseo-state.js";
-import type { Message, Conversation } from "./feltdb/schema.js";
+import type { Message } from "./feltdb/schema.js";
 
 export interface MessagePersistenceOptions {
   paseoState: PaseoState;
@@ -88,10 +88,14 @@ export class MessagePersistence {
     }
 
     // 3. Perform authorized create
-    const message = await this.paseoState.messages.create({
-      conversationId,
-      ...data,
-    });
+    // Filter out null values to match schema expectations
+    const createData: any = { conversationId };
+    for (const [key, value] of Object.entries(data)) {
+      if (value !== null) {
+        createData[key] = value;
+      }
+    }
+    const message = await this.paseoState.messages.create(createData);
 
     this.logger.debug(
       { messageId: message.id, conversationId, agentId: requestingAgentId },

@@ -11,6 +11,7 @@ import type {
   Observation,
   Decision,
   Handoff,
+  AuthorityDecision,
   Relationship,
   MigrationMarker,
 } from "./schema.js";
@@ -201,6 +202,30 @@ export interface HandoffRepository {
 }
 
 // ============================================================================
+// Authority Decision Repository (Phase 4.4)
+// ============================================================================
+
+export interface AuthorityDecisionRepository {
+  create(data: Omit<AuthorityDecision, "id" | "createdAt">): Promise<AuthorityDecision>;
+  getById(id: string): Promise<AuthorityDecision | null>;
+  listBySubject(
+    subjectType: AuthorityDecision["subjectType"],
+    subjectId: string
+  ): Promise<AuthorityDecision[]>;
+  listByHandoff(handoffId: string): Promise<AuthorityDecision[]>;
+  /**
+   * Find an existing decision for a subject if one exists.
+   * Used to prevent duplicate decisions on the same resource.
+   */
+  getBySubject(
+    subjectType: AuthorityDecision["subjectType"],
+    subjectId: string
+  ): Promise<AuthorityDecision | null>;
+  update(id: string, data: Partial<AuthorityDecision>): Promise<AuthorityDecision>;
+  delete(id: string): Promise<void>;
+}
+
+// ============================================================================
 // Relationship Repository
 // ============================================================================
 
@@ -245,6 +270,7 @@ export interface Repositories {
   observations: ObservationRepository;
   decisions: DecisionRepository;
   handoffs: HandoffRepository;
+  authorityDecisions: AuthorityDecisionRepository;
   relationships: RelationshipRepository;
   migrations: MigrationMarkerRepository;
 }
@@ -266,6 +292,7 @@ export function createRepositories(db: any): Repositories {
     observations: createObservationRepository(db),
     decisions: createDecisionRepository(db),
     handoffs: createHandoffRepository(db),
+    authorityDecisions: createAuthorityDecisionRepository(db),
     relationships: createRelationshipRepository(db),
     migrations: createMigrationMarkerRepository(db),
   };
@@ -844,6 +871,55 @@ function createHandoffRepository(db: any): HandoffRepository {
       await collection.updateOne({ id }, data);
       const result = await collection.findOne({ id });
       if (!result) throw new Error(`Handoff ${id} not found after update`);
+      return result;
+    },
+    async delete(id) {
+      await collection.deleteOne({ id });
+    },
+  };
+}
+
+function createAuthorityDecisionRepository(db: any): AuthorityDecisionRepository {
+  const collection = db.collection("authority_decisions");
+  return {
+    async create(data) {
+      const decision: AuthorityDecision = {
+        id: randomUUID(),
+        createdAt: new Date().toISOString(),
+        ...data,
+      };
+      await collection.insert(decision);
+      return decision;
+    },
+    async getById(id) {
+      return await collection.findOne({ id });
+    },
+    async listBySubject(subjectType, subjectId) {
+      const results = await collection.find({ subjectType, subjectId });
+      return results.sort((a: AuthorityDecision, b: AuthorityDecision) =>
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+    },
+    async listByHandoff(handoffId) {
+      const all = await collection.find({});
+      return all.filter((d: AuthorityDecision) =>
+        d.competingHandoffIds.includes(handoffId) ||
+        d.winnerId === handoffId ||
+        d.loserIds.includes(handoffId)
+      );
+    },
+    async getBySubject(subjectType, subjectId) {
+      const results = await collection.find({ subjectType, subjectId });
+      if (results.length === 0) return null;
+      const sorted = results.sort((a: AuthorityDecision, b: AuthorityDecision) =>
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+      return sorted[0] ?? null;
+    },
+    async update(id, data) {
+      await collection.updateOne({ id }, data);
+      const result = await collection.findOne({ id });
+      if (!result) throw new Error(`Authority decision ${id} not found after update`);
       return result;
     },
     async delete(id) {

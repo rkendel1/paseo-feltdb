@@ -299,6 +299,7 @@ export const HandoffSchema = z.object({
       "rejected",
       "cancelled",
       "failed",
+      "revoked",
     ])
     .default("pending"),
   rejectionReason: z.string().optional(), // Why Agent B rejected
@@ -310,6 +311,55 @@ export const HandoffSchema = z.object({
 });
 
 export type Handoff = z.infer<typeof HandoffSchema>;
+
+// ============================================================================
+// Authority Arbitration Entities (Phase 4.4)
+// ============================================================================
+
+/**
+ * AuthorityDecision - Durable record of authority arbitration.
+ *
+ * When multiple handoffs compete for authority over the same resource,
+ * this entity records the deterministic outcome. Decisions are immutable
+ * and survive system restart, enabling recovery of identical authority state.
+ *
+ * Phase 4.4.1: Authority conflict model & invariants
+ */
+export const AuthorityDecisionSchema = z.object({
+  id: z.string(), // Unique decision identifier
+
+  // What is being decided
+  subjectType: z.enum(["task", "workspace", "project"]),
+  subjectId: z.string(), // task/workspace/project ID being competed for
+
+  // The competing handoffs
+  competingHandoffIds: z.array(z.string()), // H1, H2, ... that competed
+
+  // The outcome
+  winnerId: z.string(), // Which handoff gets authority
+  loserIds: z.array(z.string()), // Which handoffs are revoked
+
+  // Reasoning
+  arbitrationReason: z.enum([
+    "first_accepted",           // H1 was there first
+    "explicit_supersession",    // H2.supersedes == H1.id
+    "higher_priority",          // Priority-based selection
+    "existing_authority",       // H1 already active when H2 attempted
+  ]),
+
+  // Durability: decision is immutable once recorded
+  decidedAt: z.string().datetime(),
+  decidedBy: z.enum(["system", "user"]).default("system"), // Who made the decision
+
+  // Concurrency control: version for conditional updates
+  version: z.number().default(1),
+
+  // Metadata
+  createdAt: z.string().datetime(),
+  metadata: z.record(z.any()).optional(),
+});
+
+export type AuthorityDecision = z.infer<typeof AuthorityDecisionSchema>;
 
 /**
  * HandoffScope - Immutable authority boundary when handoff is accepted.
@@ -365,6 +415,7 @@ export const RelationshipSchema = z.object({
     "observation",
     "decision",
     "handoff",
+    "authority_decision",
   ]),
   toId: z.string(),
   toType: z.enum([
@@ -379,6 +430,7 @@ export const RelationshipSchema = z.object({
     "observation",
     "decision",
     "handoff",
+    "authority_decision",
   ]),
   relationshipType: z.enum([
     "contains",
@@ -447,5 +499,6 @@ export type AnyEntity =
   | Observation
   | Decision
   | Handoff
+  | AuthorityDecision
   | Relationship
   | MigrationMarker;

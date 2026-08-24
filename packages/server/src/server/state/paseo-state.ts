@@ -9,7 +9,7 @@
 
 import type { Logger } from "pino";
 import type { Repositories } from "./feltdb/repositories.js";
-import type { Project, Workspace, Agent, Task, Conversation, Message, Run, Observation, Decision, Handoff } from "./feltdb/schema.js";
+import type { Project, Workspace, Agent, Task, Conversation, Message, Run, Observation, Decision, Handoff, AuthorityDecision } from "./feltdb/schema.js";
 
 export interface PaseoState {
   // Project operations
@@ -180,6 +180,23 @@ export interface PaseoState {
     complete(id: string, targetRunId: string): Promise<Handoff>;
     fail(id: string, reason: string): Promise<Handoff>;
     update(id: string, data: Partial<Handoff>): Promise<Handoff>;
+    delete(id: string): Promise<void>;
+  };
+
+  // Authority arbitration operations (Phase 4.4: Durable Authority Arbitration)
+  authorityDecisions: {
+    create(data: Omit<AuthorityDecision, "id" | "createdAt">): Promise<AuthorityDecision>;
+    getById(id: string): Promise<AuthorityDecision | null>;
+    listBySubject(
+      subjectType: AuthorityDecision["subjectType"],
+      subjectId: string
+    ): Promise<AuthorityDecision[]>;
+    listByHandoff(handoffId: string): Promise<AuthorityDecision[]>;
+    getBySubject(
+      subjectType: AuthorityDecision["subjectType"],
+      subjectId: string
+    ): Promise<AuthorityDecision | null>;
+    update(id: string, data: Partial<AuthorityDecision>): Promise<AuthorityDecision>;
     delete(id: string): Promise<void>;
   };
 
@@ -541,6 +558,30 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
       },
       async delete(id) {
         return repos.handoffs.delete(id);
+      },
+    },
+
+    authorityDecisions: {
+      async create(data) {
+        return repos.authorityDecisions.create(data);
+      },
+      async getById(id) {
+        return repos.authorityDecisions.getById(id);
+      },
+      async listBySubject(subjectType, subjectId) {
+        return repos.authorityDecisions.listBySubject(subjectType, subjectId);
+      },
+      async listByHandoff(handoffId) {
+        return repos.authorityDecisions.listByHandoff(handoffId);
+      },
+      async getBySubject(subjectType, subjectId) {
+        return repos.authorityDecisions.getBySubject(subjectType, subjectId);
+      },
+      async update(id, data) {
+        return repos.authorityDecisions.update(id, data);
+      },
+      async delete(id) {
+        return repos.authorityDecisions.delete(id);
       },
     },
 

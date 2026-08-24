@@ -110,9 +110,9 @@ export class AuthorityGuard {
     // 1. RECONSTRUCT ACTIVE AUTHORITY FROM FELTDB
     // Do not trust caller's claims about handoffId
     // Query durable state to derive current scope
-    const activeHandoff = await this.paseoState.handoffs.getActiveForTarget(
-      action.agentId
-    );
+    const activeHandoff = this.paseoState.handoffs
+      ? await this.paseoState.handoffs.getActiveForTarget(action.agentId)
+      : null;
     const scope = activeHandoff ? deriveHandoffScope(activeHandoff) : null;
 
     // 2. IF NO HANDOFF: ALLOW (default authorization via project membership)

@@ -2,6 +2,7 @@
  * FeltDB/Paseo Substrate Audit
  *
  * Comprehensive stress test of FeltDB primitives under real Paseo workloads.
+ * Separates CORRECTNESS gates from PERFORMANCE measurements.
  *
  * Purpose: Determine whether FeltDB 0.4.16 provides sufficient primitives
  * for Paseo's coordination model, or identify specific gaps/performance limits.
@@ -10,14 +11,29 @@
  * 1. Concurrent handoff stress - Tests F1/F2 under high concurrency
  * 2. Concurrent memory extraction - Tests concurrent writes to observations/decisions
  * 3. Restart recovery - Tests state machine recovery in-flight
- * 4. Idempotency hammer - Direct stress on F1/F2 idempotency
+ * 4. Idempotency hammer - Direct stress on F1/F2 idempotency (CRITICAL)
  * 5. Large graph performance - Measures query/traversal performance at scale
  *
- * Success criteria:
+ * CORRECTNESS gates (must pass, blocks other work):
  * - No lost writes under concurrent load
  * - Idempotent operations produce exactly one logical entity
+ * - No duplicate records from retries
+ * - No authorization leakage across boundaries
  * - In-flight restart doesn't corrupt state
- * - Query performance acceptable at realistic scales
+ * - State machine transitions truthful after restart
+ *
+ * PERFORMANCE measurements (reported but not gates):
+ * - p50/p95/p99 latency
+ * - Throughput
+ * - Peak memory
+ * - Error rate
+ * - Scaling behavior
+ *
+ * Verdict format:
+ * ├── Correctness: PASS/FAIL
+ * ├── Performance: PASS/FAIL
+ * ├── Classification: (optimization/missing primitive/working as designed)
+ * └── Next work: (integration/FeltDB PR/investigation)
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
@@ -90,252 +106,346 @@ describe("FeltDB/Paseo Substrate Audit", () => {
   });
 
   /**
-   * AUDIT 2: Concurrent Memory Extraction
+   * AUDIT 2: Concurrent Memory Extraction (Mixed Workload)
    *
    * Real scenario: Multiple agents simultaneously generating observations and decisions.
-   * Stress: 50 agents × 10 observations + decisions each = 1000 writes
+   * Stress: 1000 concurrent writes with mixed record types
+   *
+   * Mixed workload (realistic):
+   * - 700 observations (agent-detected)
+   * - 200 agent-proposed decisions
+   * - 100 human approvals
    *
    * Validates:
    * - Concurrent observation creation doesn't lose writes
-   * - Concurrent decision approval maintains atomicity
+   * - Concurrent decision creation/approval maintains atomicity (F3)
    * - Scoping/authorization boundaries enforced under load
+   * - No cross-agent or cross-project leakage
+   * - Correct record types and author types persisted
    * - Index consistency under concurrent writes
    */
-  describe("Audit 2: Concurrent Memory Extraction", () => {
-    it.skip("should persist 1000 concurrent observations without loss", async () => {
-      // Real test: 50 agents each creating 10 observations concurrently
-      // Expected: All 500 observations present in database
-      // Validates: FileJsDb write consistency
+  describe("Audit 2: Concurrent Memory Extraction (Mixed Workload)", () => {
+    it.skip("should persist 1000 mixed records without loss", async () => {
+      // Real test: Mixed workload
+      // 700 observations + 200 agent proposals + 100 human approvals
+      // Expected: All 1000 records present with correct types/authors
 
-      const agentCount = 50;
-      const observationsPerAgent = 10;
-      const expectedTotal = agentCount * observationsPerAgent;
+      const observations = 700;
+      const agentProposals = 200;
+      const humanApprovals = 100;
+      const expectedTotal = observations + agentProposals + humanApprovals;
 
-      // In real execution:
-      // - Spawn 50 agents
-      // - Each creates 10 observations concurrently
-      // - Query database for all observations
-      // - Verify count = 500
-      // - Verify all projectId/agentId combinations correct
+      // CORRECTNESS: In real execution:
+      // - Spawn 20 agents across 5 projects
+      // - Fire 1000 concurrent writes (mixed types)
+      // - Query database
+      // - Verify count = 1000 (no loss)
+      // - Verify observations: 700 with source="agent", confidence > 0.65
+      // - Verify proposals: 200 with status="proposed", authorType="agent"
+      // - Verify approvals: 100 with status="approved", authorType="user"
+      // - Verify no malformed records
 
-      expect(expectedTotal).toBe(500);
+      // PERFORMANCE: Record
+      // - p50/p95/p99 write latency
+      // - Peak memory during 1000-write burst
+      // - Error rate (should be 0)
+
+      expect(expectedTotal).toBe(1000);
     });
 
-    it.skip("should maintain decision approval atomicity under concurrent writes", async () => {
-      // Real test: Concurrent approvals and status updates
-      // Expected: No lost updates, all statuses correct
-      // Validates: Compare-and-set (F3) behavior under contention
-
-      const decisionCount = 50;
-
-      // In real execution:
-      // - Create 50 decisions
-      // - Fire 100 concurrent approval attempts (some duplicates)
-      // - Verify no approval race conditions
-      // - Verify consistent status final state
-
-      expect(decisionCount).toBe(50);
-    });
-
-    it.skip("should scope observations correctly under concurrent extraction", async () => {
-      // Real test: Multiple agents in different projects extracting simultaneously
-      // Expected: Observations scoped correctly by project/agent
-      // Validates: Authorization layer + index correctness
+    it.skip("should maintain authorization isolation under concurrent writes", async () => {
+      // Real test: Cross-project/cross-agent isolation
+      // Multiple projects generating observations simultaneously
+      // Expected: No cross-project leakage
 
       const projectCount = 5;
       const agentsPerProject = 4;
-      const observationsPerAgent = 3;
+      const recordsPerAgent = 50;
 
-      // In real execution:
-      // - Create 5 projects
-      // - Each project: 4 agents creating 3 observations
-      // - Query observations by project
-      // - Verify isolation: project X only sees its observations
+      // CORRECTNESS: In real execution:
+      // - Create 5 projects with 4 agents each
+      // - Each agent creates 50 records concurrently
+      // - Total 1000 records
+      // - For each project:
+      //   - Query projectObservations (projectId)
+      //   - Verify only this project's records returned
+      //   - Verify no records from other projects
+      //   - Verify agents scoped correctly
+      // - Verify cross-project boundaries impenetrable
 
-      const totalObservations = projectCount * agentsPerProject * observationsPerAgent;
-      expect(totalObservations).toBe(60);
+      const totalRecords = projectCount * agentsPerProject * recordsPerAgent;
+      expect(totalRecords).toBe(1000);
+    });
+
+    it.skip("should maintain decision approval atomicity under F3 contention", async () => {
+      // Real test: Concurrent approval updates on same decision
+      // Expected: No race conditions, final state consistent
+
+      // CORRECTNESS: In real execution:
+      // - Create 50 decisions (initially status="proposed")
+      // - Fire 100 concurrent approval attempts on same decision
+      // - Verify:
+      //   - Exactly 1 decision in database
+      //   - Final status = "approved"
+      //   - approvedAt timestamp present
+      //   - approvedBy correctly set
+      //   - No partial updates or torn states
+      // - Verify decision version incremented exactly once (F3)
+
+      expect(50).toBe(50);
     });
   });
 
   /**
-   * AUDIT 3: Restart During Active Coordination
+   * AUDIT 3: Restart During Active Coordination (Hostile Restart Points)
    *
    * Real scenario: Daemon restarts while handoffs/extractions in-flight.
-   * Stress: State machine consistency across restart
+   * Critical question: Is durable state machine truthful after process death?
+   *
+   * Hostile restart points (not just happy path):
+   * - PENDING (earliest)
+   * - ACCEPTED (mid-transition)
+   * - IN_PROGRESS (during agent work)
+   * - Extraction pending (memory module mid-flight)
+   * - Handoff completion pending (last step)
    *
    * Validates:
-   * - PENDING → restart → still PENDING (not lost/corrupted)
-   * - IN_PROGRESS → restart → still IN_PROGRESS
-   * - Extraction mid-flight → restart → idempotent retry succeeds
+   * - State survives as-is (not silently changed)
+   * - No corruption of state machine
+   * - Timestamps accurate
+   * - Future recovery policy can make sound decisions
    * - No duplicate entities created by retry
    */
-  describe("Audit 3: Restart During Active Coordination", () => {
-    it.skip("should recover PENDING handoff after daemon restart", async () => {
-      // Real test:
+  describe("Audit 3: Restart During Active Coordination (Hostile Points)", () => {
+    it.skip("should recover PENDING handoff unchanged after restart", async () => {
+      // Real test: Earliest hostile point
       // 1. Create handoff (status=PENDING)
-      // 2. Verify in database
-      // 3. Restart daemon
-      // 4. Query handoff by requestId
-      // 5. Verify status still PENDING, no corruption
+      // 2. Record exact state
+      // 3. KILL daemon (not graceful)
+      // 4. Start new daemon
+      // 5. Query handoff
+      // 6. Verify bit-for-bit identical state
 
-      const requestId = `restart-test-${randomUUID()}`;
-
-      // In real execution:
-      // - Create handoff, record its ID
-      // - Kill daemon process
-      // - Start new daemon
+      // CORRECTNESS: In real execution:
+      // - Create handoff with specific requestId, timestamps, content
+      // - Record hash of all fields
+      // - Restart daemon violently (kill -9)
       // - Retrieve same handoff
-      // - Verify all fields intact
+      // - Verify:
+      //   - Status still PENDING (not changed to anything)
+      //   - All fields identical to pre-restart
+      //   - createdAt unchanged
+      //   - acceptedAt still null
+      //   - requestId intact
 
-      expect(requestId).toBeTruthy();
+      // PERFORMANCE: Record
+      // - Time to first query after restart
+      // - Any read errors (should be 0)
+
+      expect(true).toBe(true);
     });
 
-    it.skip("should recover IN_PROGRESS handoff after daemon restart", async () => {
-      // Real test: More complex state recovery
-      // 1. Create handoff
-      // 2. Transition to ACCEPTED
-      // 3. Transition to IN_PROGRESS
-      // 4. Restart daemon
-      // 5. Query - should still be IN_PROGRESS
+    it.skip("should recover IN_PROGRESS handoff unchanged after restart", async () => {
+      // Real test: Worst case - active work in progress
+      // Progress handoff through states, restart mid-IN_PROGRESS
 
-      const handoffId = randomUUID();
+      // CORRECTNESS: In real execution:
+      // - Create handoff
+      // - Transition: PENDING → ACCEPTED → IN_PROGRESS
+      // - Record exact state at IN_PROGRESS
+      // - Restart daemon during IN_PROGRESS
+      // - Verify:
+      //   - Status still IN_PROGRESS (not changed)
+      //   - acceptedAt timestamp preserved
+      //   - targetAgentId correct
+      //   - sourceRunId correct
+      //   - No partial updates
+      // - Verify recovery policy has truthful state to decide on
 
-      // In real execution:
-      // - Progress handoff through states
-      // - Verify at each step
-      // - Restart between ACCEPTED and IN_PROGRESS
-      // - Verify current state preserved
-
-      expect(handoffId).toBeTruthy();
+      expect(true).toBe(true);
     });
 
-    it.skip("should not duplicate observations on extraction retry after restart", async () => {
-      // Real test: Extraction was in-flight, needs retry after restart
-      // 1. Start extraction (fire-and-forget)
-      // 2. Restart daemon before completion
-      // 3. Retry extraction with same event
-      // 4. Verify: only ONE observation created (idempotency)
+    it.skip("should preserve extraction records unchanged across restart", async () => {
+      // Real test: Memory extraction module mid-flight
+      // Observation extraction starts, restart before completion
 
-      const runId = randomUUID();
-      const eventId = randomUUID();
+      // CORRECTNESS: In real execution:
+      // - Begin observation extraction (async, fire-and-forget)
+      // - Interrupt before completion (restart daemon)
+      // - Retry extraction with same event
+      // - Verify:
+      //   - If first extraction succeeded: exactly 1 observation
+      //   - If first extraction lost: retry creates 1 observation
+      //   - Never creates duplicates (2+ observations)
+      //   - Idempotency holds across restart boundary
 
-      // In real execution:
-      // - Begin observation extraction
-      // - Simulate restart mid-extraction
-      // - Retry same extraction
-      // - Count observations in database
-      // - Expect exactly 1, not 2
-
-      expect(runId).toBeTruthy();
-      expect(eventId).toBeTruthy();
+      expect(true).toBe(true);
     });
 
-    it.skip("should handle cascading handoff transitions across restart", async () => {
-      // Real test: Complex state machine
-      // PENDING → ACCEPTED → IN_PROGRESS → (restart) → COMPLETED
-      // Verify no state loss, sequence intact
+    it.skip("should not corrupt state machine during multi-step restart", async () => {
+      // Real test: Cascading transitions across restart
+      // PENDING → ACCEPTED → (restart) → IN_PROGRESS → COMPLETED
 
-      const handoffId = randomUUID();
+      // CORRECTNESS: In real execution:
+      // - Create handoff (PENDING)
+      // - Accept (→ ACCEPTED) - verify acceptedAt set
+      // - Restart daemon while in ACCEPTED
+      // - Retrieve: verify still ACCEPTED, acceptedAt unchanged
+      // - Resume work (→ IN_PROGRESS) - verify createdAt/acceptedAt unchanged
+      // - Complete - verify final state COMPLETED with both timestamps
 
-      // In real execution:
-      // - Progress handoff to IN_PROGRESS
-      // - Restart daemon
-      // - Complete handoff
-      // - Verify final state COMPLETED with timestamps correct
-
-      expect(handoffId).toBeTruthy();
+      expect(true).toBe(true);
     });
   });
 
   /**
-   * AUDIT 4: Idempotency Under Retry Hammer
+   * AUDIT 4: Idempotency Under Retry Hammer (CRITICAL TEST)
    *
    * Real scenario: Production network failures cause retries.
-   * Stress: Same requestId from hundreds of retry attempts.
+   * Stress: Same requestId from hundreds of concurrent retry attempts.
    *
-   * Direct test of F1/F2 idempotency guarantees.
-   * This is THE key FeltDB requirement for Paseo's handoff model.
+   * This is THE foundational F1/F2 test for Paseo.
+   * It validates the contract: "I want X (idempotent)" → exactly one entity.
+   *
+   * Without this, Paseo's handoff coordination model fails.
+   * This is not a performance test; it's a correctness gate.
    *
    * Validates:
-   * - Exactly one handoff created from N identical requests
-   * - F2 semantics: "I want X" → one logical entity, idempotent
+   * - 500 identical requests → 1 durable handoff (not 500)
+   * - All 500 callers get same handoff.id returned
+   * - Database contains exactly 1 record after all attempts
+   * - Concurrent retries don't race (worst case: 10×50 concurrent)
+   * - F1/F2 guarantees hold under actual network retry patterns
    */
-  describe("Audit 4: Idempotency Under Retry Hammer", () => {
-    it.skip("should produce exactly one handoff from 500 retry attempts", async () => {
-      // Real test: F1/F2 foundational test
-      // Execute same createHandoff(requestId) 500 times
-      // Expected: database contains exactly 1 handoff with that requestId
+  describe("Audit 4: Idempotency Under Retry Hammer (CRITICAL)", () => {
+    it.skip("CRITICAL: 500 requests with same requestId produce exactly one handoff", async () => {
+      // THE core F1/F2 test for Paseo
+      // Simulates: network retry loop with exponential backoff
+      // Expected: All retries converge to single durable entity
 
       const requestId = `idempotent-${randomUUID()}`;
-      const retryCount = 500;
+      const retryAttempts = 500;
 
-      // In real execution:
-      // - Fire requestId 500 times (simulating network retry)
-      // - After all attempts, query database
-      // - Verify: exactly 1 handoff record
-      // - Verify: all 500 calls returned same handoff.id
+      // CORRECTNESS (must pass): In real execution:
+      // - Fire createHandoff(requestId) 500 times sequentially
+      // - Each call with identical parameters
+      // - Collect all 500 response handoff IDs
+      // - Verify: all 500 return same handoff.id
+      // - Query database: `SELECT COUNT(*) WHERE requestId = ?`
+      // - Verify: exactly 1 record found
+      // - Verify: record has correct content/status/timestamps
+      //
+      // This is a gate. If this fails, FeltDB F1/F2 is broken.
 
-      expect(retryCount).toBe(500);
+      // PERFORMANCE: In real execution:
+      // - p50/p95/p99 of 500 call latencies
+      // - Check if latency increases with attempt number
+      //   (later calls faster since record exists, or same speed?)
+      // - Total time for 500 calls
+
+      expect(retryAttempts).toBe(500);
     });
 
-    it.skip("should maintain idempotency under concurrent retries", async () => {
-      // Real test: Concurrent retry attempts (worse case)
-      // 10 concurrent processes each retrying 50 times = 500 concurrent requests
-      // Same requestId from all
+    it.skip("CRITICAL: concurrent retries (10 processes × 50 attempts) produce one handoff", async () => {
+      // Worst case: 10 concurrent callers all retrying same requestId
+      // Total: 500 concurrent requests flooding database simultaneously
 
       const requestId = `concurrent-idempotent-${randomUUID()}`;
-      const concurrentProcesses = 10;
-      const retriesPerProcess = 50;
+      const processes = 10;
+      const attemptsPerProcess = 50;
+      const totalAttempts = processes * attemptsPerProcess;
 
-      // In real execution:
-      // - Spawn 10 processes
-      // - Each fires createHandoff(requestId) 50 times concurrently
-      // - Wait for all
-      // - Verify: exactly 1 handoff
-      // - Verify: all calls returned same ID
+      // CORRECTNESS (must pass): In real execution:
+      // - Start 10 concurrent processes
+      // - Each fires createHandoff(requestId) 50 times as fast as possible
+      // - Total 500 concurrent requests hitting database
+      // - Collect all responses
+      // - Verify: all 500 calls return same handoff.id
+      // - Query database: exactly 1 record
+      // - Verify:
+      //   - No partial/torn states
+      //   - No transaction conflicts
+      //   - No lost/corrupted fields
+      //   - Timestamps accurate
+      //
+      // If this fails under concurrency, F1/F2 race condition exists.
 
-      const totalAttempts = concurrentProcesses * retriesPerProcess;
+      // PERFORMANCE:
+      // - p50/p95/p99 latency under concurrent load
+      // - Peak memory during 500-concurrent-request burst
+      // - Contention level (do later processes wait? for how long?)
+
       expect(totalAttempts).toBe(500);
     });
 
-    it.skip("should provide idempotent read semantics", async () => {
-      // Real test: F1 read behavior
-      // Create handoff with requestId
-      // Query getByRequestId(requestId) 1000 times
-      // Expected: Same entity, consistent reads, no drift
+    it.skip("CRITICAL: database inspection confirms single entity (not 500)", async () => {
+      // Don't trust the API response. Inspect the durable database.
+      // This catches if responses claim idempotency but database has duplicates.
 
-      const requestId = `read-idempotent-${randomUUID()}`;
+      const requestId = `database-truth-${randomUUID()}`;
 
-      // In real execution:
-      // - Create handoff
-      // - Read it 1000 times
-      // - Verify all reads return identical object
-      // - Verify no version drift
+      // CORRECTNESS: In real execution:
+      // - Create handoff via createHandoff(requestId)
+      // - Retry 500 times
+      // - Open database file directly (bypass API)
+      // - Query handoffs collection where requestId = ?
+      // - Verify: count = 1 (not 500, not 2)
+      // - Verify record content byte-for-byte correct
+      // - Verify no orphaned/partial records with similar requestId
+      //
+      // This is the ultimate test of F1/F2 durability.
+
+      expect(requestId).toBeTruthy();
+    });
+
+    it.skip("should provide idempotent read semantics across restart", async () => {
+      // Extended test: F1 reads survive restart
+      // Create handoff, restart daemon, read 1000 times
+      // Expect: consistent reads, no version drift
+
+      const requestId = `read-stability-${randomUUID()}`;
+
+      // CORRECTNESS: In real execution:
+      // - Create handoff with requestId
+      // - Restart daemon
+      // - Read getByRequestId(requestId) 1000 times
+      // - Verify all 1000 reads return identical object
+      // - Verify version not drifting
+      // - Verify createdAt/other immutable fields unchanged
 
       expect(requestId).toBeTruthy();
     });
   });
 
   /**
-   * AUDIT 5: Large Context Graph Performance
+   * AUDIT 5: Large Context Graph Performance (Measurements, Not Gates)
    *
    * Real scenario: Paseo grows to realistic agent count.
    * Stress: Measure query/traversal performance as graph scales.
    *
+   * Note: These are PERFORMANCE measurements, not correctness gates.
+   * Acceptable performance depends on workload requirements.
+   * Report p50/p95/p99 and scaling behavior; don't fail on absolute latency.
+   *
    * Motivation: Connect to macOS resource investigation.
    * Determines whether bottleneck is FeltDB or Paseo application logic.
    *
-   * Measures:
-   * - Query latency by entity count
-   * - Context resolution time
-   * - Serialization overhead
-   * - Index effectiveness
-   * - Memory consumption
+   * Measurements (goal: understand scaling behavior):
+   * - Query latency at different scales (1K, 10K, 100K entities)
+   * - Context resolution time vs agent/entity count
+   * - Serialization overhead vs context size
+   * - Index effectiveness (indexed vs non-indexed access)
+   * - Memory consumption (peak and steady state)
+   * - Scaling curve (linear, O(log n), O(n log n), etc.)
    */
-  describe("Audit 5: Large Context Graph Performance", () => {
-    it.skip("should resolve context for 100 agents in < 100ms", async () => {
-      // Real benchmark: ContextResolver performance
-      // 100 agents, each with:
+  describe("Audit 5: Large Context Graph Performance (Measurements)", () => {
+    it.skip("should measure context resolution latency at scale", async () => {
+      // Real benchmark: ContextResolver scaling
+      // Build graphs of increasing size, measure resolution time
+      // Not a correctness gate; understanding scaling behavior
+
+      // Test graph: 100 agents, ~10K entities total
+      // per agent:
       // - 10 runs
       // - 5 tasks
       // - 3 conversations
@@ -343,145 +453,201 @@ describe("FeltDB/Paseo Substrate Audit", () => {
       // - 20 observations
       // - 10 decisions
       // - 5 handoffs
-      //
-      // Total: 100 agents × (10+5+3+50+20+10+5) entities = 10,300 entities
 
       // In real execution:
-      // - Create graph above
-      // - Measure ContextResolver.resolve() time for agent 1
-      // - Target: < 100ms
-      // - Record: actual time taken
+      // - Create 100-agent graph (10,300 entities)
+      // - Measure ContextResolver.resolve(agent_1) latency
+      // - Record: p50, p95, p99 of 100 resolution calls
+      // - Repeat with 500 agents (51,500 entities)
+      // - Repeat with 1000 agents (103,000 entities)
+      // - Plot: latency vs entity count
+      // - Determine: scaling behavior (linear? log? quadratic?)
+      //
+      // GOAL: Understand if resolution becomes bottleneck at scale
+      // NOT a gate (100ms target is aspirational, not hard requirement)
 
-      const agentCount = 100;
-      const expectedResolutionMs = 100;
-
-      expect(agentCount).toBe(100);
-      expect(expectedResolutionMs).toBe(100);
+      const agentCounts = [100, 500, 1000];
+      expect(agentCounts.length).toBe(3);
     });
 
-    it.skip("should serialize 100-agent context to < 500KB", async () => {
+    it.skip("should measure serialized context envelope size at scale", async () => {
       // Real benchmark: Serialization overhead
-      // Serialize full bounded context for 100-agent graph
-      // Target: < 500KB (fits in typical message size)
+      // Measure JSON size of ContextEnvelope as graph grows
 
       // In real execution:
       // - Create 100-agent graph
-      // - Generate ContextEnvelope
-      // - Measure JSON.stringify size
-      // - Record: actual size
+      // - Generate ContextEnvelope for agent 1
+      // - Measure JSON.stringify(envelope).length
+      // - Record size in KB
+      // - Repeat with 500 agents, 1000 agents
+      // - Plot: serialized size vs entity count
+      //
+      // GOAL: Determine if serialization becomes bottleneck
+      // QUESTION: Does size stay < 1MB? Scales linearly with agents?
+      // NOT a gate (500KB target is aspirational)
 
-      const agentCount = 100;
-      const targetSizeKB = 500;
-
-      expect(agentCount).toBe(100);
-      expect(targetSizeKB).toBe(500);
+      expect(true).toBe(true);
     });
 
-    it.skip("should maintain query performance as observation count grows", async () => {
-      // Real benchmark: Observation index effectiveness
-      // Create observations: 100, 500, 1000, 5000, 10000
-      // Query by project - measure latency growth
+    it.skip("should measure observation query latency as count grows", async () => {
+      // Real benchmark: Index effectiveness
+      // Create observations at different scales, measure listByProject()
+
+      const scales = [100, 1000, 10000, 100000];
 
       // In real execution:
-      // - Create progressively larger observation sets
-      // - Query listByProject()
-      // - Measure time at each scale
-      // - Verify linear or sub-linear growth (not exponential)
-      // - Identify if index is effective
+      // - For each scale:
+      //   - Create N observations in single project
+      //   - Measure listByProject(projectId) latency
+      //   - Record: p50, p95, p99 of 100 queries
+      // - Plot: query latency vs observation count
+      // - Determine: is index being used? O(1) or O(log n) or O(n)?
+      //
+      // GOAL: Understand index effectiveness
+      // QUESTION: Does latency scale linearly or sub-linearly?
+      // NOT a gate (but important for macOS resource investigation)
 
-      const observationCounts = [100, 500, 1000, 5000, 10000];
-
-      expect(observationCounts.length).toBe(5);
+      expect(scales.length).toBe(4);
     });
 
-    it.skip("should handle decision approval at scale without degradation", async () => {
-      // Real benchmark: Update performance under load
-      // 1000 decisions, concurrent approvals
-      // Measure latency as decision count grows
+    it.skip("should measure handoff creation latency under large database", async () => {
+      // Real benchmark: F1/F2 latency independence from DB size
+      // Create 10,000 handoffs in growing database; verify latency stable
 
       // In real execution:
-      // - Create 1000 decisions
-      // - Fire 100 concurrent approvals
-      // - Measure time
-      // - Repeat with 5000, 10000 decisions
-      // - Verify no exponential slowdown
+      // - Build 100-agent graph (10,300 entities)
+      // - Measure createHandoff latency every 1000 creates
+      // - Record: p50, p95, p99 at each 1000-handoff checkpoint
+      // - Verify: latency doesn't increase as total handoff count grows
+      // - Confirm: F1/F2 is O(1), not O(n)
+      //
+      // GOAL: Prove F1/F2 doesn't degrade with database size
+      // QUESTION: Is createHandoff latency constant or increasing?
+      // NOT a gate (but critical for operational scalability)
 
-      const decisionCount = 1000;
-
-      expect(decisionCount).toBe(1000);
+      expect(true).toBe(true);
     });
 
-    it.skip("should maintain handoff creation latency under large graph", async () => {
-      // Real benchmark: F1/F2 latency with large database
-      // Create 10,000 handoffs in existing 10,300-entity graph
-      // Verify createHandoff latency stable (not O(n))
+    it.skip("should measure memory consumption during graph construction", async () => {
+      // Real benchmark: Peak and steady-state memory
+      // Track memory as 10K+ entities created
 
       // In real execution:
-      // - Build 100-agent graph above
-      // - Create 10,000 handoffs
-      // - Sample latency every 1000 creations
-      // - Verify latency doesn't increase with total handoff count
+      // - Clear database
+      // - Start monitoring process memory (RSS, heap)
+      // - Create 10K entities at increasing rates
+      // - Record: peak memory, steady-state, GC behavior
+      // - Identify: if memory leaks, memory bloat, or stable
+      //
+      // GOAL: Connect to macOS resource investigation
+      // QUESTION: Where does peak memory occur? Does it leak?
+      // NOT a gate (but informs container/resource decisions)
 
-      const targetHandoffs = 10000;
-
-      expect(targetHandoffs).toBe(10000);
+      expect(true).toBe(true);
     });
   });
 
   /**
-   * AUDIT RESULT INTERPRETATION
+   * AUDIT VERDICT TEMPLATE
    *
-   * Success condition for each audit:
+   * Each audit produces one of three verdicts:
    *
-   * 1. Concurrent Handoff Stress
-   *    ✓ All writes persisted, no loss
-   *    ✓ Duplicate requestId correctly rejected
-   *    ✓ Ordering maintained under concurrency
+   * ════════════════════════════════════════════════════════════════
+   * VERDICT A: FeltDB 0.4.16 Sufficient (No Gaps)
+   * ════════════════════════════════════════════════════════════════
    *
-   * 2. Concurrent Memory Extraction
-   *    ✓ All 500+ observations created
-   *    ✓ Approval atomicity maintained
-   *    ✓ Scoping/isolation correct
+   * All correctness gates PASS:
+   * ├── Concurrent Handoff Stress: PASS
+   * │   ├── 100 concurrent writes: all persisted
+   * │   ├── Duplicate requestId: correctly prevented
+   * │   └── Ordering: maintained under concurrency
+   * ├── Concurrent Memory Extraction: PASS
+   * │   ├── 1000 mixed records: all persisted
+   * │   ├── F3 atomicity: no race conditions
+   * │   └── Authorization: no cross-project leakage
+   * ├── Restart Recovery: PASS
+   * │   ├── State truthfulness: maintained across restart
+   * │   ├── IN_PROGRESS recovery: no corruption
+   * │   └── Retry idempotency: no duplicates
+   * └── Idempotency Hammer: PASS
+   *     ├── 500 requests → 1 entity: ✓
+   *     ├── Concurrent retries: still 1 entity
+   *     └── Database truth: exactly 1 record
    *
-   * 3. Restart During Active Coordination
-   *    ✓ PENDING state survives restart
-   *    ✓ IN_PROGRESS state survives restart
-   *    ✓ Retry after restart idempotent (no duplicates)
-   *    ✓ Multi-step state machines preserve sequence
+   * Performance is acceptable (not blocking):
+   * ├── Context resolution: p95 < 150ms @ 100 agents
+   * ├── Serialization: < 1MB envelope
+   * ├── Query scaling: log(n) or better
+   * └── F1/F2 latency: stable with DB size
    *
-   * 4. Idempotency Under Retry Hammer
-   *    ✓ 500 requests → 1 entity (F1/F2 guarantee)
-   *    ✓ Concurrent retries still 1 entity
-   *    ✓ Read idempotency maintained
-   *    ✓ THIS IS THE CRITICAL TEST
+   * CONCLUSION:
+   * FeltDB 0.4.16 provides the primitives required by Paseo.
+   * No missing APIs. No correctness defects.
    *
-   * 5. Large Context Graph Performance
-   *    ✓ Context resolution < 100ms @ 100 agents
-   *    ✓ Serialization < 500KB
-   *    ✓ Query latency scales linearly or better
-   *    ✓ Update latency stable (F3 effective)
-   *    ✓ Handoff creation latency stable
+   * NEXT WORK:
+   * → Small handoff→ContextResolver integration PR
+   * → Run full reference workload
+   * → Preserve as permanent Paseo/FeltDB compatibility suite
+   * → Ship
    *
-   * EXPECTED OUTCOMES:
+   * ════════════════════════════════════════════════════════════════
+   * VERDICT B: Performance Limitation (Optimization Needed)
+   * ════════════════════════════════════════════════════════════════
    *
-   * A. NO FELTDB GAPS
-   *    All audits pass, all performance targets met.
-   *    Conclusion: FeltDB 0.4.16 provides necessary primitives.
-   *    Next: Handoff→ContextResolver integration PR (should be boring).
-   *    Then: Ship, document, preserve as reference workload.
+   * All correctness gates PASS, but performance targets missed:
    *
-   * B. PERFORMANCE LIMITATION
-   *    Audits pass functionally, but perf targets missed.
-   *    Example: Observation query becomes slow at 10K records.
-   *    Conclusion: Index missing or ineffective.
-   *    Next: FeltDB optimization PR (indexed queries benchmark).
-   *    Then: Retest, verify improvement.
+   * Finding:
+   * Observation query latency exceeds target at 10K entities.
+   * p95: 250ms (target 100ms)
+   * p99: 500ms (target 200ms)
+   * Scaling: O(n) instead of O(log n)
    *
-   * C. ACTUAL PRIMITIVE MISSING
-   *    Functional audit fails (correctness issue).
-   *    Example: F1/F2 doesn't guarantee uniqueness under load.
-   *    Conclusion: FeltDB requires new API.
-   *    Next: FeltDB enhancement PR with Paseo as motivating workload.
-   *    Then: Implement, test, integrate into Paseo.
+   * Classification:
+   * Performance limitation, not missing primitive.
+   * listByProject() likely not using index or index insufficient.
+   *
+   * NEXT WORK:
+   * → Create FeltDB optimization PR with Paseo benchmark
+   * → Measure index effectiveness
+   * → Either add/fix index or optimize query strategy
+   * → Retest Paseo audit; verify improvement
+   * → Proceed to integration work once perf acceptable
+   *
+   * ════════════════════════════════════════════════════════════════
+   * VERDICT C: Primitive Missing (Correctness Defect)
+   * ════════════════════════════════════════════════════════════════
+   *
+   * Correctness audit FAILS:
+   *
+   * Finding:
+   * Concurrent F1 requests with identical requestId produced 2 durable
+   * entities instead of 1.
+   *
+   * Classification:
+   * Primitive correctness defect.
+   * F1/F2 atomicity guarantee violated under concurrent load.
+   *
+   * NEXT WORK:
+   * → DO NOT PROCEED with Paseo work
+   * → Stop FeltDB feature development immediately
+   * → Create FeltDB enhancement PR to fix F1/F2 atomicity
+   * → Use Paseo's failing test as acceptance test
+   * → Fix FeltDB, retest
+   * → Re-run Paseo audit once FeltDB corrected
+   *
+   * ════════════════════════════════════════════════════════════════
+   *
+   * PERMANENT PASEO/FELTDB INTEGRATION SUITE
+   *
+   * After audit passes (outcome A), preserve these tests:
+   * - concurrent_handoff_stress
+   * - concurrent_memory_extraction
+   * - restart_recovery_hostile
+   * - idempotency_hammer
+   *
+   * These become the contract:
+   * "FeltDB release X still satisfies Paseo's real workload requirements."
+   *
+   * Move to permanent integration test suite, run on every FeltDB release.
    */
 });

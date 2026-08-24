@@ -746,16 +746,8 @@ function createHandoffRepository(db: any): HandoffRepository {
       return handoff;
     },
     async createIdempotent(requestId, data) {
-      // F2: Use durable idempotent mutation
-      // Ensures that concurrent requests with same requestId create exactly one handoff
-      // First, check if one already exists
-      const existing = await collection.findOne({ requestId });
-      if (existing) {
-        return existing;
-      }
-
-      // Create new handoff - relies on FeltDB's unique index on requestId
-      // to prevent race conditions (second concurrent request will fail to insert)
+      // F2: Use FeltDB's atomic putIfAbsent for true idempotency
+      // This guarantees exactly one handoff is created, even under concurrent requests
       const handoff: Handoff = {
         id: randomUUID(),
         requestId,
@@ -763,12 +755,21 @@ function createHandoffRepository(db: any): HandoffRepository {
         ...data,
       };
 
+      // Use db.putIfAbsent which is atomic across processes via file-based lock
+      // Only the first call succeeds (inserted=true), others get the same value back
+      const result = await db.putIfAbsent(
+        `handoff:${requestId}`,
+        JSON.stringify(handoff)
+      );
+
+      // Parse the winning handoff (either ours or from the concurrent process that won)
+      const returnedHandoff = JSON.parse(result.value);
+
       try {
-        await collection.insert(handoff);
-        return handoff;
+        await collection.insert(returnedHandoff);
       } catch (error: any) {
-        // Unique constraint violation - another process created it
-        // Retrieve and return the existing one
+        // Unique constraint violation - the handoff was already inserted
+        // Retrieve and return it
         const existing = await collection.findOne({ requestId });
         if (existing) {
           return existing;
@@ -776,6 +777,8 @@ function createHandoffRepository(db: any): HandoffRepository {
         // If still not found, re-throw the original error
         throw error;
       }
+
+      return returnedHandoff;
     },
     async getById(id) {
       return await collection.findOne({ id });

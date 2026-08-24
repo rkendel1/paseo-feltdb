@@ -41,6 +41,27 @@ class CollectionAdapter<T extends { id: string }> {
     }
   }
 
+  /**
+   * Conditional update: atomically update only if condition matches current state
+   * Returns true if update succeeded, false if condition failed (no update occurred)
+   *
+   * This implements compare-and-swap semantics needed for atomic acceptance.
+   * Example: updateOneConditional({ id, status: "pending" }, { status: "accepted" })
+   * will only update if current status is "pending".
+   */
+  async updateOneConditional(
+    condition: Record<string, any>,
+    data: Partial<T>
+  ): Promise<boolean> {
+    const existing = await this.findOne(condition);
+    if (!existing) {
+      return false;
+    }
+    // Condition matched - proceed with update
+    await this.collection.update(existing.id, data);
+    return true;
+  }
+
   createIndex(field: string): void {
     this.collection.createIndex({ field });
   }

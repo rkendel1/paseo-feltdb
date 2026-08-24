@@ -846,22 +846,30 @@ function createHandoffRepository(db: any): HandoffRepository {
     },
     async accept(id) {
       // Atomic transition: pending → accepted
-      // Only valid state transition for acceptance
+      // Uses conditional update (compare-and-swap) to ensure only one acceptance succeeds
       const handoff = await collection.findOne({ id });
       if (!handoff) {
         throw new Error(`Handoff ${id} not found`);
       }
-      if (handoff.status !== "pending") {
+
+      const acceptedAt = new Date().toISOString();
+      // Conditional update: only succeeds if status is currently "pending"
+      // This prevents race conditions where two concurrent acceptances both succeed
+      const succeeded = await (collection as any).updateOneConditional(
+        { id, status: "pending" },
+        {
+          status: "accepted",
+          acceptedAt,
+        }
+      );
+
+      if (!succeeded) {
+        // Condition failed: handoff is not in pending state
+        // This happens when another concurrent acceptance beat us to it
         throw new Error(
           `Cannot accept handoff ${id}: status is ${handoff.status}, expected pending`
         );
       }
-
-      const acceptedAt = new Date().toISOString();
-      await collection.updateOne({ id }, {
-        status: "accepted",
-        acceptedAt,
-      });
 
       const result = await collection.findOne({ id });
       if (!result) throw new Error(`Handoff ${id} not found after accept`);

@@ -179,15 +179,53 @@ export class AuthorityArbiter {
             );
           }
 
-          // Accept new handoff
-          await this.repos.handoffs.accept(handoffId);
-          this.logger.info({ handoffId }, "Handoff accepted (supersession)");
+          // Try to atomically accept new handoff
+          // If it fails (conditional update), another concurrent request beat us
+          try {
+            await this.repos.handoffs.accept(handoffId);
+            this.logger.info({ handoffId }, "Handoff accepted (supersession)");
 
-          return {
-            success: true,
-            handoffId,
-            decision: newDecision,
-          };
+            return {
+              success: true,
+              handoffId,
+              decision: newDecision,
+            };
+          } catch (err) {
+            // Conditional update failed - another handoff already won
+            // Revert revocation of existing handoff since supersession failed
+            if (existingWinner) {
+              await this.repos.handoffs.update(existingWinner.id, {
+                status: "accepted",
+              });
+              this.logger.warn(
+                { handoffId: existingWinner.id },
+                "Revocation reverted: supersession lost race"
+              );
+            }
+
+            // Record rejection decision
+            const rejectionDecision = await this.repos.authorityDecisions.create({
+              subjectType,
+              subjectId,
+              competingHandoffIds: [existingDecision.winnerId, handoffId],
+              winnerId: existingDecision.winnerId,
+              loserIds: [handoffId],
+              arbitrationReason: "existing_authority",
+              decidedAt: new Date().toISOString(),
+              decidedBy: "system",
+              version: 1,
+            });
+
+            return {
+              success: false,
+              handoffId,
+              decision: rejectionDecision,
+              rejection: {
+                reason: "existing_authority",
+                winnerId: existingDecision.winnerId,
+              },
+            };
+          }
         } else {
           // No supersession: existing authority wins
           this.logger.warn(
@@ -221,27 +259,65 @@ export class AuthorityArbiter {
     }
 
     // 5. No competing authority: this handoff is first
-    const decision = await this.repos.authorityDecisions.create({
-      subjectType,
-      subjectId,
-      competingHandoffIds: [handoffId],
-      winnerId: handoffId,
-      loserIds: [],
-      arbitrationReason: "first_accepted",
-      decidedAt: new Date().toISOString(),
-      decidedBy: "system",
-      version: 1,
-    });
+    // Try to atomically accept via conditional update
+    // If it fails, another concurrent request beat us - record rejection
+    try {
+      await this.repos.handoffs.accept(handoffId);
 
-    // 6. Accept the handoff
-    await this.repos.handoffs.accept(handoffId);
-    this.logger.info({ handoffId }, "Handoff accepted (first_accepted)");
+      const decision = await this.repos.authorityDecisions.create({
+        subjectType,
+        subjectId,
+        competingHandoffIds: [handoffId],
+        winnerId: handoffId,
+        loserIds: [],
+        arbitrationReason: "first_accepted",
+        decidedAt: new Date().toISOString(),
+        decidedBy: "system",
+        version: 1,
+      });
 
-    return {
-      success: true,
-      handoffId,
-      decision,
-    };
+      this.logger.info({ handoffId }, "Handoff accepted (first_accepted)");
+
+      return {
+        success: true,
+        handoffId,
+        decision,
+      };
+    } catch (err) {
+      // Conditional update failed: another handoff already accepted
+      // Fetch the new authority and record rejection
+      const newAuthority = await this.repos.authorityDecisions.getBySubject(
+        subjectType,
+        subjectId
+      );
+
+      this.logger.warn(
+        { handoffId, winnerId: newAuthority?.winnerId },
+        "Handoff acceptance failed: lost race to concurrent handoff"
+      );
+
+      const rejectionDecision = await this.repos.authorityDecisions.create({
+        subjectType,
+        subjectId,
+        competingHandoffIds: [handoffId, newAuthority?.winnerId || "unknown"].filter(Boolean),
+        winnerId: newAuthority?.winnerId || handoffId,
+        loserIds: [handoffId],
+        arbitrationReason: "existing_authority",
+        decidedAt: new Date().toISOString(),
+        decidedBy: "system",
+        version: 1,
+      });
+
+      return {
+        success: false,
+        handoffId,
+        decision: rejectionDecision,
+        rejection: {
+          reason: "existing_authority",
+          winnerId: newAuthority?.winnerId,
+        },
+      };
+    }
   }
 
   /**

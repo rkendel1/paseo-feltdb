@@ -219,7 +219,19 @@ export class AuthorityGuard {
           reason: "Cannot create new handoffs while under existing handoff delegation",
         };
       }
-      // Cannot modify handoffs outside of completing/rejecting current one
+      // CONTROL-PLANE EXCEPTION: Allow completion/rejection of current handoff
+      // This is a lifecycle operation, not a delegated mutation
+      if (
+        action.operation === "update" &&
+        (action.context as any)?.status === "completed" ||
+        (action.context as any)?.status === "rejected"
+      ) {
+        if (action.entityId === scope.handoffId) {
+          // Delegated agent can complete/reject their own handoff
+          return { authorized: true, reason: "" };
+        }
+      }
+      // Cannot modify other handoffs while under delegation
       if (action.operation === "update" && action.entityId !== scope.handoffId) {
         return {
           authorized: false,

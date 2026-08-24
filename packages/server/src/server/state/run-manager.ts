@@ -17,6 +17,7 @@
 import type { Logger } from "pino";
 import type { PaseoState } from "./paseo-state.js";
 import type { Run } from "./feltdb/schema.js";
+import { createAuthorityGuard } from "./handoff-authority-guard.js";
 
 export interface RunManagerOptions {
   paseoState: PaseoState;
@@ -36,11 +37,13 @@ export type RunContext = {
 export class RunManager {
   private readonly paseoState: PaseoState;
   private readonly logger: Logger;
+  private readonly authorityGuard: ReturnType<typeof createAuthorityGuard>;
   private readonly activeRuns = new Map<string, { run: Run; startedAt: number }>();
 
   constructor(options: RunManagerOptions) {
     this.paseoState = options.paseoState;
     this.logger = options.logger.child({ module: "run-manager" });
+    this.authorityGuard = createAuthorityGuard(options.paseoState, this.logger);
   }
 
   /**
@@ -66,6 +69,30 @@ export class RunManager {
         return null;
       }
 
+      // AUTHORITY CHECK: Verify agent has authority to create run in this workspace
+      try {
+        await this.authorityGuard.authorize({
+          agentId: input.agentId,
+          operation: "create",
+          entityType: "run",
+          entityId: `run-${input.agentId}-${Date.now()}`,
+          workspaceId: workspace.id,
+          projectId: workspace.projectId,
+          context: { provider: input.provider, cwd: input.cwd },
+        });
+      } catch (err) {
+        this.logger.warn(
+          {
+            agentId: input.agentId,
+            workspaceId: workspace.id,
+            projectId: workspace.projectId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "Run creation denied by AuthorityGuard",
+        );
+        return null;
+      }
+
       // Create durable Run entity
       const run = await this.paseoState.runs.create({
         projectId: workspace.projectId,
@@ -83,7 +110,7 @@ export class RunManager {
 
       this.logger.debug(
         { agentId: input.agentId, runId: run.id, workspaceId: workspace.id },
-        "Run created",
+        "Run created (authorized)",
       );
 
       return run;

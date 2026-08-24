@@ -16,7 +16,7 @@
 
 import type { Logger } from "pino";
 import type { PaseoState } from "./paseo-state.js";
-import { createAuthorityGuard, type AuthorizedAction } from "./handoff-authority-guard.js";
+import { createAuthorityGuard } from "./handoff-authority-guard.js";
 
 export interface UpdateTaskInput {
   status: "open" | "in_progress" | "blocked" | "completed" | "cancelled";

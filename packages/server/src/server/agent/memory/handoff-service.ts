@@ -16,6 +16,7 @@
 import type { Logger } from "pino";
 import type { PaseoState } from "../../state/paseo-state.js";
 import type { Handoff } from "../../state/feltdb/schema.js";
+import { createAuthorityGuard } from "../../state/handoff-authority-guard.js";
 
 export interface HandoffServiceOptions {
   paseoState: PaseoState;
@@ -39,6 +40,7 @@ export class HandoffService {
   private agentId: string;
   private workspaceId: string;
   private projectId: string;
+  private authorityGuard: ReturnType<typeof createAuthorityGuard>;
 
   constructor(options: HandoffServiceOptions) {
     this.paseoState = options.paseoState;
@@ -46,6 +48,7 @@ export class HandoffService {
     this.agentId = options.agentId;
     this.workspaceId = options.workspaceId;
     this.projectId = options.projectId;
+    this.authorityGuard = createAuthorityGuard(options.paseoState, options.logger);
   }
 
   /**
@@ -130,11 +133,23 @@ export class HandoffService {
 
   /**
    * Accept a handoff (called by target agent).
+   * Authorization: Agent must be authorized for handoff operations.
    */
   async acceptHandoff(
     handoffId: string
   ): Promise<Handoff | null> {
     try {
+      // AUTHORITY CHECK: Verify agent has authority to accept handoff
+      await this.authorityGuard.authorize({
+        agentId: this.agentId,
+        operation: "update",
+        entityType: "handoff",
+        entityId: handoffId,
+        workspaceId: this.workspaceId,
+        projectId: this.projectId,
+        context: { status: "accepted" },
+      });
+
       return (
         (await this.paseoState.handoffs?.accept(handoffId)) || null
       );
@@ -149,12 +164,24 @@ export class HandoffService {
 
   /**
    * Reject a handoff (called by target agent).
+   * CONTROL-PLANE EXCEPTION: Delegated agent can reject their own handoff.
    */
   async rejectHandoff(
     handoffId: string,
     reason: string
   ): Promise<Handoff | null> {
     try {
+      // AUTHORITY CHECK: Verify agent has authority to reject handoff
+      await this.authorityGuard.authorize({
+        agentId: this.agentId,
+        operation: "update",
+        entityType: "handoff",
+        entityId: handoffId,
+        workspaceId: this.workspaceId,
+        projectId: this.projectId,
+        context: { status: "rejected" },
+      });
+
       return (
         (await this.paseoState.handoffs?.reject(handoffId, reason)) || null
       );
@@ -169,12 +196,25 @@ export class HandoffService {
 
   /**
    * Complete a handoff (called by target agent after execution).
+   * CONTROL-PLANE EXCEPTION: Delegated agent can complete their own handoff.
    */
   async completeHandoff(
     handoffId: string,
     targetRunId: string
   ): Promise<Handoff | null> {
     try {
+      // AUTHORITY CHECK: Verify agent has authority to complete handoff
+      // This is a control-plane exception: delegated agents can complete their own handoff
+      await this.authorityGuard.authorize({
+        agentId: this.agentId,
+        operation: "update",
+        entityType: "handoff",
+        entityId: handoffId,
+        workspaceId: this.workspaceId,
+        projectId: this.projectId,
+        context: { status: "completed" },
+      });
+
       return (
         (await this.paseoState.handoffs?.complete(
           handoffId,
@@ -192,12 +232,25 @@ export class HandoffService {
 
   /**
    * Fail a handoff (called by target agent if execution fails).
+   * CONTROL-PLANE EXCEPTION: Delegated agent can fail their own handoff.
    */
   async failHandoff(
     handoffId: string,
     reason: string
   ): Promise<Handoff | null> {
     try {
+      // AUTHORITY CHECK: Verify agent has authority to fail handoff
+      // This is a control-plane exception: delegated agents can fail their own handoff
+      await this.authorityGuard.authorize({
+        agentId: this.agentId,
+        operation: "update",
+        entityType: "handoff",
+        entityId: handoffId,
+        workspaceId: this.workspaceId,
+        projectId: this.projectId,
+        context: { status: "failed" },
+      });
+
       return (
         (await this.paseoState.handoffs?.fail(handoffId, reason)) || null
       );

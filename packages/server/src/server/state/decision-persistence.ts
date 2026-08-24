@@ -16,6 +16,7 @@
 
 import type { Logger } from "pino";
 import type { PaseoState } from "./paseo-state.js";
+import { createAuthorityGuard } from "./handoff-authority-guard.js";
 
 export interface RecordDecisionInput {
   content: string;
@@ -33,10 +34,12 @@ export interface DecisionPersistenceOptions {
 export class DecisionPersistence {
   private readonly paseoState: PaseoState;
   private readonly logger: Logger;
+  private readonly authorityGuard: ReturnType<typeof createAuthorityGuard>;
 
   constructor(options: DecisionPersistenceOptions) {
     this.paseoState = options.paseoState;
     this.logger = options.logger.child({ module: "decision-persistence" });
+    this.authorityGuard = createAuthorityGuard(options.paseoState, this.logger);
   }
 
   /**
@@ -81,6 +84,19 @@ export class DecisionPersistence {
         throw new Error(`Workspace ${agent.workspaceId} not found`);
       }
 
+      // AUTHORITY CHECK: Verify agent has authority to create decision
+      await this.authorityGuard.authorize({
+        agentId,
+        operation: "create",
+        entityType: "decision",
+        entityId: `decision-${runId}`,
+        taskId: run.taskId,
+        workspaceId: workspace.id,
+        projectId: run.projectId,
+        runId,
+        context: { status: "proposed" },
+      });
+
       // Create the decision with complete provenance
       const decision = await this.paseoState.decisions.create({
         projectId: run.projectId,
@@ -105,7 +121,7 @@ export class DecisionPersistence {
           runId,
           projectId: run.projectId,
         },
-        "Agent decision recorded (proposed)",
+        "Agent decision recorded (proposed, authorized)",
       );
 
       return decision.id;

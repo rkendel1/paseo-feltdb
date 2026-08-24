@@ -28,6 +28,7 @@ import type {
 } from "./execution-feedback-normalizer.js";
 import type { PaseoState } from "./paseo-state.js";
 import type { Run, Observation } from "./feltdb/schema.js";
+import { createAuthorityGuard } from "./handoff-authority-guard.js";
 
 export interface ObservationPersistenceOptions {
   paseoState: PaseoState;
@@ -72,6 +73,7 @@ function computeDedupKey(event: ToolExecutedEvent): string {
 export class ObservationPersistence {
   private readonly paseoState: PaseoState;
   private readonly logger: Logger;
+  private readonly authorityGuard: ReturnType<typeof createAuthorityGuard>;
   private readonly failureQueue: Array<{
     event: ExecutionFeedbackEvent;
     run: Run;
@@ -82,6 +84,7 @@ export class ObservationPersistence {
   constructor(options: ObservationPersistenceOptions) {
     this.paseoState = options.paseoState;
     this.logger = options.logger.child({ module: "observation-persistence" });
+    this.authorityGuard = createAuthorityGuard(options.paseoState, this.logger);
   }
 
   /**
@@ -175,6 +178,32 @@ export class ObservationPersistence {
       return;
     }
 
+    // AUTHORITY CHECK: Verify agent has authority to create observation
+    try {
+      await this.authorityGuard.authorize({
+        agentId: run.agentId,
+        operation: "create",
+        entityType: "observation",
+        entityId: `observation-${dedupKey}`,
+        taskId: run.taskId,
+        workspaceId: run.workspaceId,
+        projectId: run.projectId,
+        runId: run.id,
+        context: { toolName: event.toolName },
+      });
+    } catch (err) {
+      this.logger.warn(
+        {
+          agentId: run.agentId,
+          runId: run.id,
+          toolName: event.toolName,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "Observation creation denied by AuthorityGuard",
+      );
+      return;
+    }
+
     // Build observation content
     let content = `Tool executed: ${event.toolName}`;
     if (event.status === "completed" && event.result) {
@@ -211,7 +240,7 @@ export class ObservationPersistence {
         toolName: event.toolName,
         status: event.status,
       },
-      "Tool execution observation persisted",
+      "Tool execution observation persisted (authorized)",
     );
   }
 

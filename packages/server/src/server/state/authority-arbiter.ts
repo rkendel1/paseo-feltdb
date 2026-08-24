@@ -79,43 +79,33 @@ export class AuthorityArbiter {
       throw new Error(`Handoff ${handoffId} not found`);
     }
 
-    // 2. Handle already-accepted case (idempotent)
+    // 2. Handle already-accepted case (reject: authority already held)
     if (handoff.status === "accepted") {
-      // Handoff already accepted - check if it still holds authority
+      // Handoff already accepted - fetch current decision
+      const subjectType = handoff.taskId ? ("task" as const) :
+                          handoff.workspaceId ? ("workspace" as const) :
+                          ("project" as const);
+      const subjectId = handoff.taskId || handoff.workspaceId || handoff.projectId;
+
       const decision = await this.repos.authorityDecisions.getBySubject(
-        handoff.taskId ? ("task" as const) :
-        handoff.workspaceId ? ("workspace" as const) :
-        ("project" as const),
-        handoff.taskId || handoff.workspaceId || handoff.projectId
+        subjectType,
+        subjectId
       );
 
-      if (decision?.winnerId === handoffId) {
-        // This handoff is the current authority - idempotent success
-        this.logger.debug(
-          { handoffId },
-          "Handoff already accepted and holds authority (idempotent)"
-        );
-        return {
-          success: true,
-          handoffId,
-          decision,
-        };
-      } else {
-        // This handoff was accepted but lost authority to another
-        this.logger.warn(
-          { handoffId, winnerId: decision?.winnerId },
-          "Handoff already accepted but lost authority"
-        );
-        return {
-          success: false,
-          handoffId,
-          decision,
-          rejection: {
-            reason: "existing_authority",
-            winnerId: decision?.winnerId,
-          },
-        };
-      }
+      // Duplicate acceptance is rejected: authority already held (by this or another handoff)
+      this.logger.debug(
+        { handoffId, currentWinner: decision?.winnerId },
+        "Handoff already accepted: duplicate acceptance rejected"
+      );
+      return {
+        success: false,
+        handoffId,
+        decision: decision || undefined,
+        rejection: {
+          reason: "existing_authority",
+          winnerId: decision?.winnerId,
+        },
+      };
     }
 
     // 3. Validate pending state

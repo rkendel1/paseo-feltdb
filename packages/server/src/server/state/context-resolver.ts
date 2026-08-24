@@ -96,11 +96,27 @@ export class ContextResolver {
     }
 
     // 2. CHECK FOR ACTIVE HANDOFF SCOPE
-    // Active accepted handoff establishes immutable authority boundary
-    const activeHandoff = await this.paseoState.handoffs.getActiveForTarget(
-      input.agentId
-    );
-    const activeHandoffScope = activeHandoff ? deriveHandoffScope(activeHandoff) : null;
+    // Find agent's active handoff, then verify via arbiter it's the authority holder
+    const activeHandoff = await this.paseoState.handoffs.getActiveForTarget(input.agentId);
+    let activeHandoffScope: HandoffScope | null = null;
+
+    if (activeHandoff) {
+      // Verify this handoff is the authority holder via the arbiter
+      const subjectType = activeHandoff.taskId ? ("task" as const) :
+                          activeHandoff.workspaceId ? ("workspace" as const) :
+                          ("project" as const);
+      const subjectId = activeHandoff.taskId || activeHandoff.workspaceId || activeHandoff.projectId;
+
+      const authorityHandoff = await this.paseoState.arbiter.getCurrentAuthority(
+        subjectType,
+        subjectId
+      );
+
+      // Only use this handoff if it's verified to hold authority
+      if (authorityHandoff?.id === activeHandoff.id) {
+        activeHandoffScope = deriveHandoffScope(activeHandoff);
+      }
+    }
 
     // 3. GRAPH TRAVERSAL: Agent → Workspace → Repository → Project
     const workspace = await this.paseoState.workspaces.getById(agent.workspaceId);

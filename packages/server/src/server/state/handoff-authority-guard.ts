@@ -109,23 +109,49 @@ export class AuthorityGuard {
 
     // 1. RECONSTRUCT ACTIVE AUTHORITY FROM FELTDB
     // Do not trust caller's claims about handoffId
-    // Query durable state to derive current scope
-    const activeHandoff = this.paseoState.handoffs
-      ? await this.paseoState.handoffs.getActiveForTarget(action.agentId)
+    // Query arbiter for authoritative handoff holding authority on the subject
+    const subjectType = action.taskId ? ("task" as const) :
+                        action.workspaceId ? ("workspace" as const) :
+                        ("project" as const);
+    const subjectId = action.taskId || action.workspaceId || action.projectId;
+
+    const authorityHandoff = subjectId
+      ? await this.paseoState.arbiter.getCurrentAuthority(subjectType, subjectId)
       : null;
-    const scope = activeHandoff ? deriveHandoffScope(activeHandoff) : null;
+
+    const scope = authorityHandoff ? deriveHandoffScope(authorityHandoff) : null;
 
     // 2. IF NO HANDOFF: ALLOW (default authorization via project membership)
-    if (!scope) {
+    if (!scope || !authorityHandoff) {
       this.logger.debug(
-        { agentId: action.agentId },
-        "AuthorityGuard: No active handoff - default authorization"
+        { agentId: action.agentId, subjectType, subjectId },
+        "AuthorityGuard: No active handoff on subject - default authorization"
       );
       return {
         authorized: true,
-        reason: "No active handoff - default project-level authorization",
+        reason: "No active handoff on subject - default project-level authorization",
         scope: null,
       };
+    }
+
+    // 2.5. VERIFY AGENT HOLDS AUTHORITY
+    // The authorityHandoff's targetAgentId must match the requesting agent
+    if (authorityHandoff.targetAgentId !== action.agentId) {
+      this.logger.warn(
+        {
+          agentId: action.agentId,
+          handoffId: scope.handoffId,
+          authorityHolder: authorityHandoff.targetAgentId,
+          operation: action.operation,
+          entityType: action.entityType,
+        },
+        `AuthorityGuard: Action DENIED - agent is not authority holder`
+      );
+
+      throw new Error(
+        `Authority denied: agent ${action.agentId} does not hold authority. ` +
+          `Authority held by ${authorityHandoff.targetAgentId} via handoff ${scope.handoffId}`
+      );
     }
 
     // 3. IF HANDOFF ACTIVE: ENFORCE STRICT SCOPE

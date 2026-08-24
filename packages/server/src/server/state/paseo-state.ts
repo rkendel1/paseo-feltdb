@@ -204,6 +204,9 @@ export interface PaseoState {
   // Underlying repository access (for advanced use)
   repos: Repositories;
 
+  // Authority arbitration (Phase 4.4: Durable arbitration of competing handoffs)
+  arbiter: ReturnType<typeof createAuthorityArbiter>;
+
   // Lifecycle
   close(): Promise<void>;
 }
@@ -515,7 +518,11 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
         // This is the ONLY acceptance path - guarantees deterministic arbitration
         const result = await arbiter.atomicAccept(id);
         if (result.success) {
-          return await repos.handoffs.getById(id);
+          const handoff = await repos.handoffs.getById(id);
+          if (!handoff) {
+            throw new Error(`Handoff ${id} not found after acceptance`);
+          }
+          return handoff;
         }
         throw new Error(
           `Handoff ${id} acceptance rejected: ${result.rejection?.reason}${
@@ -604,6 +611,8 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
     },
 
     repos,
+
+    arbiter,
 
     async close() {
       log.info("Closing Paseo state");

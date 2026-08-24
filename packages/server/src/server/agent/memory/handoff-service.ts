@@ -132,15 +132,11 @@ export class HandoffService {
    * Accept a handoff (called by target agent).
    */
   async acceptHandoff(
-    handoffId: string,
-    acceptingAgentId: string
+    handoffId: string
   ): Promise<Handoff | null> {
     try {
       return (
-        (await this.paseoState.handoffs?.accept(
-          handoffId,
-          acceptingAgentId
-        )) || null
+        (await this.paseoState.handoffs?.accept(handoffId)) || null
       );
     } catch (err) {
       this.logger.debug(

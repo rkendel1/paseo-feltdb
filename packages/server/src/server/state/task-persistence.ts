@@ -16,6 +16,7 @@
 
 import type { Logger } from "pino";
 import type { PaseoState } from "./paseo-state.js";
+import { createAuthorityGuard, type AuthorizedAction } from "./handoff-authority-guard.js";
 
 export interface UpdateTaskInput {
   status: "open" | "in_progress" | "blocked" | "completed" | "cancelled";
@@ -47,10 +48,12 @@ const VALID_TRANSITIONS: Record<TaskStatus, Set<TaskStatus>> = {
 export class TaskPersistence {
   private readonly paseoState: PaseoState;
   private readonly logger: Logger;
+  private readonly authorityGuard: ReturnType<typeof createAuthorityGuard>;
 
   constructor(options: TaskPersistenceOptions) {
     this.paseoState = options.paseoState;
     this.logger = options.logger.child({ module: "task-persistence" });
+    this.authorityGuard = createAuthorityGuard(options.paseoState, this.logger);
   }
 
   /**
@@ -99,23 +102,20 @@ export class TaskPersistence {
         throw new Error(`Workspace ${agent.workspaceId} not found`);
       }
 
-      // 4. Authorization check: Agent's project must match task's project
-      if (workspace.projectId !== task.projectId) {
-        this.logger.warn(
-          {
-            agentId,
-            agentProject: workspace.projectId,
-            taskProject: task.projectId,
-            taskId,
-            runId,
-          },
-          "Cannot update task: Agent not authorized (different project)",
-        );
-        throw new Error(
-          `Agent ${agentId} cannot update task in project ${task.projectId} ` +
-            `(agent is in project ${workspace.projectId})`,
-        );
-      }
+      // 4. AUTHORITY CHECK: Use AuthorityGuard for handoff-aware enforcement
+      // This replaces simple project-level checks with scope-aware authorization
+      // If agent has active handoff, this will enforce strict boundaries
+      await this.authorityGuard.authorize({
+        agentId,
+        operation: "update",
+        entityType: "task",
+        entityId: taskId,
+        taskId,
+        workspaceId: workspace.id,
+        projectId: workspace.projectId,
+        runId,
+        context: { currentStatus: task.status, nextStatus: input.status },
+      });
 
       // 5. State transition validation
       const currentStatus = task.status;

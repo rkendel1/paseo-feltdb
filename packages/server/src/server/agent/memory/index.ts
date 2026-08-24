@@ -6,7 +6,7 @@
  */
 
 export type { ExtractionEvent } from "./extraction-events.js";
-export {
+export type {
   TaskStartedEvent,
   ToolCalledEvent,
   ToolCompletedEvent,
@@ -17,7 +17,7 @@ export {
 } from "./extraction-events.js";
 export { ObservationExtractor } from "./observation-extractor.js";
 export type { ExtractedObservation } from "./observation-extractor.js";
-export { DecisionRecorder } from "./decision-recorder.ts";
+export { DecisionRecorder } from "./decision-recorder.js";
 export type { RecordedDecision } from "./decision-recorder.js";
 export {
   MemoryExtractionService,

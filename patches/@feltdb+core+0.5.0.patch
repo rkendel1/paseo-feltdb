@@ -1,0 +1,10 @@
+diff --git a/node_modules/@feltdb/core/dist/state-contract.js b/node_modules/@feltdb/core/dist/state-contract.js
+index 09b918f..f78c206 100644
+--- a/node_modules/@feltdb/core/dist/state-contract.js
++++ b/node_modules/@feltdb/core/dist/state-contract.js
+@@ -1,4 +1,4 @@
+-import { FeltDBErrorCode } from './error-codes';
++import { FeltDBErrorCode } from './error-codes.js';
+ class TransactionBuilder {
+     constructor() {
+         this.operations = [];

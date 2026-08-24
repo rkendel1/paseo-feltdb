@@ -183,6 +183,19 @@ export interface HandoffRepository {
   listBySourceAgent(agentId: string): Promise<Handoff[]>;
   listByTargetAgent(agentId: string): Promise<Handoff[]>;
   listByStatus(status: Handoff["status"]): Promise<Handoff[]>;
+  /**
+   * Get active accepted handoff for target agent.
+   * Returns the first accepted handoff where agent is the target.
+   * Returns null if no accepted handoff exists.
+   */
+  getActiveForTarget(targetAgentId: string): Promise<Handoff | null>;
+  /**
+   * Atomically accept a handoff (pending → accepted transition).
+   * Only valid transition: pending → accepted
+   * Throws if handoff is not in pending state.
+   * Sets acceptedAt timestamp.
+   */
+  accept(id: string): Promise<Handoff>;
   update(id: string, data: Partial<Handoff>): Promise<Handoff>;
   delete(id: string): Promise<void>;
 }
@@ -797,6 +810,35 @@ function createHandoffRepository(db: any): HandoffRepository {
     },
     async listByStatus(status) {
       return await collection.find({ status });
+    },
+    async getActiveForTarget(targetAgentId) {
+      // Get first accepted handoff where agent is target
+      // Only accepted handoffs establish active authority boundary
+      const handoffs = await collection.find({ targetAgentId, status: "accepted" });
+      return handoffs.length > 0 ? handoffs[0] : null;
+    },
+    async accept(id) {
+      // Atomic transition: pending → accepted
+      // Only valid state transition for acceptance
+      const handoff = await collection.findOne({ id });
+      if (!handoff) {
+        throw new Error(`Handoff ${id} not found`);
+      }
+      if (handoff.status !== "pending") {
+        throw new Error(
+          `Cannot accept handoff ${id}: status is ${handoff.status}, expected pending`
+        );
+      }
+
+      const acceptedAt = new Date().toISOString();
+      await collection.updateOne({ id }, {
+        status: "accepted",
+        acceptedAt,
+      });
+
+      const result = await collection.findOne({ id });
+      if (!result) throw new Error(`Handoff ${id} not found after accept`);
+      return result;
     },
     async update(id, data) {
       await collection.updateOne({ id }, data);

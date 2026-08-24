@@ -311,6 +311,41 @@ export const HandoffSchema = z.object({
 
 export type Handoff = z.infer<typeof HandoffSchema>;
 
+/**
+ * HandoffScope - Immutable authority boundary when handoff is accepted.
+ * Derived from durable Handoff record; not negotiable by agent.
+ * Used by ContextResolver to enforce bounded context authority.
+ */
+export interface HandoffScope {
+  handoffId: string;
+  taskId: string | undefined;
+  workspaceId: string | undefined;
+  projectId: string;
+  sourceAgentId: string;
+  targetAgentId: string | undefined;
+  acceptedAt: string;
+}
+
+/**
+ * Derive HandoffScope from an accepted Handoff.
+ * Returns null if handoff is not in accepted state.
+ */
+export function deriveHandoffScope(handoff: Handoff): HandoffScope | null {
+  if (handoff.status !== "accepted" || !handoff.acceptedAt) {
+    return null;
+  }
+
+  return {
+    handoffId: handoff.id,
+    taskId: handoff.taskId,
+    workspaceId: handoff.workspaceId,
+    projectId: handoff.projectId,
+    sourceAgentId: handoff.sourceAgentId,
+    targetAgentId: handoff.targetAgentId,
+    acceptedAt: handoff.acceptedAt,
+  };
+}
+
 // ============================================================================
 // Relationships / Edges
 // ============================================================================

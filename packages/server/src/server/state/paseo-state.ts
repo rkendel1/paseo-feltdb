@@ -169,10 +169,12 @@ export interface PaseoState {
     listByTargetAgent(targetAgentId: string): Promise<Handoff[]>;
     listByProject(projectId: string): Promise<Handoff[]>;
     listByStatus(status: Handoff["status"]): Promise<Handoff[]>;
-    accept(
-      id: string,
-      targetAgentId: string
-    ): Promise<Handoff>;
+    /**
+     * Get active accepted handoff for target agent.
+     * Returns the first accepted handoff where agent is the target.
+     */
+    getActiveForTarget(targetAgentId: string): Promise<Handoff | null>;
+    accept(id: string): Promise<Handoff>;
     reject(id: string, reason: string): Promise<Handoff>;
     updateStatus(id: string, status: Handoff["status"]): Promise<Handoff>;
     complete(id: string, targetRunId: string): Promise<Handoff>;
@@ -480,21 +482,11 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
       async listByStatus(status) {
         return repos.handoffs.listByStatus(status);
       },
-      async accept(id, targetAgentId) {
-        const handoff = await repos.handoffs.getById(id);
-        if (!handoff) {
-          throw new Error(`Handoff ${id} not found`);
-        }
-        if (handoff.status !== "pending") {
-          throw new Error(
-            `Cannot accept handoff with status ${handoff.status}`
-          );
-        }
-        return repos.handoffs.update(id, {
-          status: "accepted",
-          targetAgentId,
-          acceptedAt: new Date().toISOString(),
-        });
+      async getActiveForTarget(targetAgentId) {
+        return repos.handoffs.getActiveForTarget(targetAgentId);
+      },
+      async accept(id) {
+        return repos.handoffs.accept(id);
       },
       async reject(id, reason) {
         const handoff = await repos.handoffs.getById(id);

@@ -26,7 +26,9 @@ import type {
   Run,
   Task,
   Workspace,
+  HandoffScope,
 } from "./feltdb/schema.js";
+import { deriveHandoffScope } from "./feltdb/schema.js";
 
 export interface ContextResolverInput {
   agentId: string;
@@ -46,6 +48,7 @@ export interface AgentContext {
   projectObservations: Observation[];
   projectDecisions: Decision[];
   projectTasks: Task[];
+  activeHandoffScope: HandoffScope | null;
 }
 
 export interface ContextResolverOptions {
@@ -92,7 +95,14 @@ export class ContextResolver {
       throw error;
     }
 
-    // 2. GRAPH TRAVERSAL: Agent → Workspace → Repository → Project
+    // 2. CHECK FOR ACTIVE HANDOFF SCOPE
+    // Active accepted handoff establishes immutable authority boundary
+    const activeHandoff = await this.paseoState.handoffs.getActiveForTarget(
+      input.agentId
+    );
+    const activeHandoffScope = activeHandoff ? deriveHandoffScope(activeHandoff) : null;
+
+    // 3. GRAPH TRAVERSAL: Agent → Workspace → Repository → Project
     const workspace = await this.paseoState.workspaces.getById(agent.workspaceId);
     if (!workspace) {
       const error = new Error(
@@ -117,6 +127,31 @@ export class ContextResolver {
       throw error;
     }
 
+    // SCOPE ENFORCEMENT: If active handoff exists, verify scope matches
+    if (activeHandoffScope) {
+      if (activeHandoffScope.projectId !== project.id) {
+        this.logger.warn(
+          {
+            agentId: input.agentId,
+            handoffId: activeHandoffScope.handoffId,
+            handoffProject: activeHandoffScope.projectId,
+            agentProject: project.id,
+          },
+          "Agent workspace does not match handoff scope project"
+        );
+      }
+      if (activeHandoffScope.workspaceId && activeHandoffScope.workspaceId !== workspace.id) {
+        this.logger.warn(
+          {
+            agentId: input.agentId,
+            handoffWorkspace: activeHandoffScope.workspaceId,
+            agentWorkspace: workspace.id,
+          },
+          "Agent workspace does not match handoff scope workspace"
+        );
+      }
+    }
+
     // Repository is optional
     let repository: Repository | null = null;
     if (workspace.repositoryId) {
@@ -131,26 +166,39 @@ export class ContextResolver {
       }
     }
 
-    // 3. TASK RESOLUTION - Deterministic durable relationship
-    // Task is not automatically resolved; policy determines which task is relevant.
-    // For now, return null; 3.6 policy will intelligently select based on request.
-    const task = null;
+    // 4. TASK RESOLUTION
+    // If active handoff specifies taskId, use that; otherwise null
+    let task: Task | null = null;
+    if (activeHandoffScope?.taskId) {
+      task = await this.paseoState.tasks.getById(activeHandoffScope.taskId);
+    }
 
-    // 4. RUNS - Retrieve agent's runs
-    const recentRuns = await this.paseoState.runs.listByAgent(input.agentId);
+    // 5. RUNS - Retrieve agent's runs
+    // If scoped: only runs related to the handoff's task
+    let recentRuns = await this.paseoState.runs.listByAgent(input.agentId);
+    if (activeHandoffScope?.taskId) {
+      recentRuns = recentRuns.filter((run) => run.taskId === activeHandoffScope.taskId);
+    }
 
-    // 5. CONVERSATION - Resolve agent's conversation
+    // 6. CONVERSATION - Resolve agent's conversation
     let conversation: Conversation | null = null;
     const conversations = await this.paseoState.conversations.listByAgent(
       input.agentId
     );
     if (conversations.length > 0) {
       // For now, take the most recent conversation
-      // 3.6 will add policy to select based on request/context
-      conversation = conversations[0]!;
+      // Filter by task if scoped
+      if (activeHandoffScope?.taskId) {
+        const scopedConversation = conversations.find(
+          (c) => c.taskId === activeHandoffScope.taskId
+        );
+        conversation = scopedConversation || conversations[0]!;
+      } else {
+        conversation = conversations[0]!;
+      }
     }
 
-    // 6. MESSAGES - Retrieve messages from conversation
+    // 7. MESSAGES - Retrieve messages from conversation
     let recentMessages: Message[] = [];
     if (conversation) {
       recentMessages = await this.paseoState.messages.listByConversation(
@@ -158,18 +206,36 @@ export class ContextResolver {
       );
     }
 
-    // 7. OBSERVATIONS - Retrieve project-level observations for context
-    const projectObservations = await this.paseoState.observations.listByProject(
+    // 8. OBSERVATIONS - Retrieve observations
+    // If scoped: only observations related to the handoff's task
+    let projectObservations = await this.paseoState.observations.listByProject(
       project.id
     );
+    if (activeHandoffScope?.taskId) {
+      projectObservations = projectObservations.filter(
+        (obs) => obs.taskId === activeHandoffScope.taskId
+      );
+    }
 
-    // 8. DECISIONS - Retrieve project-level decisions for context
-    const projectDecisions = await this.paseoState.decisions.listByProject(
+    // 9. DECISIONS - Retrieve decisions
+    // If scoped: only decisions related to the handoff's task
+    let projectDecisions = await this.paseoState.decisions.listByProject(
       project.id
     );
+    if (activeHandoffScope?.taskId) {
+      projectDecisions = projectDecisions.filter(
+        (dec) => dec.taskId === activeHandoffScope.taskId
+      );
+    }
 
-    // 9. TASKS - Retrieve project-level tasks for context
-    const projectTasks = await this.paseoState.tasks.listByProject(project.id);
+    // 10. TASKS - Retrieve project-level tasks for context
+    // If scoped: only the handoff's task (if specified)
+    let projectTasks = await this.paseoState.tasks.listByProject(project.id);
+    if (activeHandoffScope?.taskId) {
+      projectTasks = projectTasks.filter(
+        (t) => t.id === activeHandoffScope.taskId
+      );
+    }
 
     const context: AgentContext = {
       identity: agent,
@@ -183,6 +249,7 @@ export class ContextResolver {
       projectObservations,
       projectDecisions,
       projectTasks,
+      activeHandoffScope,
     };
 
     this.logger.debug(
@@ -190,6 +257,8 @@ export class ContextResolver {
         agentId: input.agentId,
         projectId: project.id,
         repositoryId: repository?.id ?? null,
+        handoffId: activeHandoffScope?.handoffId ?? null,
+        handoffTaskId: activeHandoffScope?.taskId ?? null,
         runsCount: recentRuns.length,
         messagesCount: recentMessages.length,
         observationsCount: projectObservations.length,

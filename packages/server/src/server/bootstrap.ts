@@ -115,7 +115,7 @@ import {
   type VoiceMcpSocketBridgeManager,
 } from "./voice-mcp-bridge.js";
 import { resolveVoiceMcpBridgeFromRuntime } from "./voice-mcp-bridge-command.js";
-import { initializeState, type PaseoState } from "./state/index.js";
+import { initializeState, type PaseoState, createAgentContextService } from "./state/index.js";
 import { RunManager } from "./state/run-manager.js";
 import { RunRecoveryManager } from "./state/run-recovery.js";
 
@@ -410,6 +410,13 @@ export async function createPaseoDaemon(
       "Run recovery completed",
     );
 
+    // Phase 2: Wire ContextResolver into agent execution
+    const contextService = createAgentContextService({
+      paseoState,
+      logger,
+    });
+    logger.info("AgentContextService initialized for context injection");
+
     const agentManager = new AgentManager({
       clients: {
         ...createAllClients(logger, {
@@ -420,6 +427,7 @@ export async function createPaseoDaemon(
       registry: agentStorage,
       runManager,
       paseoState,
+      contextService,
       logger,
     });
 

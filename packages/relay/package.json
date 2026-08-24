@@ -1,13 +1,15 @@
 {
   "name": "@getpaseo/relay",
-  "version": "0.5.0-beta.4",
+  "version": "0.1.37",
   "description": "Paseo relay for bridging daemon and client connections",
-  "files": [
-    "dist",
-    "!dist/**/*.map"
-  ],
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -28,15 +30,10 @@
       "default": "./src/cloudflare-adapter.ts"
     }
   },
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
-    "clean": "node ../../scripts/clean-package-dist.mjs",
-    "build": "tsc -p tsconfig.json --incremental false",
-    "build:clean": "npm run clean && npm run build",
-    "prepack": "npm run build:clean",
-    "typecheck": "tsgo --noEmit",
+    "build": "node -e \"require('node:fs').rmSync('dist',{ recursive: true, force: true })\" && tsc -p tsconfig.json --incremental false",
+    "prepack": "npm run build",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -46,9 +43,10 @@
     "ws": "^8.14.2"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241230.0",
     "@types/node": "^20.9.0",
     "@types/ws": "^8.5.8",
     "typescript": "^5.2.2",
-    "vitest": "^4.1.6"
+    "vitest": "^3.2.4"
   }
 }

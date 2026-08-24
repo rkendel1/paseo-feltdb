@@ -3,9 +3,10 @@
     "target": "ES2020",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2023", "DOM"],
+    "lib": ["ES2020", "DOM"],
+    "baseUrl": "./src",
     "paths": {
-      "@server/*": ["./src/*"]
+      "@server/*": ["./*"]
     },
     "skipLibCheck": true,
     "resolveJsonModule": true,
@@ -22,11 +23,11 @@
     "declarationMap": true,
     "sourceMap": true
   },
-  "include": ["src/server/**/*", "src/services/**/*", "src/terminal/**/*"],
+  "include": ["src/server/**/*", "src/services/**/*"],
   "exclude": [
     "node_modules",
     "dist",
-    "src/server/**/test-utils/**",
+    "src/server/test-utils/**",
     "src/server/daemon-e2e/**",
     "src/server/**/*.e2e.ts",
     "src/server/**/*.e2e.tsx",

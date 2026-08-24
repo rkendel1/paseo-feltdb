@@ -1,16 +1,14 @@
+import { describe, expect, test } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
-import { beforeAll, beforeEach, describe, expect, test } from "vitest";
-import { WebSocket } from "ws";
-import { DaemonClient } from "../test-utils/daemon-client.js";
+import WebSocket from "ws";
+
 import { createTestPaseoDaemon } from "../test-utils/paseo-daemon.js";
-import {
-  canRunRealProvider,
-  createRealProviderClients,
-  getRealProviderConfig,
-} from "./real-provider-test-config.js";
+import { DaemonClient } from "../test-utils/daemon-client.js";
+import { ClaudeAgentClient } from "../agent/providers/claude-agent.js";
+import { getFullAccessConfig, isProviderAvailable } from "./agent-configs.js";
 
 function tmpCwd(): string {
   return mkdtempSync(path.join(tmpdir(), "daemon-real-claude-autonomous-wake-"));
@@ -29,7 +27,7 @@ const BACKGROUND_TASK_SLEEP_5_PROMPT = [
 const BACKGROUND_TASK_SLEEP_5_REPEAT_PROMPT = `do it again: ${BACKGROUND_TASK_SLEEP_5_PROMPT}`;
 
 function sanitizeClaudeProjectPath(cwd: string): string {
-  return cwd.replace(/[\\/.]/g, "-").replace(/_/g, "-");
+  return cwd.replace(/[\\/\.]/g, "-").replace(/_/g, "-");
 }
 
 function resolveClaudeTranscriptPath(params: { cwd: string; sessionId: string }): string {
@@ -64,13 +62,13 @@ function resolveClaudeTranscriptPath(params: { cwd: string; sessionId: string })
   );
 }
 
-interface ClaudeTranscriptLine {
+type ClaudeTranscriptLine = {
   type?: unknown;
   timestamp?: unknown;
   uuid?: unknown;
   parentUuid?: unknown;
   message?: { content?: unknown } | null;
-}
+};
 
 function readTranscriptLines(pathname: string): ClaudeTranscriptLine[] {
   if (!existsSync(pathname)) {
@@ -161,10 +159,10 @@ function parseTimestamp(line: ClaudeTranscriptLine): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-interface TranscriptRaceEvidence {
+type TranscriptRaceEvidence = {
   helloAssistantText: string;
   notificationOutcomeAssistantText: string;
-}
+};
 
 function extractTranscriptRaceEvidence(
   lines: ClaudeTranscriptLine[],
@@ -172,13 +170,13 @@ function extractTranscriptRaceEvidence(
   const userLines = lines.filter((line) => line.type === "user");
   const assistantLines = lines.filter((line) => line.type === "assistant");
   const doItAgain = [...userLines]
-    .toReversed()
+    .reverse()
     .find((line) => readUserText(line).toLowerCase().includes("do it again"));
   const isHelloPrompt = (line: ClaudeTranscriptLine): boolean => {
     const text = readUserText(line).trim().toLowerCase();
     return text === "hello" || text === "say exactly hello";
   };
-  const helloUser = [...userLines].toReversed().find((line) => isHelloPrompt(line));
+  const helloUser = [...userLines].reverse().find((line) => isHelloPrompt(line));
 
   if (!doItAgain || !helloUser || typeof helloUser.uuid !== "string") {
     return null;
@@ -204,7 +202,7 @@ function extractTranscriptRaceEvidence(
     return readUserText(line).includes("<task-notification>");
   });
   const taskNotificationUser =
-    [...taskNotificationCandidates].toReversed().find((line) => parseTimestamp(line) >= helloTs) ??
+    [...taskNotificationCandidates].reverse().find((line) => parseTimestamp(line) >= helloTs) ??
     taskNotificationCandidates[0];
   if (!taskNotificationUser || typeof taskNotificationUser.uuid !== "string") {
     return null;
@@ -287,14 +285,6 @@ async function runPreHelloNoise(params: { wsUrl: string; durationMs: number }): 
   const deadline = Date.now() + params.durationMs;
   while (Date.now() < deadline) {
     await new Promise<void>((resolve) => {
-      let pendingResolve: (() => void) | null = resolve;
-      const settle = () => {
-        if (!pendingResolve) return;
-        const fn = pendingResolve;
-        pendingResolve = null;
-        clearTimeout(fallback);
-        fn();
-      };
       const ws = new WebSocket(params.wsUrl);
       const fallback = setTimeout(() => {
         try {
@@ -302,7 +292,7 @@ async function runPreHelloNoise(params: { wsUrl: string; durationMs: number }): 
         } catch {
           // ignore
         }
-        settle();
+        resolve();
       }, 250);
 
       ws.once("open", () => {
@@ -330,8 +320,14 @@ async function runPreHelloNoise(params: { wsUrl: string; durationMs: number }): 
         }, 5);
       });
 
-      ws.once("close", settle);
-      ws.once("error", settle);
+      ws.once("close", () => {
+        clearTimeout(fallback);
+        resolve();
+      });
+      ws.once("error", () => {
+        clearTimeout(fallback);
+        resolve();
+      });
     });
   }
 }
@@ -356,209 +352,60 @@ function summarizeTimelineEntry(entry: {
   return `[${item.type}]`;
 }
 
-async function waitForTranscriptRaceEvidence(params: {
-  transcriptPath: string;
-  waitError: Error | null;
-  afterWaitStatus: string;
-  cancelRecovered: boolean;
-}): Promise<TranscriptRaceEvidence> {
-  const { transcriptPath, waitError, afterWaitStatus, cancelRecovered } = params;
-  let evidence: TranscriptRaceEvidence | null = null;
-  const transcriptDeadline = Date.now() + 20_000;
-  while (Date.now() < transcriptDeadline) {
-    const lines = readTranscriptLines(transcriptPath);
-    evidence = extractTranscriptRaceEvidence(lines);
-    if (evidence) {
-      break;
-    }
-    await sleep(250);
-  }
-  if (!evidence) {
-    const transcriptDump = summarizeTranscriptTail(readTranscriptLines(transcriptPath));
-    throw new Error(
-      [
-        "Failed to extract transcript race evidence (hello assistant and notification-turn assistant).",
-        `transcriptPath=${transcriptPath}`,
-        `waitError=${waitError ? waitError.message : "null"}`,
-        `afterWaitStatus=${afterWaitStatus}`,
-        `cancelRecovered=${cancelRecovered}`,
-        "transcriptTail:",
-        transcriptDump,
-      ].join("\n"),
-    );
-  }
-  return evidence;
-}
-
-async function waitForAssistantTextCombined(params: {
-  client: DaemonClient;
-  agentId: string;
-  helloAssistant: string;
-  notificationAssistant: string;
-}): Promise<string> {
-  const { client, agentId, helloAssistant, notificationAssistant } = params;
-  let assistantTextCombined = "";
-  const timelineDeadline = Date.now() + 20_000;
-  while (Date.now() < timelineDeadline) {
-    const timeline = await client.fetchAgentTimeline(agentId, {
-      direction: "tail",
-      limit: 0,
-      projection: "canonical",
-    });
-    const assistantTexts = timeline.entries
-      .filter(
-        (
-          entry,
-        ): entry is {
-          item: { type: "assistant_message"; text: string };
-        } => entry.item.type === "assistant_message",
-      )
-      .map((entry) => compactText(entry.item.text));
-    assistantTextCombined = assistantTexts.join("");
-    if (
-      assistantTextCombined.includes(helloAssistant) &&
-      assistantTextCombined.includes(notificationAssistant)
-    ) {
-      break;
-    }
-    await sleep(250);
-  }
-  return assistantTextCombined;
-}
-
 describe("daemon E2E (real claude) - autonomous wake from background task", () => {
-  let canRun = false;
-
-  beforeAll(async () => {
-    canRun = await canRunRealProvider("claude");
-  });
-
-  beforeEach((context) => {
-    if (!canRun) {
-      context.skip();
-    }
-  });
-
-  test("A: background sleep returns idle, then wakes autonomously and appends timeline activity", async () => {
-    const logger = pino({ level: "silent" });
-    const cwd = tmpCwd();
-    const daemon = await createTestPaseoDaemon({
-      agentClients: createRealProviderClients(["claude"], logger),
-      logger,
-    });
-    const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
-
-    try {
-      await client.connect();
-      await client.fetchAgents({
-        subscribe: { subscriptionId: "claude-autonomous-abc-a" },
+  test.runIf(isProviderAvailable("claude"))(
+    "A: background sleep returns idle, then wakes autonomously and appends timeline activity",
+    async () => {
+      const logger = pino({ level: "silent" });
+      const cwd = tmpCwd();
+      const daemon = await createTestPaseoDaemon({
+        agentClients: { claude: new ClaudeAgentClient({ logger }) },
+        logger,
       });
+      const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
 
-      const agent = await client.createAgent({
-        cwd,
-        title: "claude-autonomous-abc-a",
-        ...getRealProviderConfig("claude"),
-      });
+      try {
+        await client.connect();
+        await client.fetchAgents({
+          subscribe: { subscriptionId: "claude-autonomous-abc-a" },
+        });
 
-      const autonomousWakeToken = `AUTONOMOUS_WAKE_${Date.now().toString(36)}`;
-      await client.sendMessage(
-        agent.id,
-        [
-          BACKGROUND_TASK_SLEEP_5_PROMPT,
-          `When you later receive the task completion notification, reply with exactly: ${autonomousWakeToken}`,
-        ].join(" "),
-      );
-      const firstFinish = await client.waitForFinish(agent.id, 240_000);
-      expect(firstFinish.status).toBe("idle");
+        const agent = await client.createAgent({
+          cwd,
+          title: "claude-autonomous-abc-a",
+          ...getFullAccessConfig("claude"),
+        });
 
-      const timelineAtIdle = await client.fetchAgentTimeline(agent.id, {
-        direction: "tail",
-        limit: 0,
-        projection: "canonical",
-      });
+        const autonomousWakeToken = `AUTONOMOUS_WAKE_${Date.now().toString(36)}`;
+        await client.sendMessage(
+          agent.id,
+          [
+            BACKGROUND_TASK_SLEEP_5_PROMPT,
+            `When you later receive the task completion notification, reply with exactly: ${autonomousWakeToken}`,
+          ].join(" "),
+        );
+        const firstFinish = await client.waitForFinish(agent.id, 240_000);
+        expect(firstFinish.status).toBe("idle");
 
-      await client.waitForAgentUpsert(
-        agent.id,
-        (snapshot) => snapshot.status === "running",
-        30_000,
-      );
-
-      const autonomousFinish = await client.waitForFinish(agent.id, 120_000);
-      expect(autonomousFinish.status).toBe("idle");
-
-      const timelineAfterWake = await client.fetchAgentTimeline(agent.id, {
-        direction: "tail",
-        limit: 0,
-        projection: "canonical",
-      });
-      expect(timelineAfterWake.entries.length).toBeGreaterThanOrEqual(
-        timelineAtIdle.entries.length,
-      );
-      let sawTimelineGrowth = timelineAfterWake.entries.length > timelineAtIdle.entries.length;
-      const growthDeadline = Date.now() + 20_000;
-      while (!sawTimelineGrowth && Date.now() < growthDeadline) {
-        await sleep(250);
-        const nextTimeline = await client.fetchAgentTimeline(agent.id, {
+        const timelineAtIdle = await client.fetchAgentTimeline(agent.id, {
           direction: "tail",
           limit: 0,
+          projection: "canonical",
         });
-        sawTimelineGrowth = nextTimeline.entries.length > timelineAtIdle.entries.length;
-      }
-      expect(sawTimelineGrowth).toBe(true);
-    } finally {
-      await client.close();
-      await daemon.close();
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  }, 420_000);
 
-  test("B: immediate HELLO before task notification returns promptly without deadlock", async () => {
-    const logger = pino({ level: "silent" });
-    const cwd = tmpCwd();
-    const daemon = await createTestPaseoDaemon({
-      agentClients: createRealProviderClients(["claude"], logger),
-      logger,
-    });
-    const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
+        await client.waitForAgentUpsert(
+          agent.id,
+          (snapshot) => snapshot.status === "running",
+          30_000,
+        );
 
-    try {
-      await client.connect();
-      await client.fetchAgents({
-        subscribe: { subscriptionId: "claude-autonomous-abc-b" },
-      });
-
-      const agent = await client.createAgent({
-        cwd,
-        title: "claude-autonomous-abc-b",
-        ...getRealProviderConfig("claude"),
-      });
-
-      await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_PROMPT);
-      const kickoffFinish = await client.waitForFinish(agent.id, 240_000);
-      expect(kickoffFinish.status).toBe("idle");
-
-      await client.sendMessage(agent.id, "say exactly HELLO");
-      const helloFinish = await client.waitForFinish(agent.id, 180_000);
-      expect(helloFinish.status).toBe("idle");
-      expect((helloFinish.lastMessage ?? "").trim().toUpperCase()).toContain("HELLO");
-
-      // The background task may complete before, during, or after the HELLO
-      // turn. When the task_notification races with HELLO, the notification
-      // is handled during the foreground turn and there is no separate
-      // autonomous running edge afterwards. Wait for a possible autonomous
-      // wake; if none arrives within the expected sleep window, verify the
-      // agent settled to idle (notification was already processed).
-      const autonomousWake = await client
-        .waitForAgentUpsert(agent.id, (snapshot) => snapshot.status === "running", 15_000)
-        .catch(() => null);
-
-      if (autonomousWake) {
         const autonomousFinish = await client.waitForFinish(agent.id, 120_000);
         expect(autonomousFinish.status).toBe("idle");
 
         const timelineAfterWake = await client.fetchAgentTimeline(agent.id, {
           direction: "tail",
           limit: 0,
+          projection: "canonical",
         });
         expect(timelineAfterWake.entries.length).toBeGreaterThanOrEqual(
           timelineAtIdle.entries.length,
@@ -570,214 +417,396 @@ describe("daemon E2E (real claude) - autonomous wake from background task", () =
           const nextTimeline = await client.fetchAgentTimeline(agent.id, {
             direction: "tail",
             limit: 0,
+            projection: "canonical",
           });
           sawTimelineGrowth = nextTimeline.entries.length > timelineAtIdle.entries.length;
         }
         expect(sawTimelineGrowth).toBe(true);
-      } else {
-        const current = await client.fetchAgent({ agentId: agent.id });
-        expect(current.agent.status).toBe("idle");
+      } finally {
+        await client.close();
+        await daemon.close();
+        rmSync(cwd, { recursive: true, force: true });
       }
-    } finally {
-      await client.close();
-      await daemon.close();
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  }, 420_000);
+    },
+    420_000,
+  );
 
-  test("C: interrupt during overlap returns quickly and does not leave agent stuck running", async () => {
-    const logger = pino({ level: "silent" });
-    const cwd = tmpCwd();
-    const daemon = await createTestPaseoDaemon({
-      agentClients: createRealProviderClients(["claude"], logger),
-      logger,
-    });
-    const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
-
-    try {
-      await client.connect();
-      await client.fetchAgents({
-        subscribe: { subscriptionId: "claude-autonomous-abc-c" },
+  test.runIf(isProviderAvailable("claude"))(
+    "B: immediate HELLO before task notification returns promptly without deadlock",
+    async () => {
+      const logger = pino({ level: "silent" });
+      const cwd = tmpCwd();
+      const daemon = await createTestPaseoDaemon({
+        agentClients: { claude: new ClaudeAgentClient({ logger }) },
+        logger,
       });
+      const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
 
-      const agent = await client.createAgent({
-        cwd,
-        title: "claude-autonomous-abc-c",
-        ...getRealProviderConfig("claude"),
-      });
+      try {
+        await client.connect();
+        await client.fetchAgents({
+          subscribe: { subscriptionId: "claude-autonomous-abc-b" },
+        });
 
-      await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_PROMPT);
-      const firstKickoff = await client.waitForFinish(agent.id, 240_000);
-      expect(firstKickoff.status).toBe("idle");
-      await client.waitForAgentUpsert(
-        agent.id,
-        (snapshot) => snapshot.status === "running",
-        30_000,
-      );
-      const firstAutonomousFinish = await client.waitForFinish(agent.id, 120_000);
-      expect(firstAutonomousFinish.status).toBe("idle");
+        const agent = await client.createAgent({
+          cwd,
+          title: "claude-autonomous-abc-b",
+          ...getFullAccessConfig("claude"),
+        });
 
-      await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_REPEAT_PROMPT);
-      const secondKickoff = await client.waitForFinish(agent.id, 240_000);
-      expect(secondKickoff.status).toBe("idle");
+        await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_PROMPT);
+        const kickoffFinish = await client.waitForFinish(agent.id, 240_000);
+        expect(kickoffFinish.status).toBe("idle");
 
-      await client.sendMessage(agent.id, "say exactly HELLO");
-      const helloFinish = await client.waitForFinish(agent.id, 180_000);
-      expect(helloFinish.status).toBe("idle");
+        await client.sendMessage(agent.id, "say exactly HELLO");
+        const helloFinish = await client.waitForFinish(agent.id, 180_000);
+        expect(helloFinish.status).toBe("idle");
+        expect((helloFinish.lastMessage ?? "").trim().toUpperCase()).toContain("HELLO");
 
-      // The second background task may complete before, during, or after
-      // HELLO. When it races with HELLO, the notification is handled during
-      // the foreground turn and there is no separate autonomous running edge.
-      const autonomousWake = await client
-        .waitForAgentUpsert(agent.id, (snapshot) => snapshot.status === "running", 15_000)
-        .catch(() => null);
+        // The background task may complete before, during, or after the HELLO
+        // turn. When the task_notification races with HELLO, the notification
+        // is handled during the foreground turn and there is no separate
+        // autonomous running edge afterwards. Wait for a possible autonomous
+        // wake; if none arrives within the expected sleep window, verify the
+        // agent settled to idle (notification was already processed).
+        const autonomousWake = await client
+          .waitForAgentUpsert(
+            agent.id,
+            (snapshot) => snapshot.status === "running",
+            15_000,
+          )
+          .catch(() => null);
 
-      if (autonomousWake) {
-        const startedAt = Date.now();
-        await client.cancelAgent(agent.id);
-        const interruptDurationMs = Date.now() - startedAt;
-        expect(interruptDurationMs).toBeLessThan(10_000);
-
-        const settled = await client.waitForFinish(agent.id, 20_000);
-        expect(settled.status).toBe("idle");
+        if (autonomousWake) {
+          const autonomousFinish = await client.waitForFinish(agent.id, 120_000);
+          expect(autonomousFinish.status).toBe("idle");
+        } else {
+          const current = await client.fetchAgent(agent.id);
+          expect(current.agent.status).toBe("idle");
+        }
+      } finally {
+        await client.close();
+        await daemon.close();
+        rmSync(cwd, { recursive: true, force: true });
       }
+    },
+    420_000,
+  );
 
-      const finalResult = await client.fetchAgent({ agentId: agent.id });
-      expect(finalResult?.agent.status).toBe("idle");
-    } finally {
-      await client.close();
-      await daemon.close();
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  }, 600_000);
-
-  test("returns to running after background sleep completes without a second prompt", async () => {
-    const logger = pino({ level: "silent" });
-    const cwd = tmpCwd();
-    const daemon = await createTestPaseoDaemon({
-      agentClients: createRealProviderClients(["claude"], logger),
-      logger,
-    });
-    const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
-
-    try {
-      await client.connect();
-      await client.fetchAgents({
-        subscribe: { subscriptionId: "claude-autonomous-wake-real" },
+  test.runIf(isProviderAvailable("claude"))(
+    "C: interrupt during overlap returns quickly and does not leave agent stuck running",
+    async () => {
+      const logger = pino({ level: "silent" });
+      const cwd = tmpCwd();
+      const daemon = await createTestPaseoDaemon({
+        agentClients: { claude: new ClaudeAgentClient({ logger }) },
+        logger,
       });
+      const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
 
-      const agent = await client.createAgent({
-        cwd,
-        title: "claude-autonomous-wake-real",
-        ...getRealProviderConfig("claude"),
+      try {
+        await client.connect();
+        await client.fetchAgents({
+          subscribe: { subscriptionId: "claude-autonomous-abc-c" },
+        });
+
+        const agent = await client.createAgent({
+          cwd,
+          title: "claude-autonomous-abc-c",
+          ...getFullAccessConfig("claude"),
+        });
+
+        await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_PROMPT);
+        const firstKickoff = await client.waitForFinish(agent.id, 240_000);
+        expect(firstKickoff.status).toBe("idle");
+        await client.waitForAgentUpsert(
+          agent.id,
+          (snapshot) => snapshot.status === "running",
+          30_000,
+        );
+        const firstAutonomousFinish = await client.waitForFinish(agent.id, 120_000);
+        expect(firstAutonomousFinish.status).toBe("idle");
+
+        await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_REPEAT_PROMPT);
+        const secondKickoff = await client.waitForFinish(agent.id, 240_000);
+        expect(secondKickoff.status).toBe("idle");
+
+        await client.sendMessage(agent.id, "say exactly HELLO");
+        const helloFinish = await client.waitForFinish(agent.id, 180_000);
+        expect(helloFinish.status).toBe("idle");
+
+        // The second background task may complete before, during, or after
+        // HELLO. When it races with HELLO, the notification is handled during
+        // the foreground turn and there is no separate autonomous running edge.
+        const autonomousWake = await client
+          .waitForAgentUpsert(
+            agent.id,
+            (snapshot) => snapshot.status === "running",
+            15_000,
+          )
+          .catch(() => null);
+
+        if (autonomousWake) {
+          const startedAt = Date.now();
+          await client.cancelAgent(agent.id);
+          const interruptDurationMs = Date.now() - startedAt;
+          expect(interruptDurationMs).toBeLessThan(10_000);
+
+          const settled = await client.waitForFinish(agent.id, 20_000);
+          expect(settled.status).toBe("idle");
+        }
+
+        const finalResult = await client.fetchAgent(agent.id);
+        expect(finalResult?.agent.status).toBe("idle");
+      } finally {
+        await client.close();
+        await daemon.close();
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+    600_000,
+  );
+
+  test.runIf(isProviderAvailable("claude"))(
+    "returns to running after background sleep completes without a second prompt",
+    async () => {
+      const logger = pino({ level: "silent" });
+      const cwd = tmpCwd();
+      const daemon = await createTestPaseoDaemon({
+        agentClients: { claude: new ClaudeAgentClient({ logger }) },
+        logger,
       });
+      const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
 
-      await client.sendMessage(
-        agent.id,
-        [
-          "Use a background task to run exactly: sleep 5",
-          "Do not wait for it to finish.",
-          "After launching it, reply with exactly: SPAWNED",
-        ].join(" "),
-      );
+      try {
+        await client.connect();
+        await client.fetchAgents({
+          subscribe: { subscriptionId: "claude-autonomous-wake-real" },
+        });
 
-      const firstFinish = await client.waitForFinish(agent.id, 240_000);
-      expect(firstFinish.status).toBe("idle");
+        const agent = await client.createAgent({
+          cwd,
+          title: "claude-autonomous-wake-real",
+          ...getFullAccessConfig("claude"),
+        });
 
-      const timelineBeforeWake = await client.fetchAgentTimeline(agent.id, {
-        direction: "tail",
-        limit: 0,
-        projection: "canonical",
+        await client.sendMessage(
+          agent.id,
+          [
+            "Use a background task to run exactly: sleep 5",
+            "Do not wait for it to finish.",
+            "After launching it, reply with exactly: SPAWNED",
+          ].join(" "),
+        );
+
+        const firstFinish = await client.waitForFinish(agent.id, 240_000);
+        expect(firstFinish.status).toBe("idle");
+
+        const timelineBeforeWake = await client.fetchAgentTimeline(agent.id, {
+          direction: "tail",
+          limit: 0,
+          projection: "canonical",
+        });
+        const summarized = timelineBeforeWake.entries.map(summarizeTimelineEntry);
+        // Required by reproduction request: log timeline at idle edge before autonomous wake.
+        // eslint-disable-next-line no-console
+        console.log("TIMELINE_BEFORE_AUTONOMOUS_WAKE\n" + summarized.join("\n"));
+        expect(summarized.some((line) => line.includes("SPAWNED"))).toBe(true);
+
+        // No new user prompt here: we expect autonomous transition caused by
+        // background task completion notification.
+        await client.waitForAgentUpsert(
+          agent.id,
+          (snapshot) => snapshot.status === "running",
+          30_000,
+        );
+      } finally {
+        await client.close();
+        await daemon.close();
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+    420_000,
+  );
+
+  test.runIf(isProviderAvailable("claude"))(
+    "accepts a new prompt after background sleep finishes and replies HELLO",
+    async () => {
+      const logger = pino({ level: "silent" });
+      const cwd = tmpCwd();
+      const daemon = await createTestPaseoDaemon({
+        agentClients: { claude: new ClaudeAgentClient({ logger }) },
+        logger,
       });
-      const summarized = timelineBeforeWake.entries.map(summarizeTimelineEntry);
-      // Required by reproduction request: log timeline at idle edge before autonomous wake.
-      // eslint-disable-next-line no-console
-      console.log("TIMELINE_BEFORE_AUTONOMOUS_WAKE\n" + summarized.join("\n"));
-      expect(summarized.some((line) => line.includes("SPAWNED"))).toBe(true);
+      const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
 
-      // No new user prompt here: we expect autonomous transition caused by
-      // background task completion notification.
-      await client.waitForAgentUpsert(
-        agent.id,
-        (snapshot) => snapshot.status === "running",
-        30_000,
-      );
-    } finally {
-      await client.close();
-      await daemon.close();
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  }, 420_000);
+      try {
+        await client.connect();
+        await client.fetchAgents({
+          subscribe: { subscriptionId: "claude-autonomous-followup-real" },
+        });
 
-  test("accepts a new prompt after background sleep finishes and replies HELLO", async () => {
-    const logger = pino({ level: "silent" });
-    const cwd = tmpCwd();
-    const daemon = await createTestPaseoDaemon({
-      agentClients: createRealProviderClients(["claude"], logger),
-      logger,
-    });
-    const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
+        const agent = await client.createAgent({
+          cwd,
+          title: "claude-autonomous-followup-real",
+          ...getFullAccessConfig("claude"),
+        });
 
-    try {
-      await client.connect();
-      await client.fetchAgents({
-        subscribe: { subscriptionId: "claude-autonomous-followup-real" },
+        await client.sendMessage(
+          agent.id,
+          [
+            "Use a background task to run exactly: sleep 5",
+            "Do not wait for it to finish.",
+            "After launching it, reply with exactly: SPAWNED",
+          ].join(" "),
+        );
+        const firstFinish = await client.waitForFinish(agent.id, 240_000);
+        expect(firstFinish.status).toBe("idle");
+
+        await new Promise((resolve) => setTimeout(resolve, 6_000));
+
+        await client.sendMessage(agent.id, "say exactly HELLO");
+        const secondFinish = await client.waitForFinish(agent.id, 240_000);
+        expect(secondFinish.status).toBe("idle");
+        expect((secondFinish.lastMessage ?? "").toUpperCase()).toContain("HELLO");
+      } finally {
+        await client.close();
+        await daemon.close();
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+    420_000,
+  );
+
+  test.runIf(isProviderAvailable("claude"))(
+    "repro: do-it-again + immediate hello can hang after autonomous wake under churn",
+    async () => {
+      const logger = pino({ level: "silent" });
+      const cwd = tmpCwd();
+      const daemon = await createTestPaseoDaemon({
+        agentClients: { claude: new ClaudeAgentClient({ logger }) },
+        logger,
       });
+      const wsUrl = `ws://127.0.0.1:${daemon.port}/ws`;
+      const client = new DaemonClient({ url: wsUrl });
 
-      const agent = await client.createAgent({
-        cwd,
-        title: "claude-autonomous-followup-real",
-        ...getRealProviderConfig("claude"),
+      try {
+        await client.connect();
+        await client.fetchAgents({
+          subscribe: { subscriptionId: "claude-hang-repro-real" },
+        });
+
+        const agent = await client.createAgent({
+          cwd,
+          title: "claude-hang-repro-real",
+          ...getFullAccessConfig("claude"),
+        });
+
+        for (let cycle = 0; cycle < 20; cycle += 1) {
+          const noise = runPreHelloNoise({ wsUrl, durationMs: 9_000 });
+
+          await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_PROMPT);
+          const firstKickoff = await client.waitForFinish(agent.id, 180_000);
+          expect(firstKickoff.status).toBe("idle");
+
+          await client.waitForAgentUpsert(
+            agent.id,
+            (snapshot) => snapshot.status === "running",
+            30_000,
+          );
+          const firstCompletion = await client.waitForFinish(agent.id, 90_000);
+          expect(firstCompletion.status).toBe("idle");
+
+          await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_REPEAT_PROMPT);
+          const secondKickoff = await client.waitForFinish(agent.id, 180_000);
+          expect(secondKickoff.status).toBe("idle");
+
+          await client.sendMessage(agent.id, "say exactly HELLO");
+          const helloReply = await client.waitForFinish(agent.id, 180_000);
+          expect(helloReply.status).toBe("idle");
+          expect((helloReply.lastMessage ?? "").trim().toUpperCase()).toContain("HELLO");
+
+          const runningSnapshot = await client.waitForAgentUpsert(
+            agent.id,
+            (snapshot) => snapshot.status === "running",
+            30_000,
+          );
+
+          const timelineAtWake = await client.fetchAgentTimeline(agent.id, {
+            direction: "tail",
+            limit: 0,
+            projection: "canonical",
+          });
+
+          // eslint-disable-next-line no-console
+          console.log(
+            JSON.stringify({
+              cycle,
+              wakeUpdatedAt: runningSnapshot.updatedAt,
+              entriesAtWake: timelineAtWake.entries.length,
+            }),
+          );
+
+          await sleep(6_000);
+          const timelineAfterWake = await client.fetchAgentTimeline(agent.id, {
+            direction: "tail",
+            limit: 0,
+            projection: "canonical",
+          });
+          expect(timelineAfterWake.entries.length).toBeGreaterThanOrEqual(
+            timelineAtWake.entries.length,
+          );
+
+          let secondCompletion;
+          try {
+            secondCompletion = await client.waitForFinish(agent.id, 20_000);
+          } catch {
+            const atTimeoutResult = await client.fetchAgent(agent.id);
+            // eslint-disable-next-line no-console
+            console.log(
+              JSON.stringify({
+                cycle,
+                phase: "second_completion_timeout",
+                statusAtTimeout: atTimeoutResult?.agent.status ?? "unknown",
+              }),
+            );
+            secondCompletion = await client.waitForFinish(agent.id, 30_000);
+          }
+          expect(secondCompletion.status).toBe("idle");
+
+          await noise;
+        }
+      } finally {
+        await client.close();
+        await daemon.close();
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+    900_000,
+  );
+
+  test.runIf(isProviderAvailable("claude"))(
+    "repro: second background sleep completion after HELLO should settle back to idle",
+    async () => {
+      const logger = pino({ level: "silent" });
+      const cwd = tmpCwd();
+      const daemon = await createTestPaseoDaemon({
+        agentClients: { claude: new ClaudeAgentClient({ logger }) },
+        logger,
       });
+      const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
 
-      await client.sendMessage(
-        agent.id,
-        [
-          "Use a background task to run exactly: sleep 5",
-          "Do not wait for it to finish.",
-          "After launching it, reply with exactly: SPAWNED",
-        ].join(" "),
-      );
-      const firstFinish = await client.waitForFinish(agent.id, 240_000);
-      expect(firstFinish.status).toBe("idle");
+      try {
+        await client.connect();
+        await client.fetchAgents({
+          subscribe: { subscriptionId: "claude-background-repro-real" },
+        });
 
-      await new Promise((resolve) => setTimeout(resolve, 6_000));
-
-      await client.sendMessage(agent.id, "say exactly HELLO");
-      const secondFinish = await client.waitForFinish(agent.id, 240_000);
-      expect(secondFinish.status).toBe("idle");
-      expect((secondFinish.lastMessage ?? "").toUpperCase()).toContain("HELLO");
-    } finally {
-      await client.close();
-      await daemon.close();
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  }, 420_000);
-
-  test("repro: do-it-again + immediate hello can hang after autonomous wake under churn", async () => {
-    const logger = pino({ level: "silent" });
-    const cwd = tmpCwd();
-    const daemon = await createTestPaseoDaemon({
-      agentClients: createRealProviderClients(["claude"], logger),
-      logger,
-    });
-    const wsUrl = `ws://127.0.0.1:${daemon.port}/ws`;
-    const client = new DaemonClient({ url: wsUrl });
-
-    try {
-      await client.connect();
-      await client.fetchAgents({
-        subscribe: { subscriptionId: "claude-hang-repro-real" },
-      });
-
-      const agent = await client.createAgent({
-        cwd,
-        title: "claude-hang-repro-real",
-        ...getRealProviderConfig("claude"),
-      });
-
-      for (let cycle = 0; cycle < 20; cycle += 1) {
-        const noise = runPreHelloNoise({ wsUrl, durationMs: 9_000 });
+        const agent = await client.createAgent({
+          cwd,
+          title: "claude-background-repro-real",
+          ...getFullAccessConfig("claude"),
+        });
 
         await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_PROMPT);
         const firstKickoff = await client.waitForFinish(agent.id, 180_000);
@@ -788,7 +817,7 @@ describe("daemon E2E (real claude) - autonomous wake from background task", () =
           (snapshot) => snapshot.status === "running",
           30_000,
         );
-        const firstCompletion = await client.waitForFinish(agent.id, 90_000);
+        const firstCompletion = await client.waitForFinish(agent.id, 60_000);
         expect(firstCompletion.status).toBe("idle");
 
         await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_REPEAT_PROMPT);
@@ -800,322 +829,272 @@ describe("daemon E2E (real claude) - autonomous wake from background task", () =
         expect(helloReply.status).toBe("idle");
         expect((helloReply.lastMessage ?? "").trim().toUpperCase()).toContain("HELLO");
 
-        const runningSnapshot = await client.waitForAgentUpsert(
+        await client.waitForAgentUpsert(
           agent.id,
           (snapshot) => snapshot.status === "running",
           30_000,
         );
 
-        const timelineAtWake = await client.fetchAgentTimeline(agent.id, {
-          direction: "tail",
-          limit: 0,
-          projection: "canonical",
-        });
-
-        // eslint-disable-next-line no-console
-        console.log(
-          JSON.stringify({
-            cycle,
-            wakeUpdatedAt: runningSnapshot.updatedAt,
-            entriesAtWake: timelineAtWake.entries.length,
-          }),
-        );
-
-        await sleep(6_000);
-        const timelineAfterWake = await client.fetchAgentTimeline(agent.id, {
-          direction: "tail",
-          limit: 0,
-          projection: "canonical",
-        });
-        expect(timelineAfterWake.entries.length).toBeGreaterThanOrEqual(
-          timelineAtWake.entries.length,
-        );
-
+        // This is the failure point seen in production: agent flips to running
+        // on task completion and never settles back to idle.
         let secondCompletion;
         try {
           secondCompletion = await client.waitForFinish(agent.id, 20_000);
         } catch {
-          const atTimeoutResult = await client.fetchAgent({ agentId: agent.id });
+          const atTimeoutResult = await client.fetchAgent(agent.id);
           // eslint-disable-next-line no-console
           console.log(
             JSON.stringify({
-              cycle,
-              phase: "second_completion_timeout",
+              phase: "second_background_completion_timeout",
               statusAtTimeout: atTimeoutResult?.agent.status ?? "unknown",
             }),
           );
           secondCompletion = await client.waitForFinish(agent.id, 30_000);
         }
         expect(secondCompletion.status).toBe("idle");
-
-        await noise;
+      } finally {
+        await client.close();
+        await daemon.close();
+        rmSync(cwd, { recursive: true, force: true });
       }
-    } finally {
-      await client.close();
-      await daemon.close();
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  }, 900_000);
+    },
+    600_000,
+  );
 
-  test("repro: second background sleep completion after HELLO should settle back to idle", async () => {
-    const logger = pino({ level: "silent" });
-    const cwd = tmpCwd();
-    const daemon = await createTestPaseoDaemon({
-      agentClients: createRealProviderClients(["claude"], logger),
-      logger,
-    });
-    const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
-
-    try {
-      await client.connect();
-      await client.fetchAgents({
-        subscribe: { subscriptionId: "claude-background-repro-real" },
+  test.runIf(isProviderAvailable("claude"))(
+    "stress: immediate HELLO before task notification should not leave autonomous run stuck",
+    async () => {
+      const logger = pino({ level: "silent" });
+      const cwd = tmpCwd();
+      const daemon = await createTestPaseoDaemon({
+        agentClients: { claude: new ClaudeAgentClient({ logger }) },
+        logger,
       });
+      const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
 
-      const agent = await client.createAgent({
-        cwd,
-        title: "claude-background-repro-real",
-        ...getRealProviderConfig("claude"),
-      });
-
-      await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_PROMPT);
-      const firstKickoff = await client.waitForFinish(agent.id, 180_000);
-      expect(firstKickoff.status).toBe("idle");
-
-      await client.waitForAgentUpsert(
-        agent.id,
-        (snapshot) => snapshot.status === "running",
-        30_000,
-      );
-      const firstCompletion = await client.waitForFinish(agent.id, 60_000);
-      expect(firstCompletion.status).toBe("idle");
-
-      await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_REPEAT_PROMPT);
-      const secondKickoff = await client.waitForFinish(agent.id, 180_000);
-      expect(secondKickoff.status).toBe("idle");
-
-      await client.sendMessage(agent.id, "say exactly HELLO");
-      const helloReply = await client.waitForFinish(agent.id, 180_000);
-      expect(helloReply.status).toBe("idle");
-      expect((helloReply.lastMessage ?? "").trim().toUpperCase()).toContain("HELLO");
-
-      await client.waitForAgentUpsert(
-        agent.id,
-        (snapshot) => snapshot.status === "running",
-        30_000,
-      );
-
-      // This is the failure point seen in production: agent flips to running
-      // on task completion and never settles back to idle.
-      let secondCompletion;
       try {
-        secondCompletion = await client.waitForFinish(agent.id, 20_000);
-      } catch {
-        const atTimeoutResult = await client.fetchAgent({ agentId: agent.id });
-        // eslint-disable-next-line no-console
-        console.log(
-          JSON.stringify({
-            phase: "second_background_completion_timeout",
-            statusAtTimeout: atTimeoutResult?.agent.status ?? "unknown",
-          }),
-        );
-        secondCompletion = await client.waitForFinish(agent.id, 30_000);
+        await client.connect();
+        await client.fetchAgents({
+          subscribe: { subscriptionId: "claude-autonomous-race-stress-real" },
+        });
+
+        const agent = await client.createAgent({
+          cwd,
+          title: "claude-autonomous-race-stress-real",
+          ...getFullAccessConfig("claude"),
+        });
+
+        for (let cycle = 0; cycle < 20; cycle += 1) {
+          const helloToken = `HELLO_CYCLE_${cycle}`;
+
+          await client.sendMessage(
+            agent.id,
+            [
+              "Use the Task tool (not a Bash background process).",
+              "Start a background task that runs exactly: sleep 3",
+              "Do not wait for the task result.",
+              "Immediately reply with exactly: SPAWNED",
+            ].join(" "),
+          );
+
+          const firstFinish = await client.waitForFinish(agent.id, 240_000);
+          expect(firstFinish.status).toBe("idle");
+
+          // Race path under test: immediately send the next user prompt before
+          // the background-task completion notification wakes Claude again.
+          await client.sendMessage(agent.id, `say exactly ${helloToken}`);
+          const secondFinish = await client.waitForFinish(agent.id, 240_000);
+          expect(secondFinish.status).toBe("idle");
+          expect(secondFinish.lastMessage?.trim()).toBe(helloToken);
+
+          const wakeSnapshot = await client.waitForAgentUpsert(
+            agent.id,
+            (snapshot) => snapshot.status === "running",
+            20_000,
+          );
+
+          const timelineAtWake = await client.fetchAgentTimeline(agent.id, {
+            direction: "tail",
+            limit: 0,
+            projection: "canonical",
+          });
+
+          // eslint-disable-next-line no-console
+          console.log(
+            JSON.stringify({
+              cycle,
+              autonomousWakeUpdatedAt: wakeSnapshot.updatedAt,
+              timelineEntriesAtWake: timelineAtWake.entries.length,
+            }),
+          );
+
+          await sleep(3_000);
+          const timelineAfterWake = await client.fetchAgentTimeline(agent.id, {
+            direction: "tail",
+            limit: 0,
+            projection: "canonical",
+          });
+          expect(timelineAfterWake.entries.length).toBeGreaterThanOrEqual(
+            timelineAtWake.entries.length,
+          );
+
+          await client.cancelAgent(agent.id);
+          const afterCancel = await client.waitForFinish(agent.id, 10_000);
+          expect(afterCancel.status).toBe("idle");
+        }
+      } finally {
+        await client.close();
+        await daemon.close();
+        rmSync(cwd, { recursive: true, force: true });
       }
-      expect(secondCompletion.status).toBe("idle");
-    } finally {
-      await client.close();
-      await daemon.close();
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  }, 600_000);
+    },
+    900_000,
+  );
 
-  test("stress: immediate HELLO before task notification should not leave autonomous run stuck", async () => {
-    const logger = pino({ level: "silent" });
-    const cwd = tmpCwd();
-    const daemon = await createTestPaseoDaemon({
-      agentClients: createRealProviderClients(["claude"], logger),
-      logger,
-    });
-    const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
-
-    try {
-      await client.connect();
-      await client.fetchAgents({
-        subscribe: { subscriptionId: "claude-autonomous-race-stress-real" },
+  test.runIf(isProviderAvailable("claude"))(
+    "repro: transcript/timeline parity after do-it-again + hello race (hang + interrupt + drop)",
+    async () => {
+      const logger = pino({ level: "silent" });
+      const cwd = tmpCwd();
+      const daemon = await createTestPaseoDaemon({
+        agentClients: { claude: new ClaudeAgentClient({ logger }) },
+        logger,
       });
+      const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
 
-      const agent = await client.createAgent({
-        cwd,
-        title: "claude-autonomous-race-stress-real",
-        ...getRealProviderConfig("claude"),
-      });
+      try {
+        await client.connect();
+        await client.fetchAgents({
+          subscribe: { subscriptionId: "claude-transcript-parity-race" },
+        });
 
-      for (let cycle = 0; cycle < 20; cycle += 1) {
-        const helloToken = `HELLO_CYCLE_${cycle}`;
+        const agent = await client.createAgent({
+          cwd,
+          title: "claude-transcript-parity-race",
+          ...getFullAccessConfig("claude"),
+        });
 
-        await client.sendMessage(
-          agent.id,
-          [
-            "Use the Task tool (not a Bash background process).",
-            "Start a background task that runs exactly: sleep 3",
-            "Do not wait for the task result.",
-            "Immediately reply with exactly: SPAWNED",
-          ].join(" "),
-        );
+        await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_PROMPT);
+        const firstKickoff = await client.waitForFinish(agent.id, 180_000);
+        expect(firstKickoff.status).toBe("idle");
 
-        const firstFinish = await client.waitForFinish(agent.id, 240_000);
-        expect(firstFinish.status).toBe("idle");
-
-        // Race path under test: immediately send the next user prompt before
-        // the background-task completion notification wakes Claude again.
-        await client.sendMessage(agent.id, `say exactly ${helloToken}`);
-        const secondFinish = await client.waitForFinish(agent.id, 240_000);
-        expect(secondFinish.status).toBe("idle");
-        expect(secondFinish.lastMessage?.trim()).toBe(helloToken);
-
-        const wakeSnapshot = await client.waitForAgentUpsert(
+        await client.waitForAgentUpsert(
           agent.id,
           (snapshot) => snapshot.status === "running",
-          20_000,
+          30_000,
         );
+        const firstAutonomousCompletion = await client.waitForFinish(agent.id, 60_000);
+        expect(firstAutonomousCompletion.status).toBe("idle");
 
-        const timelineAtWake = await client.fetchAgentTimeline(agent.id, {
-          direction: "tail",
-          limit: 0,
-          projection: "canonical",
-        });
+        await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_REPEAT_PROMPT);
+        const secondKickoff = await client.waitForFinish(agent.id, 180_000);
+        expect(secondKickoff.status).toBe("idle");
 
-        // eslint-disable-next-line no-console
-        console.log(
-          JSON.stringify({
-            cycle,
-            autonomousWakeUpdatedAt: wakeSnapshot.updatedAt,
-            timelineEntriesAtWake: timelineAtWake.entries.length,
-          }),
+        await client.waitForAgentUpsert(
+          agent.id,
+          (snapshot) => snapshot.status === "running",
+          30_000,
         );
+        await sleep(500);
+        await client.sendMessage(agent.id, "say exactly HELLO");
 
-        await sleep(3_000);
-        const timelineAfterWake = await client.fetchAgentTimeline(agent.id, {
-          direction: "tail",
-          limit: 0,
-          projection: "canonical",
-        });
-        expect(timelineAfterWake.entries.length).toBeGreaterThanOrEqual(
-          timelineAtWake.entries.length,
-        );
-
-        await client.cancelAgent(agent.id);
-        const afterCancel = await client.waitForFinish(agent.id, 10_000);
-        expect(afterCancel.status).toBe("idle");
-      }
-    } finally {
-      await client.close();
-      await daemon.close();
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  }, 900_000);
-
-  test("repro: transcript/timeline parity after do-it-again + hello race (hang + interrupt + drop)", async () => {
-    const logger = pino({ level: "silent" });
-    const cwd = tmpCwd();
-    const daemon = await createTestPaseoDaemon({
-      agentClients: createRealProviderClients(["claude"], logger),
-      logger,
-    });
-    const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
-
-    try {
-      await client.connect();
-      await client.fetchAgents({
-        subscribe: { subscriptionId: "claude-transcript-parity-race" },
-      });
-
-      const agent = await client.createAgent({
-        cwd,
-        title: "claude-transcript-parity-race",
-        ...getRealProviderConfig("claude"),
-      });
-
-      await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_PROMPT);
-      const firstKickoff = await client.waitForFinish(agent.id, 180_000);
-      expect(firstKickoff.status).toBe("idle");
-
-      await client.waitForAgentUpsert(
-        agent.id,
-        (snapshot) => snapshot.status === "running",
-        30_000,
-      );
-      const firstAutonomousCompletion = await client.waitForFinish(agent.id, 60_000);
-      expect(firstAutonomousCompletion.status).toBe("idle");
-
-      await client.sendMessage(agent.id, BACKGROUND_TASK_SLEEP_5_REPEAT_PROMPT);
-      const secondKickoff = await client.waitForFinish(agent.id, 180_000);
-      expect(secondKickoff.status).toBe("idle");
-
-      await client.waitForAgentUpsert(
-        agent.id,
-        (snapshot) => snapshot.status === "running",
-        30_000,
-      );
-      await sleep(500);
-      await client.sendMessage(agent.id, "say exactly HELLO");
-
-      let waitError: Error | null = null;
-      try {
-        await client.waitForFinish(agent.id, 20_000);
-      } catch (error) {
-        waitError =
-          error instanceof Error ? error : new Error(String(error ?? "wait_for_finish failed"));
-      }
-
-      let afterWaitResult = await client.fetchAgent({ agentId: agent.id });
-      let cancelRecovered = true;
-      if (afterWaitResult?.agent.status === "running") {
-        await client.cancelAgent(agent.id);
+        let waitError: Error | null = null;
         try {
-          const afterCancel = await client.waitForFinish(agent.id, 15_000);
-          cancelRecovered = afterCancel.status === "idle";
-        } catch {
-          cancelRecovered = false;
+          await client.waitForFinish(agent.id, 20_000);
+        } catch (error) {
+          waitError =
+            error instanceof Error ? error : new Error(String(error ?? "wait_for_finish failed"));
         }
-        afterWaitResult = await client.fetchAgent({ agentId: agent.id });
+
+        let afterWaitResult = await client.fetchAgent(agent.id);
+        let cancelRecovered = true;
+        if (afterWaitResult?.agent.status === "running") {
+          await client.cancelAgent(agent.id);
+          try {
+            const afterCancel = await client.waitForFinish(agent.id, 15_000);
+            cancelRecovered = afterCancel.status === "idle";
+          } catch {
+            cancelRecovered = false;
+          }
+          afterWaitResult = await client.fetchAgent(agent.id);
+        }
+
+        expect(waitError).toBeNull();
+        expect(cancelRecovered).toBe(true);
+
+        const afterWait = afterWaitResult?.agent ?? null;
+        const sessionId =
+          afterWait?.persistence?.sessionId ?? afterWait?.runtimeInfo?.sessionId ?? null;
+        expect(typeof sessionId === "string" && sessionId.length > 0).toBe(true);
+        const transcriptCwd = afterWait?.cwd ?? cwd;
+        const transcriptPath = resolveClaudeTranscriptPath({
+          cwd: transcriptCwd,
+          sessionId: sessionId as string,
+        });
+
+        let evidence: TranscriptRaceEvidence | null = null;
+        const transcriptDeadline = Date.now() + 20_000;
+        while (Date.now() < transcriptDeadline) {
+          const lines = readTranscriptLines(transcriptPath);
+          evidence = extractTranscriptRaceEvidence(lines);
+          if (evidence) {
+            break;
+          }
+          await sleep(250);
+        }
+        if (!evidence) {
+          const transcriptDump = summarizeTranscriptTail(readTranscriptLines(transcriptPath));
+          throw new Error(
+            [
+              "Failed to extract transcript race evidence (hello assistant and notification-turn assistant).",
+              `transcriptPath=${transcriptPath}`,
+              `waitError=${waitError ? waitError.message : "null"}`,
+              `afterWaitStatus=${afterWait?.status ?? "unknown"}`,
+              `cancelRecovered=${cancelRecovered}`,
+              "transcriptTail:",
+              transcriptDump,
+            ].join("\n"),
+          );
+        }
+
+        const helloAssistant = compactText(evidence.helloAssistantText);
+        const notificationAssistant = compactText(evidence.notificationOutcomeAssistantText);
+        let assistantTexts: string[] = [];
+        let assistantTextCombined = "";
+        const timelineDeadline = Date.now() + 20_000;
+        while (Date.now() < timelineDeadline) {
+          const timeline = await client.fetchAgentTimeline(agent.id, {
+            direction: "tail",
+            limit: 0,
+            projection: "canonical",
+          });
+          assistantTexts = timeline.entries
+            .filter(
+              (
+                entry,
+              ): entry is {
+                item: { type: "assistant_message"; text: string };
+              } => entry.item.type === "assistant_message",
+            )
+            .map((entry) => compactText(entry.item.text));
+          assistantTextCombined = assistantTexts.join("");
+          if (
+            assistantTextCombined.includes(helloAssistant) &&
+            assistantTextCombined.includes(notificationAssistant)
+          ) {
+            break;
+          }
+          await sleep(250);
+        }
+
+        expect(assistantTextCombined.includes(helloAssistant)).toBe(true);
+        expect(assistantTextCombined.includes(notificationAssistant)).toBe(true);
+      } finally {
+        await client.close();
+        await daemon.close();
+        rmSync(cwd, { recursive: true, force: true });
       }
-
-      expect(waitError).toBeNull();
-      expect(cancelRecovered).toBe(true);
-
-      const afterWait = afterWaitResult?.agent ?? null;
-      const sessionId =
-        afterWait?.persistence?.sessionId ?? afterWait?.runtimeInfo?.sessionId ?? null;
-      expect(typeof sessionId === "string" && sessionId.length > 0).toBe(true);
-      const transcriptCwd = afterWait?.cwd ?? cwd;
-      const transcriptPath = resolveClaudeTranscriptPath({
-        cwd: transcriptCwd,
-        sessionId: sessionId as string,
-      });
-
-      const evidence = await waitForTranscriptRaceEvidence({
-        transcriptPath,
-        waitError,
-        afterWaitStatus: afterWait?.status ?? "unknown",
-        cancelRecovered,
-      });
-
-      const helloAssistant = compactText(evidence.helloAssistantText);
-      const notificationAssistant = compactText(evidence.notificationOutcomeAssistantText);
-      const assistantTextCombined = await waitForAssistantTextCombined({
-        client,
-        agentId: agent.id,
-        helloAssistant,
-        notificationAssistant,
-      });
-
-      expect(assistantTextCombined.includes(helloAssistant)).toBe(true);
-      expect(assistantTextCombined.includes(notificationAssistant)).toBe(true);
-    } finally {
-      await client.close();
-      await daemon.close();
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  }, 600_000);
+    },
+    600_000,
+  );
 });

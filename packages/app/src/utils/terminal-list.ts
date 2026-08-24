@@ -1,4 +1,4 @@
-import type { CreateTerminalResponse, ListTerminalsResponse } from "@getpaseo/protocol/messages";
+import type { CreateTerminalResponse, ListTerminalsResponse } from "@server/shared/messages";
 
 type TerminalListEntry = ListTerminalsResponse["payload"]["terminals"][number];
 type CreatedTerminal = NonNullable<CreateTerminalResponse["payload"]["terminal"]>;
@@ -7,7 +7,6 @@ function toTerminalListEntry(input: { terminal: CreatedTerminal }): TerminalList
   return {
     id: input.terminal.id,
     name: input.terminal.name,
-    ...(input.terminal.title ? { title: input.terminal.title } : {}),
   };
 }
 

@@ -1,23 +1,59 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { app } from "electron";
 import {
+  DESKTOP_CLI_ENV,
   createNodeEntrypointInvocation as createSharedNodeEntrypointInvocation,
+  parseCliPassthroughArgsFromArgv as parseCliPassthroughArgs,
   type NodeEntrypointArgvMode,
   type NodeEntrypointInvocation,
   type NodeEntrypointSpec,
 } from "./node-entrypoint-launcher.js";
-import {
-  assertPathExists,
-  findPackageRootFromResolvedPath,
-  resolvePackagedAsarPath,
-  type PackageInfo,
-} from "./package-paths.js";
 
+const CLI_PACKAGE_NAME = "@getpaseo/cli";
 const SERVER_PACKAGE_NAME = "@getpaseo/server";
+const CLI_BIN_ENTRY = `${CLI_PACKAGE_NAME}/bin/paseo`;
+
+type PackageInfo = {
+  root: string;
+};
 
 const esmRequire = createRequire(__filename);
+
+function findPackageRootFromResolvedPath(input: {
+  resolvedPath: string;
+  packageName: string;
+}): PackageInfo {
+  let currentDir = path.dirname(input.resolvedPath);
+
+  while (true) {
+    const packageJsonPath = path.join(currentDir, "package.json");
+    if (existsSync(packageJsonPath)) {
+      try {
+        const pkg = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as {
+          name?: string;
+        };
+        if (pkg.name === input.packageName) {
+          return {
+            root: currentDir,
+          };
+        }
+      } catch {
+        // Ignore malformed package metadata while walking up.
+      }
+    }
+
+    const parent = path.dirname(currentDir);
+    if (parent === currentDir) {
+      break;
+    }
+    currentDir = parent;
+  }
+
+  throw new Error(`Unable to resolve ${input.packageName} package root`);
+}
 
 function resolveServerPackageInfo(): PackageInfo {
   const serverExportPath = esmRequire.resolve(SERVER_PACKAGE_NAME);
@@ -27,14 +63,36 @@ function resolveServerPackageInfo(): PackageInfo {
   });
 }
 
-export function resolvePackagedNodeEntrypointRunnerPath(): string {
-  return path.join(
-    process.resourcesPath,
-    "app.asar.unpacked",
-    "dist",
-    "daemon",
-    "node-entrypoint-runner.js",
-  );
+function resolveCliPackageInfo(): PackageInfo {
+  const cliBinPath = esmRequire.resolve(CLI_BIN_ENTRY);
+  return findPackageRootFromResolvedPath({
+    resolvedPath: cliBinPath,
+    packageName: CLI_PACKAGE_NAME,
+  });
+}
+
+function resolvePackagedAsarPath(): string {
+  return path.join(process.resourcesPath, "app.asar");
+}
+
+function resolvePackagedNodeEntrypointRunnerPath(): string {
+  return path.join(resolvePackagedAsarPath(), "dist", "daemon", "node-entrypoint-runner.js");
+}
+
+function assertPathExists(input: { label: string; filePath: string }): string {
+  if (!existsSync(input.filePath)) {
+    throw new Error(`${input.label} is missing at ${input.filePath}`);
+  }
+
+  return input.filePath;
+}
+
+export function parseCliPassthroughArgsFromArgv(argv: string[]): string[] | null {
+  return parseCliPassthroughArgs({
+    argv,
+    isDefaultApp: process.defaultApp,
+    forceCli: process.env[DESKTOP_CLI_ENV] === "1",
+  });
 }
 
 export function resolveDaemonRunnerEntrypoint(): NodeEntrypointSpec {
@@ -49,7 +107,7 @@ export function resolveDaemonRunnerEntrypoint(): NodeEntrypointSpec {
           "server",
           "dist",
           "scripts",
-          "supervisor-entrypoint.js",
+          "daemon-runner.js",
         ),
       }),
       execArgv: [],
@@ -57,7 +115,7 @@ export function resolveDaemonRunnerEntrypoint(): NodeEntrypointSpec {
   }
 
   const serverPackage = resolveServerPackageInfo();
-  const distRunner = path.join(serverPackage.root, "dist", "scripts", "supervisor-entrypoint.js");
+  const distRunner = path.join(serverPackage.root, "dist", "scripts", "daemon-runner.js");
   if (existsSync(distRunner)) {
     return {
       entryPath: distRunner,
@@ -68,20 +126,56 @@ export function resolveDaemonRunnerEntrypoint(): NodeEntrypointSpec {
   return {
     entryPath: assertPathExists({
       label: "Daemon runner source",
-      filePath: path.join(serverPackage.root, "scripts", "supervisor-entrypoint.ts"),
+      filePath: path.join(serverPackage.root, "scripts", "daemon-runner.ts"),
     }),
     execArgv: ["--import", "tsx"],
   };
 }
 
-export function resolveNodeExecPath(): string {
+export function resolveCliEntrypoint(): NodeEntrypointSpec {
+  if (app.isPackaged) {
+    return {
+      entryPath: assertPathExists({
+        label: "Bundled CLI entrypoint",
+        filePath: path.join(
+          resolvePackagedAsarPath(),
+          "node_modules",
+          "@getpaseo",
+          "cli",
+          "dist",
+          "index.js",
+        ),
+      }),
+      execArgv: [],
+    };
+  }
+
+  const cliPackage = resolveCliPackageInfo();
+  const distEntry = path.join(cliPackage.root, "dist", "index.js");
+  if (existsSync(distEntry)) {
+    return {
+      entryPath: distEntry,
+      execArgv: [],
+    };
+  }
+
+  return {
+    entryPath: assertPathExists({
+      label: "CLI source entrypoint",
+      filePath: path.join(cliPackage.root, "src", "index.ts"),
+    }),
+    execArgv: ["--import", "tsx"],
+  };
+}
+
+function resolveNodeExecPath(): string {
   if (app.isPackaged && process.platform === "darwin") {
     const marker = ".app/Contents/MacOS/";
     const markerIndex = process.execPath.indexOf(marker);
     if (markerIndex !== -1) {
       const bundleRoot = process.execPath.substring(0, markerIndex + ".app".length);
       const name = path.basename(process.execPath);
-      const helperPath = path.posix.join(
+      const helperPath = path.join(
         bundleRoot,
         "Contents",
         "Frameworks",
@@ -118,4 +212,32 @@ export function createNodeEntrypointInvocation(input: {
     args: input.args,
     baseEnv: input.baseEnv,
   });
+}
+
+function spawnCliProcess(args: string[]): SpawnSyncReturns<Buffer> {
+  const cli = resolveCliEntrypoint();
+  const invocation = createNodeEntrypointInvocation({
+    entrypoint: cli,
+    argvMode: "bare",
+    args,
+    baseEnv: process.env,
+  });
+
+  return spawnSync(invocation.command, invocation.args, {
+    env: invocation.env,
+    stdio: "inherit",
+  });
+}
+
+export function runCliPassthroughCommand(args: string[]): number {
+  const result = spawnCliProcess(args);
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (typeof result.status === "number") {
+    return result.status;
+  }
+
+  return result.signal ? 1 : 0;
 }

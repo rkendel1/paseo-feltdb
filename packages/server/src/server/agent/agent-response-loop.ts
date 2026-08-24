@@ -1,12 +1,9 @@
 import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import Ajv, { type ErrorObject, type Options as AjvOptions } from "ajv";
 import type { AgentProvider, AgentSessionConfig } from "./agent-sdk-types.js";
 import type { AgentManager } from "./agent-manager.js";
-
-export interface StructuredGenerationLogger {
-  info: (obj: object, msg?: string) => void;
-  warn: (obj: object, msg?: string) => void;
-}
+import { getAgentProviderDefinition } from "./provider-manifest.js";
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -24,18 +21,18 @@ export class StructuredAgentResponseError extends Error {
   }
 }
 
-export interface StructuredGenerationProvider {
+export type StructuredGenerationProvider = {
   provider: AgentProvider;
   model?: string;
   thinkingOptionId?: string;
-}
+};
 
-export interface StructuredGenerationAttempt {
+export type StructuredGenerationAttempt = {
   provider: AgentProvider;
   model: string | null;
   available: boolean;
   error: string | null;
-}
+};
 
 export class StructuredAgentFallbackError extends Error {
   readonly attempts: StructuredGenerationAttempt[];
@@ -73,7 +70,6 @@ export interface StructuredAgentGenerationOptions<T> {
   manager: AgentManager;
   agentConfig: AgentSessionConfig;
   agentId?: string;
-  persistSession?: boolean;
   prompt: string;
   schema: z.ZodType<T> | JsonSchema;
   maxRetries?: number;
@@ -90,34 +86,32 @@ export interface StructuredAgentGenerationWithFallbackOptions<T> {
     AgentSessionConfig,
     "provider" | "cwd" | "model" | "thinkingOptionId"
   >;
-  persistSession?: boolean;
   maxRetries?: number;
   schemaName?: string;
-  logger?: StructuredGenerationLogger;
   runner?: <TResult>(options: StructuredAgentGenerationOptions<TResult>) => Promise<TResult>;
 }
 
-// Re-export from the legacy module path so existing server consumers keep working.
-export { DEFAULT_STRUCTURED_GENERATION_PROVIDERS } from "./structured-generation-providers.js";
+export const DEFAULT_STRUCTURED_GENERATION_PROVIDERS: readonly StructuredGenerationProvider[] = [
+  { provider: "claude", model: "haiku" },
+  { provider: "codex", model: "gpt-5.1-codex-mini", thinkingOptionId: "low" },
+  { provider: "opencode", model: "opencode/gpt-5-nano" },
+] as const;
 
 interface SchemaValidator<T> {
   jsonSchema: JsonSchema;
   validate: (value: unknown) => { ok: true; value: T } | { ok: false; errors: string[] };
 }
 
-function isZodSchema(value: unknown): value is z.ZodType {
-  return typeof (value as z.ZodType | undefined)?.safeParse === "function";
+function isZodSchema(value: unknown): value is z.ZodTypeAny {
+  return typeof (value as z.ZodTypeAny | undefined)?.safeParse === "function";
 }
 
-function buildZodValidator<T>(schema: z.ZodType, schemaName: string): SchemaValidator<T> {
-  const jsonSchema = z.toJSONSchema(schema, {
-    target: "draft-07",
-    unrepresentable: "any",
-    io: "input",
-  }) as JsonSchema;
-  if (typeof jsonSchema.title !== "string") {
-    jsonSchema.title = schemaName;
-  }
+function buildZodValidator<T>(schema: z.ZodTypeAny, schemaName: string): SchemaValidator<T> {
+  const zodToJsonSchemaAny = zodToJsonSchema as unknown as (
+    input: z.ZodTypeAny,
+    name?: string,
+  ) => JsonSchema;
+  const jsonSchema = zodToJsonSchemaAny(schema, schemaName);
   return {
     jsonSchema,
     validate: (value) => {
@@ -136,7 +130,9 @@ function buildZodValidator<T>(schema: z.ZodType, schemaName: string): SchemaVali
 
 function buildJsonSchemaValidator<T>(schema: JsonSchema): SchemaValidator<T> {
   const AjvConstructor = Ajv as unknown as {
-    new (options?: AjvOptions): {
+    new (
+      options?: AjvOptions,
+    ): {
       compile: (input: JsonSchema) => ((value: unknown) => boolean) & {
         errors?: ErrorObject[] | null;
       };
@@ -182,15 +178,6 @@ function buildBasePrompt(prompt: string, jsonSchema: JsonSchema): string {
   ].join("\n");
 }
 
-export function buildStructuredAgentResponsePrompt(options: {
-  prompt: string;
-  schema: z.ZodType | JsonSchema;
-  schemaName?: string;
-}): string {
-  const validator = buildValidator(options.schema, options.schemaName ?? "Response");
-  return buildBasePrompt(options.prompt, validator.jsonSchema);
-}
-
 function buildRetryPrompt(basePrompt: string, errors: string[]): string {
   const formattedErrors = errors.map((error) => `- ${error}`).join("\n");
   return [
@@ -217,66 +204,6 @@ function extractJsonFromMarkdown(text: string): string {
   return text.trim();
 }
 
-function tryParseJson(candidate: string): string | null {
-  try {
-    JSON.parse(candidate);
-    return candidate;
-  } catch {
-    return null;
-  }
-}
-
-function extractBalancedJsonCandidate(source: string, start: number): string | null {
-  const open = source[start];
-  const close = open === "{" ? "}" : "]";
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-
-  for (let i = start; i < source.length; i += 1) {
-    const ch = source[i];
-
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-      if (ch === "\\") {
-        escaped = true;
-        continue;
-      }
-      if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (ch === '"') {
-      inString = true;
-      continue;
-    }
-
-    if (ch === open) {
-      depth += 1;
-      continue;
-    }
-    if (ch !== close) {
-      continue;
-    }
-    depth -= 1;
-    if (depth !== 0) {
-      continue;
-    }
-    const candidate = source.slice(start, i + 1).trim();
-    const parsed = tryParseJson(candidate);
-    if (parsed !== null) {
-      return parsed;
-    }
-  }
-
-  return null;
-}
-
 function extractFirstJsonSnippet(text: string): string | null {
   const source = text.trim();
   if (!source) {
@@ -295,9 +222,51 @@ function extractFirstJsonSnippet(text: string): string | null {
   }
 
   for (const start of startIndexes) {
-    const candidate = extractBalancedJsonCandidate(source, start);
-    if (candidate !== null) {
-      return candidate;
+    const open = source[start]!;
+    const close = open === "{" ? "}" : "]";
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = start; i < source.length; i += 1) {
+      const ch = source[i]!;
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (ch === open) {
+        depth += 1;
+        continue;
+      }
+      if (ch === close) {
+        depth -= 1;
+        if (depth === 0) {
+          const candidate = source.slice(start, i + 1).trim();
+          try {
+            JSON.parse(candidate);
+            return candidate;
+          } catch {
+            // keep scanning; the snippet might not be JSON (e.g. braces in prose)
+          }
+        }
+      }
     }
   }
 
@@ -354,12 +323,12 @@ export async function getStructuredAgentResponse<T>(
 export async function generateStructuredAgentResponse<T>(
   options: StructuredAgentGenerationOptions<T>,
 ): Promise<T> {
-  const { manager, agentConfig, agentId, persistSession, prompt, schema, maxRetries, schemaName } =
-    options;
-  const agent = await manager.createAgent(agentConfig, agentId, {
-    persistSession,
-    workspaceId: undefined,
-  });
+  const { manager, agentConfig, agentId, prompt, schema, maxRetries, schemaName } = options;
+  const modeId =
+    agentConfig.modeId ??
+    getAgentProviderDefinition(agentConfig.provider).defaultModeId ??
+    undefined;
+  const agent = await manager.createAgent({ ...agentConfig, modeId }, agentId);
   try {
     const caller: AgentCaller = async (nextPrompt) => {
       const result = await manager.runAgent(agent.id, nextPrompt);
@@ -367,7 +336,9 @@ export async function generateStructuredAgentResponse<T>(
         return result.finalText;
       }
       // Fallback for providers that may not populate finalText consistently.
-      const lastAssistant = result.timeline.findLast((item) => item.type === "assistant_message");
+      const lastAssistant = result.timeline
+        .filter((item) => item.type === "assistant_message")
+        .at(-1);
       return lastAssistant?.text ?? "";
     };
     return await getStructuredAgentResponse({
@@ -382,8 +353,6 @@ export async function generateStructuredAgentResponse<T>(
       await manager.closeAgent(agent.id);
     } catch {
       // ignore cleanup errors
-    } finally {
-      await manager.deleteAgentState(agent.id).catch(() => undefined);
     }
   }
 }
@@ -405,10 +374,8 @@ export async function generateStructuredAgentResponseWithFallback<T>(
     schema,
     providers,
     agentConfigOverrides,
-    persistSession,
     maxRetries,
     schemaName,
-    logger,
     runner,
   } = options;
 
@@ -419,22 +386,19 @@ export async function generateStructuredAgentResponseWithFallback<T>(
   const runStructured =
     runner ??
     ((input: StructuredAgentGenerationOptions<T>) => generateStructuredAgentResponse<T>(input));
+  const availability = await manager.listProviderAvailability();
+  const availabilityByProvider = new Map(availability.map((entry) => [entry.provider, entry]));
   const attempts: StructuredGenerationAttempt[] = [];
 
   for (const candidate of providers) {
-    const availabilityEntry = await manager.getProviderAvailability(candidate.provider);
-    if (!availabilityEntry.available) {
-      const reason = availabilityEntry.error ?? "unavailable";
+    const availabilityEntry = availabilityByProvider.get(candidate.provider);
+    if (availabilityEntry && !availabilityEntry.available) {
       attempts.push({
         provider: candidate.provider,
         model: candidate.model ?? null,
         available: false,
         error: availabilityEntry.error ?? null,
       });
-      logger?.warn(
-        { provider: candidate.provider, model: candidate.model, schemaName, reason },
-        "Structured generation: skipping unavailable provider",
-      );
       continue;
     }
 
@@ -445,7 +409,6 @@ export async function generateStructuredAgentResponseWithFallback<T>(
         schema,
         maxRetries,
         schemaName,
-        persistSession,
         agentConfig: {
           ...agentConfigOverrides,
           provider: candidate.provider,
@@ -454,17 +417,6 @@ export async function generateStructuredAgentResponseWithFallback<T>(
           ...(candidate.thinkingOptionId ? { thinkingOptionId: candidate.thinkingOptionId } : {}),
         },
       });
-      if (attempts.length > 0) {
-        logger?.info(
-          {
-            provider: candidate.provider,
-            model: candidate.model,
-            schemaName,
-            priorAttempts: attempts,
-          },
-          "Structured generation: succeeded after fallback",
-        );
-      }
       return result;
     } catch (error) {
       attempts.push({
@@ -473,10 +425,6 @@ export async function generateStructuredAgentResponseWithFallback<T>(
         available: true,
         error: errorMessage(error),
       });
-      logger?.warn(
-        { err: error, provider: candidate.provider, model: candidate.model, schemaName },
-        "Structured generation: provider failed, trying next",
-      );
     }
   }
 

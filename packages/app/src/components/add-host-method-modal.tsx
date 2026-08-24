@@ -1,11 +1,8 @@
-import { useCallback, useMemo } from "react";
-import { useTranslation } from "react-i18next";
-import { Pressable, Text, View } from "react-native";
+import { useCallback } from "react";
+import { Pressable, Text, View, Platform } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { QrCode, Link2, ClipboardPaste } from "lucide-react-native";
-import { AdaptiveModalSheet, type SheetHeader } from "./adaptive-modal-sheet";
-import { isFdroidBuild } from "@/constants/build-profile";
-import { isNative } from "@/constants/platform";
+import { AdaptiveModalSheet } from "./adaptive-modal-sheet";
 
 const styles = StyleSheet.create((theme) => ({
   option: {
@@ -25,7 +22,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   optionSubtext: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.sm,
     marginTop: theme.spacing[1],
   },
   optionBody: {
@@ -49,8 +46,6 @@ export function AddHostMethodModal({
   onPasteLink,
 }: AddHostMethodModalProps) {
   const { theme } = useUnistyles();
-  const { t } = useTranslation();
-  const header = useMemo<SheetHeader>(() => ({ title: t("pairing.connectionMethods.title") }), [t]);
 
   const handleDirect = useCallback(() => {
     onDirectConnection();
@@ -66,7 +61,7 @@ export function AddHostMethodModal({
 
   return (
     <AdaptiveModalSheet
-      header={header}
+      title="Add connection"
       visible={visible}
       onClose={onClose}
       testID="add-host-method-modal"
@@ -74,32 +69,21 @@ export function AddHostMethodModal({
       <Pressable
         style={styles.option}
         onPress={handleDirect}
-        accessibilityRole="button"
-        accessibilityLabel={t("pairing.connectionMethods.direct.title")}
-        testID="add-host-method-direct"
+        accessibilityLabel="Direct connection"
       >
         <Link2 size={18} color={theme.colors.foreground} />
         <View style={styles.optionBody}>
-          <Text style={styles.optionText}>{t("pairing.connectionMethods.direct.title")}</Text>
-          <Text style={styles.optionSubtext}>
-            {t("pairing.connectionMethods.direct.description")}
-          </Text>
+          <Text style={styles.optionText}>Direct connection</Text>
+          <Text style={styles.optionSubtext}>Local network or VPN.</Text>
         </View>
       </Pressable>
 
-      {isNative && !isFdroidBuild ? (
-        <Pressable
-          style={styles.option}
-          onPress={handleScan}
-          accessibilityRole="button"
-          accessibilityLabel={t("pairing.connectionMethods.scanQr.title")}
-        >
+      {Platform.OS !== "web" ? (
+        <Pressable style={styles.option} onPress={handleScan} accessibilityLabel="Scan QR code">
           <QrCode size={18} color={theme.colors.foreground} />
           <View style={styles.optionBody}>
-            <Text style={styles.optionText}>{t("pairing.connectionMethods.scanQr.title")}</Text>
-            <Text style={styles.optionSubtext}>
-              {t("pairing.connectionMethods.scanQr.description")}
-            </Text>
+            <Text style={styles.optionText}>Scan QR code</Text>
+            <Text style={styles.optionSubtext}>Encrypted relay connection.</Text>
           </View>
         </Pressable>
       ) : null}
@@ -107,16 +91,12 @@ export function AddHostMethodModal({
       <Pressable
         style={styles.option}
         onPress={handlePaste}
-        accessibilityRole="button"
-        accessibilityLabel={t("pairing.connectionMethods.pasteLink.title")}
-        testID="add-host-method-pair-link"
+        accessibilityLabel="Paste pairing link"
       >
         <ClipboardPaste size={18} color={theme.colors.foreground} />
         <View style={styles.optionBody}>
-          <Text style={styles.optionText}>{t("pairing.connectionMethods.pasteLink.title")}</Text>
-          <Text style={styles.optionSubtext}>
-            {t("pairing.connectionMethods.pasteLink.description")}
-          </Text>
+          <Text style={styles.optionText}>Paste pairing link</Text>
+          <Text style={styles.optionSubtext}>Encrypted relay connection.</Text>
         </View>
       </Pressable>
     </AdaptiveModalSheet>

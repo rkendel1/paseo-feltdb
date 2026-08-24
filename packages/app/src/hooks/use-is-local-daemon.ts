@@ -15,62 +15,26 @@ async function loadDesktopDaemonServerId(): Promise<DesktopDaemonServerIdResult>
   };
 }
 
-function useLocalDaemonServerIdQuery() {
-  const isDesktopApp = shouldUseDesktopDaemon();
+export function useIsLocalDaemon(serverId: string): boolean {
+  const normalizedServerId = serverId.trim();
+  const isDesktop = shouldUseDesktopDaemon();
 
-  return useQuery({
+  const query = useQuery({
     queryKey: DESKTOP_DAEMON_SERVER_ID_QUERY_KEY,
     queryFn: loadDesktopDaemonServerId,
-    enabled: isDesktopApp,
+    enabled: isDesktop,
     staleTime: Infinity,
     gcTime: Infinity,
-    refetchInterval: (activeQuery) => (activeQuery.state.data?.serverId ? false : 1000),
+    refetchInterval: (query) => (query.state.data?.serverId ? false : 1000),
     refetchOnMount: false,
     refetchOnReconnect: false,
     refetchOnWindowFocus: false,
     retry: false,
   });
-}
 
-export function useLocalDaemonServerId(): string | null {
-  const isDesktopApp = shouldUseDesktopDaemon();
-  const query = useLocalDaemonServerIdQuery();
-
-  if (!isDesktopApp) {
-    return null;
-  }
-
-  return query.data?.serverId ?? null;
-}
-
-export type LocalDaemonServerIdState =
-  | { status: "loading" }
-  | { status: "error" }
-  | { status: "resolved"; serverId: string | null };
-
-export function useLocalDaemonServerIdState(): LocalDaemonServerIdState {
-  const isDesktopApp = shouldUseDesktopDaemon();
-  const query = useLocalDaemonServerIdQuery();
-
-  if (!isDesktopApp) {
-    return { status: "resolved", serverId: null };
-  }
-  if (query.isError) {
-    return { status: "error" };
-  }
-  if (query.isSuccess) {
-    return { status: "resolved", serverId: query.data.serverId };
-  }
-  return { status: "loading" };
-}
-
-export function useIsLocalDaemon(serverId: string): boolean {
-  const normalizedServerId = serverId.trim();
-  const localServerId = useLocalDaemonServerId();
-
-  if (localServerId === null || normalizedServerId.length === 0) {
+  if (!isDesktop || normalizedServerId.length === 0) {
     return false;
   }
 
-  return localServerId === normalizedServerId;
+  return query.data?.serverId === normalizedServerId;
 }

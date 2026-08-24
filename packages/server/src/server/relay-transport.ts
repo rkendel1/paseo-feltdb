@@ -1,50 +1,35 @@
 /// <reference lib="dom" />
 import { EventEmitter } from "node:events";
-import { WebSocket } from "ws";
+import WebSocket from "ws";
 import type pino from "pino";
 import {
   createDaemonChannel,
+  type EncryptedChannel,
   type Transport as RelayTransport,
   type KeyPair,
 } from "@getpaseo/relay/e2ee";
-import { buildRelayWebSocketUrl } from "@getpaseo/protocol/daemon-endpoints";
+import { buildRelayWebSocketUrl } from "../shared/daemon-endpoints.js";
 import type { ExternalSocketMetadata } from "./websocket-server.js";
-import { createEncryptedRelaySocket } from "./websocket/encrypted-relay-socket.js";
 
-export interface RelayTransportOptions {
+type RelayTransportOptions = {
   logger: pino.Logger;
   attachSocket: (ws: RelaySocketLike, metadata?: ExternalSocketMetadata) => Promise<void>;
   relayEndpoint: string; // "host:port"
-  relayUseTls: boolean;
   serverId: string;
   daemonKeyPair?: KeyPair;
-  createWebSocket?: RelayWebSocketFactory;
-}
+};
 
-export interface RelayTransportController {
+export type RelayTransportController = {
   stop: () => Promise<void>;
-}
+};
 
-export interface RelaySocketLike {
+type RelaySocketLike = {
   readyState: number;
-  bufferedAmount?: number;
-  send: (data: string | Uint8Array | ArrayBuffer, callback?: (error?: Error) => void) => void;
+  send: (data: string | Uint8Array | ArrayBuffer) => void;
   close: (code?: number, reason?: string) => void;
-  terminate?: () => void;
-  on: (event: "message" | "close" | "error", listener: (...args: unknown[]) => void) => void;
-  once: (event: "close" | "error", listener: (...args: unknown[]) => void) => void;
-}
-
-interface RelayWebSocketLike extends RelaySocketLike {
-  terminate: () => void;
-  ping: () => void;
-  on: (
-    event: "open" | "message" | "close" | "error" | "pong",
-    listener: (...args: unknown[]) => void,
-  ) => void;
-}
-
-type RelayWebSocketFactory = (url: string) => RelayWebSocketLike;
+  on: (event: "message" | "close" | "error", listener: (...args: any[]) => void) => void;
+  once: (event: "close" | "error", listener: (...args: any[]) => void) => void;
+};
 
 type ControlMessage =
   | { type: "sync"; connectionIds: string[] }
@@ -56,28 +41,13 @@ type ControlMessage =
 const CONTROL_PING_INTERVAL_MS = 10_000;
 const CONTROL_STALE_TIMEOUT_MS = 30_000;
 const CONTROL_READY_TIMEOUT_MS = 8_000;
-const RELAY_WEBSOCKET_OPTIONS = { handshakeTimeout: 10_000, perMessageDeflate: false } as const;
-
-function createDefaultRelayWebSocket(url: string): RelayWebSocketLike {
-  return new WebSocket(url, RELAY_WEBSOCKET_OPTIONS);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
 
 function tryParseControlMessage(raw: unknown): ControlMessage | null {
   try {
-    let text: string;
-    if (typeof raw === "string") {
-      text = raw;
-    } else if (Buffer.isBuffer(raw)) {
-      text = raw.toString("utf8");
-    } else {
-      text = String(raw);
-    }
-    const parsed = JSON.parse(text);
-    if (!isRecord(parsed)) return null;
+    const text =
+      typeof raw === "string" ? raw : Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+    const parsed = JSON.parse(text) as any;
+    if (!parsed || typeof parsed !== "object") return null;
     if (parsed.type === "ping") return { type: "ping" };
     if (parsed.type === "pong") return { type: "pong" };
     if (parsed.type === "sync" && Array.isArray(parsed.connectionIds)) {
@@ -110,18 +80,16 @@ export function startRelayTransport({
   logger,
   attachSocket,
   relayEndpoint,
-  relayUseTls,
   serverId,
   daemonKeyPair,
-  createWebSocket = createDefaultRelayWebSocket,
 }: RelayTransportOptions): RelayTransportController {
   const relayLogger = logger.child({ module: "relay-transport" });
 
   let stopped = false;
-  let controlWs: RelayWebSocketLike | null = null;
+  let controlWs: WebSocket | null = null;
   let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempt = 0;
-  const dataSockets = new Map<string, RelayWebSocketLike>(); // connectionId -> ws
+  const dataSockets = new Map<string, WebSocket>(); // connectionId -> ws
   let controlKeepaliveInterval: ReturnType<typeof setInterval> | null = null;
   let controlReadyTimeout: ReturnType<typeof setTimeout> | null = null;
   let controlLastSeenAt = 0;
@@ -165,11 +133,10 @@ export function startRelayTransport({
     const connectionId = ++controlConnectionSeq;
     const url = buildRelayWebSocketUrl({
       endpoint: relayEndpoint,
-      useTls: relayUseTls,
       serverId,
       role: "server",
     });
-    const socket = createWebSocket(url);
+    const socket = new WebSocket(url, { handshakeTimeout: 10_000, perMessageDeflate: false });
     controlWs = socket;
     let controlConnected = false;
 
@@ -182,7 +149,7 @@ export function startRelayTransport({
         clearTimeout(controlReadyTimeout);
         controlReadyTimeout = null;
       }
-      relayLogger.info({ connectionId }, "relay_control_connected");
+      relayLogger.info({ url, connectionId }, "relay_control_connected");
     };
 
     socket.on("open", () => {
@@ -219,9 +186,7 @@ export function startRelayTransport({
         const now = Date.now();
         const staleForMs = now - controlLastSeenAt;
         // If the control socket is half-open or silently dropped, ws may never emit "close".
-        // Use a WebSocket protocol ping to detect staleness and force a reconnect.
-        // Cloudflare's runtime auto-responds to protocol pings at the edge without waking the
-        // hibernated relay Durable Object, so this keepalive does not incur DO CPU billing.
+        // Use app-level ping/pong to detect staleness and force a reconnect.
         if (staleForMs > CONTROL_STALE_TIMEOUT_MS) {
           relayLogger.warn(
             { url, staleForMs, connectionId, staleTimeoutMs: CONTROL_STALE_TIMEOUT_MS },
@@ -236,9 +201,9 @@ export function startRelayTransport({
         }
 
         try {
-          socket.ping();
+          socket.send(JSON.stringify({ type: "ping", ts: now }));
         } catch (error) {
-          relayLogger.warn({ err: error, connectionId }, "relay_control_ping_send_failed");
+          relayLogger.warn({ err: error, url, connectionId }, "relay_control_ping_send_failed");
           try {
             socket.terminate();
           } catch {
@@ -247,16 +212,16 @@ export function startRelayTransport({
         }
       }, CONTROL_PING_INTERVAL_MS);
       try {
-        socket.ping();
+        socket.send(JSON.stringify({ type: "ping", ts: Date.now() }));
       } catch (error) {
-        relayLogger.warn({ err: error, connectionId }, "relay_control_ping_send_failed");
+        relayLogger.warn({ err: error, url, connectionId }, "relay_control_ping_send_failed");
         try {
           socket.terminate();
         } catch {
           // ignore
         }
       }
-      relayLogger.debug({ connectionId }, "relay_control_open_waiting_for_ready");
+      relayLogger.debug({ url, connectionId }, "relay_control_open_waiting_for_ready");
     });
 
     socket.on("close", (code, reason) => {
@@ -279,14 +244,8 @@ export function startRelayTransport({
 
     socket.on("error", (err) => {
       if (controlWs !== socket) return;
-      relayLogger.warn({ err, connectionId }, "relay_error");
+      relayLogger.warn({ err, url, connectionId }, "relay_error");
       // close event will schedule reconnect
-    });
-
-    socket.on("pong", () => {
-      if (controlWs !== socket) return;
-      controlLastSeenAt = Date.now();
-      relayLogger.debug({ connectionId }, "relay_control_pong_received");
     });
 
     socket.on("message", (data) => {
@@ -307,8 +266,8 @@ export function startRelayTransport({
       }
       if (msg.type === "pong") return;
       if (msg.type === "sync") {
-        for (const clientConnectionId of msg.connectionIds) {
-          ensureClientDataSocket(clientConnectionId);
+        for (const connectionId of msg.connectionIds) {
+          ensureClientDataSocket(connectionId);
         }
         return;
       }
@@ -349,19 +308,18 @@ export function startRelayTransport({
 
     const url = buildRelayWebSocketUrl({
       endpoint: relayEndpoint,
-      useTls: relayUseTls,
       serverId,
       role: "server",
       connectionId,
     });
-    const socket = createWebSocket(url);
+    const socket = new WebSocket(url, { handshakeTimeout: 10_000, perMessageDeflate: false });
     dataSockets.set(connectionId, socket);
 
     let attached = false;
     const openTimeout = setTimeout(() => {
       if (stopped) return;
       if (socket.readyState === WebSocket.OPEN) return;
-      relayLogger.warn({ connectionId }, "relay_data_open_timeout_terminating");
+      relayLogger.warn({ url, connectionId }, "relay_data_open_timeout_terminating");
       try {
         socket.terminate();
       } catch {
@@ -371,13 +329,12 @@ export function startRelayTransport({
 
     socket.on("open", () => {
       clearTimeout(openTimeout);
-      relayLogger.info({ connectionId }, "relay_data_connected");
+      relayLogger.info({ url, connectionId }, "relay_data_connected");
       if (attached) return;
       attached = true;
       const externalMetadata: ExternalSocketMetadata = {
         transport: "relay",
         externalSessionKey: `session:${connectionId}`,
-        relayConnectionId: connectionId,
       };
       if (daemonKeyPair) {
         void attachEncryptedSocket(
@@ -404,7 +361,7 @@ export function startRelayTransport({
     });
 
     socket.on("error", (err) => {
-      relayLogger.warn({ err, connectionId }, "relay_data_error");
+      relayLogger.warn({ err, url, connectionId }, "relay_data_error");
     });
   };
 
@@ -414,44 +371,25 @@ export function startRelayTransport({
 }
 
 async function attachEncryptedSocket(
-  socket: RelayWebSocketLike,
+  socket: WebSocket,
   daemonKeyPair: KeyPair,
   logger: pino.Logger,
   attachSocket: (ws: RelaySocketLike, metadata?: ExternalSocketMetadata) => Promise<void>,
   metadata?: ExternalSocketMetadata,
 ): Promise<void> {
   try {
-    const relayTransport = createRelayTransportAdapter(socket, logger);
+    const relayTransport = createRelayTransportAdapter(socket);
     const emitter = new EventEmitter();
-    const pendingMessages: Array<string | ArrayBuffer> = [];
-    let attached = false;
-    const emitMessage = (data: string | ArrayBuffer) => {
-      if (attached) {
-        emitter.emit("message", data);
-        return;
-      }
-      pendingMessages.push(data);
-    };
     const channel = await createDaemonChannel(relayTransport, daemonKeyPair, {
-      onmessage: emitMessage,
+      onmessage: (data) => emitter.emit("message", data),
       onclose: (code, reason) => emitter.emit("close", code, reason),
       onerror: (error) => {
         logger.warn({ err: error }, "relay_e2ee_error");
         emitter.emit("error", error);
       },
     });
-    const encryptedSocket = createEncryptedRelaySocket({
-      channel,
-      emitter,
-      getTransportBufferedAmount: () => socket.bufferedAmount,
-      terminateTransport: () => socket.terminate(),
-    });
+    const encryptedSocket = createEncryptedSocket(channel, emitter);
     await attachSocket(encryptedSocket, metadata);
-    attached = true;
-    for (const message of pendingMessages) {
-      emitter.emit("message", message);
-    }
-    pendingMessages.length = 0;
   } catch (error) {
     logger.warn({ err: error }, "relay_e2ee_handshake_failed");
     try {
@@ -462,28 +400,9 @@ async function attachEncryptedSocket(
   }
 }
 
-function createRelayTransportAdapter(
-  socket: RelayWebSocketLike,
-  logger: pino.Logger,
-): RelayTransport {
+function createRelayTransportAdapter(socket: WebSocket): RelayTransport {
   const relayTransport: RelayTransport = {
-    send: (data) =>
-      new Promise<void>((resolve, reject) => {
-        try {
-          socket.send(data, (error) => {
-            if (!error) {
-              resolve();
-              return;
-            }
-            logger.warn({ err: error }, "relay_socket_send_failed");
-            reject(error);
-          });
-        } catch (error) {
-          const err = error instanceof Error ? error : new Error(String(error));
-          logger.warn({ err }, "relay_socket_send_failed");
-          reject(err);
-        }
-      }),
+    send: (data) => socket.send(data),
     close: (code?: number, reason?: string) => socket.close(code, reason),
     onmessage: null,
     onclose: null,
@@ -491,18 +410,64 @@ function createRelayTransportAdapter(
   };
 
   socket.on("message", (data, isBinary) => {
-    const binary = isBinary === true;
-    relayTransport.onmessage?.({ data: normalizeMessageData(data, binary), isBinary: binary });
+    relayTransport.onmessage?.(normalizeMessageData(data, isBinary));
   });
   socket.on("close", (code, reason) => {
-    const closeCode = typeof code === "number" ? code : 1006;
-    relayTransport.onclose?.(closeCode, String(reason ?? ""));
+    relayTransport.onclose?.(code, reason.toString());
   });
   socket.on("error", (err) => {
     relayTransport.onerror?.(err instanceof Error ? err : new Error(String(err)));
   });
 
   return relayTransport;
+}
+
+function createEncryptedSocket(channel: EncryptedChannel, emitter: EventEmitter): RelaySocketLike {
+  let readyState = 1;
+
+  channel.setState("open");
+
+  const close = (code?: number, reason?: string) => {
+    if (readyState === 3) return;
+    readyState = 3;
+    channel.close(code, reason);
+  };
+
+  emitter.on("close", () => {
+    if (readyState === 3) return;
+    readyState = 3;
+  });
+
+  return {
+    get readyState() {
+      return readyState;
+    },
+    send: (data) => {
+      const outbound =
+        typeof data === "string"
+          ? data
+          : data instanceof ArrayBuffer
+            ? data
+            : ArrayBuffer.isView(data)
+              ? (() => {
+                  const view = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+                  const out = new Uint8Array(view.byteLength);
+                  out.set(view);
+                  return out.buffer;
+                })()
+              : String(data);
+      void channel.send(outbound).catch((error) => {
+        emitter.emit("error", error);
+      });
+    },
+    close,
+    on: (event, listener) => {
+      emitter.on(event, listener);
+    },
+    once: (event, listener) => {
+      emitter.once(event, listener);
+    },
+  };
 }
 
 function normalizeMessageData(data: unknown, isBinary: boolean): string | ArrayBuffer {
@@ -551,3 +516,5 @@ function bufferFromWsData(data: unknown): Buffer | null {
   }
   return null;
 }
+
+// buildRelayWebSocketUrl + parseHostPort live in ../shared/daemon-endpoints.ts

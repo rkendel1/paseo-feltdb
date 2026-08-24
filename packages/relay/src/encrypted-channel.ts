@@ -19,16 +19,11 @@ import {
 import { arrayBufferToBase64, base64ToArrayBuffer } from "./base64.js";
 
 export interface Transport {
-  send(data: string | ArrayBuffer): void | Promise<void>;
+  send(data: string | ArrayBuffer): void;
   close(code?: number, reason?: string): void;
-  onmessage: ((message: TransportMessage) => void) | null;
+  onmessage: ((data: string | ArrayBuffer) => void) | null;
   onclose: ((code: number, reason: string) => void) | null;
   onerror: ((error: Error) => void) | null;
-}
-
-export interface TransportMessage {
-  data: string | ArrayBuffer;
-  isBinary: boolean;
 }
 
 export interface EncryptedChannelEvents {
@@ -40,7 +35,7 @@ export interface EncryptedChannelEvents {
 
 type ChannelState = "connecting" | "handshaking" | "open" | "closed";
 
-interface EncryptedChannelOptions {
+type EncryptedChannelOptions = {
   /**
    * If set, the channel can validate repeated plaintext `{type:"e2ee_hello"}`
    * messages even after it is open.
@@ -50,63 +45,23 @@ interface EncryptedChannelOptions {
    * the daemon should re-send `{type:"e2ee_ready"}` without changing keys.
    */
   daemonKeyPair?: KeyPair;
-  binaryCiphertext?: boolean;
-}
+};
 
 interface E2EEHelloMessage {
   type: "e2ee_hello";
   key: string;
-  capabilities?: E2EECapabilities;
 }
 
 interface E2EEReadyMessage {
   type: "e2ee_ready";
-  capabilities?: E2EECapabilities;
-}
-
-interface E2EECapabilities {
-  binaryCiphertext?: boolean;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isE2EECapabilities(value: unknown): value is E2EECapabilities {
-  return (
-    value === undefined ||
-    (isRecord(value) &&
-      (value.binaryCiphertext === undefined || typeof value.binaryCiphertext === "boolean"))
-  );
-}
-
-function isE2EEHelloMessage(value: unknown): value is E2EEHelloMessage {
-  return (
-    isRecord(value) &&
-    value.type === "e2ee_hello" &&
-    typeof value.key === "string" &&
-    value.key.trim().length > 0 &&
-    isE2EECapabilities(value.capabilities)
-  );
-}
-
-function isE2EEReadyMessage(value: unknown): value is E2EEReadyMessage {
-  return isRecord(value) && value.type === "e2ee_ready" && isE2EECapabilities(value.capabilities);
-}
-
-function supportsBinaryCiphertext(message: E2EEHelloMessage | E2EEReadyMessage): boolean {
-  return message.capabilities?.binaryCiphertext === true;
 }
 
 function buildInvalidHelloError(rawText: string, parsed?: unknown): Error {
-  const parsedRecord = isRecord(parsed) ? parsed : null;
+  const parsedRecord =
+    parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
   const rawType = parsedRecord?.type;
-  function describeType(value: unknown): string {
-    if (typeof value === "string") return value;
-    if (value === undefined) return "undefined";
-    return typeof value;
-  }
-  const receivedType = describeType(rawType);
+  const receivedType =
+    typeof rawType === "string" ? rawType : rawType === undefined ? "undefined" : typeof rawType;
   const hasKey = typeof parsedRecord?.key === "string" && parsedRecord.key.trim().length > 0;
   const compact = rawText.replace(/\s+/g, " ").trim();
   const preview = compact.length > 160 ? `${compact.slice(0, 157)}...` : compact;
@@ -117,30 +72,6 @@ function buildInvalidHelloError(rawText: string, parsed?: unknown): Error {
 
 const HANDSHAKE_RETRY_MS = 1000;
 const MAX_PENDING_SENDS = 200;
-const REHANDSHAKE_KEY_MISMATCH_CLOSE_CODE = 1008;
-const ENCRYPTED_PAYLOAD_OVERHEAD_BYTES = 40;
-
-export function base64EncryptedWireByteLength(plaintextBytes: number): number {
-  return 4 * Math.ceil((plaintextBytes + ENCRYPTED_PAYLOAD_OVERHEAD_BYTES) / 3);
-}
-
-export function maxBase64EncryptedPlaintextByteLength(wireBytes: number): number {
-  return Math.floor(wireBytes / 4) * 3 - ENCRYPTED_PAYLOAD_OVERHEAD_BYTES;
-}
-const REHANDSHAKE_KEY_MISMATCH_CLOSE_REASON = "E2EE re-handshake key mismatch";
-
-interface TimeoutWithUnref {
-  unref(): void;
-}
-
-function hasUnref(timeout: unknown): timeout is TimeoutWithUnref {
-  return (
-    typeof timeout === "object" &&
-    timeout !== null &&
-    "unref" in timeout &&
-    typeof (timeout as Record<string, unknown>).unref === "function"
-  );
-}
 
 /**
  * Creates an encrypted channel as the initiator (client).
@@ -164,11 +95,7 @@ export async function createClientChannel(
 
   // Send e2ee_hello with our public key
   const ourPublicKeyB64 = exportPublicKey(keyPair.publicKey);
-  const hello: E2EEHelloMessage = {
-    type: "e2ee_hello",
-    key: ourPublicKeyB64,
-    capabilities: { binaryCiphertext: true },
-  };
+  const hello: E2EEHelloMessage = { type: "e2ee_hello", key: ourPublicKeyB64 };
   const helloText = JSON.stringify(hello);
 
   let retry: ReturnType<typeof setInterval> | null = null;
@@ -178,10 +105,7 @@ export async function createClientChannel(
   };
   const sendHello = () => {
     try {
-      const result = transport.send(helloText);
-      if (result) {
-        void result.catch(emitSendError);
-      }
+      transport.send(helloText);
       return true;
     } catch (error) {
       // This can happen during daemon restarts while the socket transitions
@@ -209,9 +133,7 @@ export async function createClientChannel(
     sendHello();
   }, HANDSHAKE_RETRY_MS);
   // Avoid keeping Node processes alive (e.g. tests) if the handshake is stuck.
-  if (hasUnref(retry)) {
-    retry.unref();
-  }
+  (retry as unknown as { unref?: () => void }).unref?.();
 
   return channel;
 }
@@ -230,24 +152,20 @@ export async function createDaemonChannel(
   events: EncryptedChannelEvents = {},
 ): Promise<EncryptedChannel> {
   return new Promise((resolve, reject) => {
-    const bufferedMessages: TransportMessage[] = [];
-    const shouldIgnorePostHelloPlaintext = (message: TransportMessage): boolean => {
+    const bufferedMessages: Array<string | ArrayBuffer> = [];
+    const shouldIgnorePostHelloPlaintext = (data: string | ArrayBuffer): boolean => {
       try {
-        if (message.isBinary) return false;
-        const text = decodeTransportText(message.data);
-        const parsed: unknown = JSON.parse(text);
-        return isE2EEHelloMessage(parsed) || isE2EEReadyMessage(parsed);
+        const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+        const parsed = JSON.parse(text) as Partial<E2EEHelloMessage | E2EEReadyMessage>;
+        return parsed.type === "e2ee_hello" || parsed.type === "e2ee_ready";
       } catch {
         return false;
       }
     };
 
-    const handleHello = async (message: TransportMessage): Promise<void> => {
+    transport.onmessage = async (data) => {
       try {
-        if (message.isBinary) {
-          throw buildInvalidHelloError("<binary frame>");
-        }
-        const helloText = decodeTransportText(message.data);
+        const helloText = typeof data === "string" ? data : new TextDecoder().decode(data);
 
         let parsed: unknown;
         try {
@@ -256,38 +174,25 @@ export async function createDaemonChannel(
           throw buildInvalidHelloError(helloText);
         }
 
-        if (!isE2EEHelloMessage(parsed)) {
+        const msg = parsed as Partial<E2EEHelloMessage>;
+        if (msg.type !== "e2ee_hello" || typeof msg.key !== "string" || !msg.key.trim()) {
           throw buildInvalidHelloError(helloText, parsed);
         }
-
-        const msg = parsed;
 
         // Buffer any subsequent messages that arrive while we're doing async
         // WebCrypto work to derive the shared key. Without this, it's possible
         // for the next message (already encrypted) to be misinterpreted as a
         // second hello, causing the handshake to fail.
-        const bufferNext = (next: TransportMessage): void => {
+        transport.onmessage = (next) => {
           bufferedMessages.push(next);
         };
-        Object.assign(transport, { onmessage: bufferNext });
 
         const clientPublicKey = importPublicKey(msg.key);
         const sharedKey = deriveSharedKey(daemonKeyPair.secretKey, clientPublicKey);
 
-        const binaryCiphertext = supportsBinaryCiphertext(msg);
-        await transport.send(
-          JSON.stringify({
-            type: "e2ee_ready",
-            ...(binaryCiphertext
-              ? { capabilities: { binaryCiphertext: true } satisfies E2EECapabilities }
-              : {}),
-          } satisfies E2EEReadyMessage),
-        );
+        const channel = new EncryptedChannel(transport, sharedKey, events, { daemonKeyPair });
+        transport.send(JSON.stringify({ type: "e2ee_ready" } satisfies E2EEReadyMessage));
 
-        const channel = new EncryptedChannel(transport, sharedKey, events, {
-          daemonKeyPair,
-          binaryCiphertext,
-        });
         channel.setState("open");
         events.onopen?.();
 
@@ -302,15 +207,13 @@ export async function createDaemonChannel(
       }
     };
 
-    Object.assign(transport, {
-      onmessage: handleHello,
-      onerror: (error: Error) => {
-        reject(error);
-      },
-      onclose: (code: number, reason: string) => {
-        reject(new Error(`Connection closed during handshake: ${code} ${reason}`));
-      },
-    });
+    transport.onerror = (error) => {
+      reject(error);
+    };
+
+    transport.onclose = (code, reason) => {
+      reject(new Error(`Connection closed during handshake: ${code} ${reason}`));
+    };
   });
 }
 
@@ -338,42 +241,31 @@ export class EncryptedChannel {
     this.events = events;
     this.options = options;
 
-    Object.assign(transport, {
-      onmessage: (message: TransportMessage) => this.handleMessage(message),
-      onclose: (code: number, reason: string) => {
-        this.state = "closed";
-        this.events.onclose?.(code, reason);
-        for (const cb of this.onCloseCallbacks) cb();
-      },
-      onerror: (error: Error) => {
-        this.events.onerror?.(error);
-      },
-    });
+    transport.onmessage = (data) => this.handleMessage(data);
+    transport.onclose = (code, reason) => {
+      this.state = "closed";
+      this.events.onclose?.(code, reason);
+      for (const cb of this.onCloseCallbacks) cb();
+    };
+    transport.onerror = (error) => {
+      this.events.onerror?.(error);
+    };
   }
 
   setState(state: ChannelState): void {
     this.state = state;
   }
 
-  private async handleMessage(message: TransportMessage): Promise<void> {
+  private async handleMessage(data: string | ArrayBuffer): Promise<void> {
     if (this.state === "handshaking") {
       try {
-        if (message.isBinary) return;
-        const text = decodeTransportText(message.data);
-        const parsed: unknown = JSON.parse(text);
-        if (isE2EEReadyMessage(parsed)) {
-          this.options.binaryCiphertext = supportsBinaryCiphertext(parsed);
+        const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+        const msg = JSON.parse(text) as Partial<E2EEReadyMessage>;
+        if (msg.type === "e2ee_ready") {
           this.state = "open";
           this.events.onopen?.();
           for (const cb of this.onOpenCallbacks) cb();
-          try {
-            await this.flushPendingSends();
-          } catch (error) {
-            const err = error instanceof Error ? error : new Error(String(error));
-            this.events.onerror?.(err);
-            this.state = "closed";
-            this.transport.close(1011, err.message);
-          }
+          await this.flushPendingSends();
         }
       } catch {
         // ignore non-ready handshake traffic
@@ -387,19 +279,50 @@ export class EncryptedChannel {
       const ciphertext = await (async () => {
         // Handle (or ignore) any stray plaintext handshake traffic.
         try {
-          if (message.isBinary) throw new Error("not plaintext handshake traffic");
-          const text = decodeTransportText(message.data);
+          const text = typeof data === "string" ? data : new TextDecoder().decode(data);
           if (text.trim().startsWith("{")) {
-            const parsed: unknown = JSON.parse(text);
+            const parsed = JSON.parse(text) as Partial<E2EEHelloMessage | E2EEReadyMessage>;
 
-            if (isE2EEHelloMessage(parsed)) {
+            if (parsed.type === "e2ee_hello" && typeof parsed.key === "string") {
               if (this.options.daemonKeyPair) {
-                await this.handleDaemonRehello(parsed);
+                try {
+                  const clientPublicKey = importPublicKey(parsed.key);
+                  const nextSharedKey = deriveSharedKey(
+                    this.options.daemonKeyPair.secretKey,
+                    clientPublicKey,
+                  );
+
+                  // If it's the same client key (handshake retry), re-send
+                  // "ready" but do not re-key. Re-keying here would desync
+                  // the channel and cause decrypt failures.
+                  if (keysEqual(nextSharedKey, this.sharedKey)) {
+                    this.transport.send(
+                      JSON.stringify({ type: "e2ee_ready" } satisfies E2EEReadyMessage),
+                    );
+                    return null;
+                  }
+
+                  // Different key implies a new client connection (common with relays
+                  // where the daemon's socket stays open while the client reconnects).
+                  // Re-key and re-send "ready". Drop any queued sends to avoid leaking
+                  // messages between logical client sessions.
+                  this.state = "handshaking";
+                  this.sharedKey = nextSharedKey;
+                  this.pendingSends = [];
+                  this.transport.send(
+                    JSON.stringify({ type: "e2ee_ready" } satisfies E2EEReadyMessage),
+                  );
+                  this.state = "open";
+                  await this.flushPendingSends();
+                  return null;
+                } catch (error) {
+                  throw error;
+                }
               }
               return null;
             }
 
-            if (isE2EEReadyMessage(parsed)) {
+            if (parsed.type === "e2ee_ready") {
               return null;
             }
 
@@ -416,33 +339,22 @@ export class EncryptedChannel {
           // decoding ciphertext below.
         }
 
-        if (this.options.binaryCiphertext) {
-          return message.isBinary
-            ? { data: requireArrayBuffer(message.data), isBinary: true as const }
-            : {
-                data: base64ToArrayBuffer(decodeTransportText(message.data)),
-                isBinary: false as const,
-              };
+        if (typeof data === "string") {
+          return base64ToArrayBuffer(data);
         }
 
-        // COMPAT(binaryCiphertext): added in v0.2.3, remove legacy base64-only
-        // receive mode after 2027-01-27.
-        if (!message.isBinary) {
-          return { data: base64ToArrayBuffer(decodeTransportText(message.data)), isBinary: null };
-        }
-
-        // Older transport adapters could lose the opcode. Retain the former
-        // base64-first behavior only in the legacy path.
+        // Some WebSocket implementations deliver text frames as ArrayBuffer.
+        // Our protocol always transmits ciphertext as base64 text.
         try {
-          return { data: base64ToArrayBuffer(decodeTransportText(message.data)), isBinary: null };
+          const decoded = new TextDecoder().decode(data);
+          return base64ToArrayBuffer(decoded);
         } catch {
-          return { data: requireArrayBuffer(message.data), isBinary: null };
+          return data;
         }
       })();
 
       if (ciphertext) {
-        const plaintextBytes = decrypt(this.sharedKey, ciphertext.data);
-        const plaintext = decodePlaintext(plaintextBytes, ciphertext.isBinary);
+        const plaintext = await decrypt(this.sharedKey, ciphertext);
         this.events.onmessage?.(plaintext);
       }
     } catch (error) {
@@ -472,23 +384,9 @@ export class EncryptedChannel {
       throw new Error("Channel not open");
     }
 
-    const ciphertext = encrypt(this.sharedKey, data);
-    if (this.options.binaryCiphertext && data instanceof ArrayBuffer) {
-      await this.transport.send(ciphertext);
-      return;
-    }
-    // COMPAT(binaryCiphertext): added in v0.2.3, remove base64 binary sends
-    // after 2027-01-27 once the supported peer floor includes negotiation.
-    await this.transport.send(arrayBufferToBase64(ciphertext));
-  }
-
-  outboundWireByteLength(data: string | ArrayBuffer): number {
-    const plaintextBytes = utf8ByteLength(data);
-    const encryptedBytes = plaintextBytes + ENCRYPTED_PAYLOAD_OVERHEAD_BYTES;
-    if (this.options.binaryCiphertext && data instanceof ArrayBuffer) {
-      return encryptedBytes;
-    }
-    return base64EncryptedWireByteLength(plaintextBytes);
+    const ciphertext = await encrypt(this.sharedKey, data);
+    // Send as base64 for WebSocket text compatibility
+    this.transport.send(arrayBufferToBase64(ciphertext));
   }
 
   private async flushPendingSends(): Promise<void> {
@@ -498,36 +396,6 @@ export class EncryptedChannel {
     for (const item of pending) {
       await this.send(item);
     }
-  }
-
-  private async handleDaemonRehello(message: E2EEHelloMessage): Promise<void> {
-    if (!this.options.daemonKeyPair) return;
-    const clientPublicKey = importPublicKey(message.key);
-    const nextSharedKey = deriveSharedKey(this.options.daemonKeyPair.secretKey, clientPublicKey);
-
-    // If it's the same client key (handshake retry), re-send
-    // "ready" but do not re-key. Re-keying here would desync
-    // the channel and cause decrypt failures.
-    if (keysEqual(nextSharedKey, this.sharedKey)) {
-      await this.transport.send(
-        JSON.stringify({
-          type: "e2ee_ready",
-          ...(this.options.binaryCiphertext
-            ? { capabilities: { binaryCiphertext: true } satisfies E2EECapabilities }
-            : {}),
-        } satisfies E2EEReadyMessage),
-      );
-      return;
-    }
-
-    // A different key on an already-open encrypted channel is not an
-    // authenticated reconnect. Close and require a fresh transport instead of
-    // allowing the relay to switch this channel to an attacker-chosen key.
-    this.state = "closed";
-    this.transport.close(
-      REHANDSHAKE_KEY_MISMATCH_CLOSE_CODE,
-      REHANDSHAKE_KEY_MISMATCH_CLOSE_REASON,
-    );
   }
 
   close(code = 1000, reason = "Normal closure"): void {
@@ -548,38 +416,10 @@ export class EncryptedChannel {
   }
 }
 
-function decodeTransportText(data: string | ArrayBuffer): string {
-  return typeof data === "string" ? data : new TextDecoder().decode(data);
-}
-
-function requireArrayBuffer(data: string | ArrayBuffer): ArrayBuffer {
-  if (data instanceof ArrayBuffer) return data;
-  throw new Error("Binary WebSocket frame did not contain bytes");
-}
-
-function decodeLegacyPlaintext(data: ArrayBuffer): string | ArrayBuffer {
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(data);
-  } catch {
-    return data;
-  }
-}
-
-function decodePlaintext(data: ArrayBuffer, isBinary: boolean | null): string | ArrayBuffer {
-  if (isBinary === true) return data;
-  if (isBinary === false) return new TextDecoder("utf-8", { fatal: true }).decode(data);
-  return decodeLegacyPlaintext(data);
-}
-
-function utf8ByteLength(data: string | ArrayBuffer): number {
-  return typeof data === "string" ? new TextEncoder().encode(data).byteLength : data.byteLength;
-}
-
 function keysEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.byteLength !== b.byteLength) return false;
-  let difference = 0;
   for (let i = 0; i < a.byteLength; i += 1) {
-    difference |= a[i] ^ b[i];
+    if (a[i] !== b[i]) return false;
   }
-  return difference === 0;
+  return true;
 }

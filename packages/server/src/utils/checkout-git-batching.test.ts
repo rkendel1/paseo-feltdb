@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, realpathSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
@@ -16,17 +16,11 @@ vi.mock("child_process", async () => {
       const [command, commandArgs] = args;
       if (command === "git" && Array.isArray(commandArgs)) {
         const normalizedArgs = commandArgs.map((arg) => String(arg));
-        // `runGitCommand` always prepends `-c core.quotepath=false`; skip it to
-        // find the actual git subcommand.
-        const subcommandIndex =
-          normalizedArgs[0] === "-c" && normalizedArgs[1] === "core.quotepath=false" ? 2 : 0;
         const isTrackedTextDiff =
-          normalizedArgs[subcommandIndex] === "diff" &&
+          normalizedArgs[0] === "diff" &&
           normalizedArgs.includes("HEAD") &&
           !normalizedArgs.includes("--numstat") &&
-          !normalizedArgs.includes("--no-index") &&
-          !normalizedArgs.includes("--shortstat") &&
-          !normalizedArgs.includes("--name-status");
+          !normalizedArgs.includes("--no-index");
         if (isTrackedTextDiff) {
           spawnCounters.trackedTextDiffCalls += 1;
         }
@@ -42,18 +36,16 @@ function initRepoWithTrackedChanges(fileCount: number): { tempDir: string; repoD
   const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "checkout-git-batch-test-")));
   const repoDir = join(tempDir, "repo");
 
-  mkdirSync(repoDir, { recursive: true });
-  execFileSync("git", ["init", "-b", "main"], { cwd: repoDir });
-  execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoDir });
-  execFileSync("git", ["config", "user.name", "Test"], { cwd: repoDir });
+  execSync(`mkdir -p ${repoDir}`);
+  execSync("git init -b main", { cwd: repoDir });
+  execSync("git config user.email 'test@test.com'", { cwd: repoDir });
+  execSync("git config user.name 'Test'", { cwd: repoDir });
 
   for (let i = 0; i < fileCount; i += 1) {
     writeFileSync(join(repoDir, `file-${i}.txt`), `before-${i}\n`);
   }
-  execFileSync("git", ["add", "."], { cwd: repoDir });
-  execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "initial"], {
-    cwd: repoDir,
-  });
+  execSync("git add .", { cwd: repoDir });
+  execSync("git -c commit.gpgsign=false commit -m 'initial'", { cwd: repoDir });
 
   for (let i = 0; i < fileCount; i += 1) {
     writeFileSync(join(repoDir, `file-${i}.txt`), `after-${i}\n`);
@@ -77,7 +69,7 @@ describe("checkout git diff batching", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("uses per-file tracked git diff commands for tracked file diffs", async () => {
+  it("uses a single tracked git diff command for tracked file diffs", async () => {
     const result = await getCheckoutDiff(repoDir, {
       mode: "uncommitted",
       includeStructured: false,
@@ -85,6 +77,6 @@ describe("checkout git diff batching", () => {
 
     expect(result.diff).toContain("file-0.txt");
     expect(result.diff).toContain("file-19.txt");
-    expect(spawnCounters.trackedTextDiffCalls).toBe(20);
+    expect(spawnCounters.trackedTextDiffCalls).toBe(1);
   });
 });

@@ -1,26 +1,10 @@
-import type { AgentTimelineItem } from "./agent-sdk-types.js";
-import type { AgentAttachment } from "@getpaseo/protocol/messages";
-import type { AgentTimelineRow } from "./agent-timeline-store-types.js";
-import { isLikelyExternalToolName } from "@getpaseo/protocol/tool-name-normalization";
-import { buildToolCallDisplayModel } from "@getpaseo/protocol/tool-call-display";
-import { projectTimelineRows } from "./timeline-projection.js";
+import type { AgentTimelineItem, ToolCallDetail } from "./agent-sdk-types.js";
+import { isLikelyExternalToolName } from "./tool-name-normalization.js";
+import { buildToolCallDisplayModel } from "../../shared/tool-call-display.js";
 
-const DEFAULT_MAX_ITEMS = 0;
+const DEFAULT_MAX_ITEMS = 40;
 const MAX_TOOL_INPUT_CHARS = 400;
 const MAX_TOOL_SUMMARY_CHARS = 200;
-
-interface ActivityCuratorOptions {
-  maxItems?: number;
-  labelAssistantMessages?: boolean;
-  includeKinds?: readonly AgentTimelineItem["type"][];
-  includeExternalToolInput?: boolean;
-}
-
-interface ActivityEntry {
-  text: string;
-}
-
-type TextAgentAttachment = Extract<AgentAttachment, { type: "text" }>;
 
 function appendText(buffer: string, text: string): string {
   const normalized = text.trim();
@@ -33,22 +17,12 @@ function appendText(buffer: string, text: string): string {
   return `${buffer}\n${normalized}`;
 }
 
-function activityEntry(text: string): ActivityEntry {
-  return { text };
-}
-
-function flushBuffers(
-  entries: ActivityEntry[],
-  buffers: { message: string; thought: string },
-  options?: ActivityCuratorOptions,
-) {
+function flushBuffers(lines: string[], buffers: { message: string; thought: string }) {
   if (buffers.message.trim()) {
-    const text = buffers.message.trim();
-    entries.push(activityEntry(options?.labelAssistantMessages ? `[Assistant] ${text}` : text));
+    lines.push(buffers.message.trim());
   }
   if (buffers.thought.trim()) {
-    const text = buffers.thought.trim();
-    entries.push(activityEntry(`[Thought] ${text}`));
+    lines.push(`[Thought] ${buffers.thought.trim()}`);
   }
   buffers.message = "";
   buffers.thought = "";
@@ -86,75 +60,158 @@ function formatToolSummary(summary: string | undefined): string | null {
   return `${normalized.slice(0, MAX_TOOL_SUMMARY_CHARS - 3)}...`;
 }
 
-function inputFromUnknownDetail(
-  detail: Extract<AgentTimelineItem, { type: "tool_call" }>["detail"],
-): unknown {
+function hasNonEmptyObject(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length > 0
+  );
+}
+
+function mergeUnknownValue(existing: unknown | null, incoming: unknown | null): unknown | null {
+  if (incoming === null) {
+    return existing;
+  }
+
+  if (!hasNonEmptyObject(incoming) && hasNonEmptyObject(existing)) {
+    return existing;
+  }
+
+  return incoming;
+}
+
+function mergeToolDetail(existing: ToolCallDetail, incoming: ToolCallDetail): ToolCallDetail {
+  if (existing.type === "unknown" && incoming.type !== "unknown") {
+    return incoming;
+  }
+  if (incoming.type === "unknown" && existing.type !== "unknown") {
+    return existing;
+  }
+  if (existing.type === "unknown" && incoming.type === "unknown") {
+    return {
+      type: "unknown",
+      input: mergeUnknownValue(existing.input, incoming.input),
+      output: mergeUnknownValue(existing.output, incoming.output),
+    };
+  }
+  if (existing.type === incoming.type) {
+    return { ...existing, ...incoming } as ToolCallDetail;
+  }
+  return incoming;
+}
+
+function inputFromUnknownDetail(detail: ToolCallDetail): unknown {
   return detail.type === "unknown" ? detail.input : null;
 }
 
-function projectForCuration(items: readonly AgentTimelineItem[]): AgentTimelineItem[] {
-  const rows = items.map((item, index) => ({
-    seq: index + 1,
-    timestamp: "",
-    item,
-  }));
-  return projectTimelineRows({ rows, mode: "projected" }).map((entry) => entry.item);
+/**
+ * Collapse timeline items:
+ * - Dedupe tool calls by callId (pending/completed -> single)
+ * - Merge consecutive assistant_message/reasoning into single items
+ */
+function collapseTimeline(items: AgentTimelineItem[]): AgentTimelineItem[] {
+  const result: AgentTimelineItem[] = [];
+  const toolCallMap = new Map<string, AgentTimelineItem>();
+  let assistantBuffer = "";
+  let reasoningBuffer = "";
+
+  function flushAssistant() {
+    if (assistantBuffer) {
+      result.push({ type: "assistant_message", text: assistantBuffer });
+      assistantBuffer = "";
+    }
+  }
+
+  function flushReasoning() {
+    if (reasoningBuffer) {
+      result.push({ type: "reasoning", text: reasoningBuffer });
+      reasoningBuffer = "";
+    }
+  }
+
+  function flushToolCalls() {
+    for (const toolItem of toolCallMap.values()) {
+      result.push(toolItem);
+    }
+    toolCallMap.clear();
+  }
+
+  for (const item of items) {
+    if (item.type === "assistant_message") {
+      flushReasoning();
+      flushToolCalls();
+      assistantBuffer += item.text;
+    } else if (item.type === "reasoning") {
+      flushAssistant();
+      flushToolCalls();
+      reasoningBuffer += item.text;
+    } else if (item.type === "tool_call") {
+      flushAssistant();
+      flushReasoning();
+      const existing = toolCallMap.get(item.callId);
+      if (existing && existing.type === "tool_call") {
+        if (item.status === "failed") {
+          toolCallMap.set(item.callId, {
+            ...existing,
+            ...item,
+            detail: mergeToolDetail(existing.detail, item.detail),
+            error: item.error,
+            metadata: item.metadata,
+          });
+        } else {
+          toolCallMap.set(item.callId, {
+            ...existing,
+            ...item,
+            detail: mergeToolDetail(existing.detail, item.detail),
+            error: null,
+            metadata: item.metadata,
+          });
+        }
+      } else {
+        toolCallMap.set(item.callId, item);
+      }
+    } else {
+      flushAssistant();
+      flushReasoning();
+      flushToolCalls();
+      result.push(item);
+    }
+  }
+
+  flushAssistant();
+  flushReasoning();
+  flushToolCalls();
+
+  return result;
 }
 
-function shouldIncludeItem(item: AgentTimelineItem, options?: ActivityCuratorOptions): boolean {
-  if (!options?.includeKinds) {
-    return true;
+/**
+ * Convert normalized agent timeline items into a concise text summary.
+ */
+export function curateAgentActivity(
+  timeline: AgentTimelineItem[],
+  options?: { maxItems?: number },
+): string {
+  if (timeline.length === 0) {
+    return "No activity to display.";
   }
-  return options.includeKinds.includes(item.type);
-}
 
-function formatToolCallEntry(
-  item: Extract<AgentTimelineItem, { type: "tool_call" }>,
-  options?: ActivityCuratorOptions,
-): ActivityEntry {
-  const inputJson = formatToolInputJson(inputFromUnknownDetail(item.detail));
-  const display = buildToolCallDisplayModel({
-    name: item.name,
-    status: item.status,
-    error: item.error,
-    detail: item.detail,
-    metadata: item.metadata,
-  });
-  const displayName = display.displayName;
-  const summary = formatToolSummary(display.summary);
-  if (
-    (options?.includeExternalToolInput ?? true) &&
-    isLikelyExternalToolName(item.name) &&
-    inputJson
-  ) {
-    return activityEntry(`[${displayName}] ${inputJson}`);
-  }
-  return activityEntry(summary ? `[${displayName}] ${summary}` : `[${displayName}]`);
-}
-
-function curateProjectedActivityEntries(
-  items: readonly AgentTimelineItem[],
-  options?: ActivityCuratorOptions,
-): ActivityEntry[] {
-  if (items.length === 0) {
-    return [];
-  }
+  // Collapse timeline: dedupe tool calls, merge consecutive messages
+  const collapsed = collapseTimeline(timeline);
 
   const maxItems = options?.maxItems ?? DEFAULT_MAX_ITEMS;
-  const recentItems = maxItems > 0 && items.length > maxItems ? items.slice(-maxItems) : items;
+  const recentItems =
+    maxItems > 0 && collapsed.length > maxItems ? collapsed.slice(-maxItems) : collapsed;
 
-  const entries: ActivityEntry[] = [];
+  const lines: string[] = [];
   const buffers = { message: "", thought: "" };
 
   for (const item of recentItems) {
-    if (!shouldIncludeItem(item, options)) {
-      continue;
-    }
-
     switch (item.type) {
       case "user_message":
-        flushBuffers(entries, buffers, options);
-        entries.push(activityEntry(`[User] ${item.text.trim()}`));
+        flushBuffers(lines, buffers);
+        lines.push(`[User] ${item.text.trim()}`);
         break;
       case "assistant_message":
         buffers.message = appendText(buffers.message, item.text);
@@ -163,175 +220,48 @@ function curateProjectedActivityEntries(
         buffers.thought = appendText(buffers.thought, item.text);
         break;
       case "tool_call": {
-        flushBuffers(entries, buffers, options);
-        entries.push(formatToolCallEntry(item, options));
-        if (item.detail.type === "sub_agent" && item.detail.log.trim()) {
-          entries.push(activityEntry(item.detail.log.trim()));
+        flushBuffers(lines, buffers);
+        const inputJson = formatToolInputJson(inputFromUnknownDetail(item.detail));
+        const display = buildToolCallDisplayModel({
+          name: item.name,
+          status: item.status,
+          error: item.error,
+          detail: item.detail,
+          metadata: item.metadata,
+        });
+        const displayName = display.displayName;
+        const summary = formatToolSummary(display.summary);
+        if (isLikelyExternalToolName(item.name) && inputJson) {
+          lines.push(`[${displayName}] ${inputJson}`);
+          break;
+        }
+        if (summary) {
+          lines.push(`[${displayName}] ${summary}`);
+        } else {
+          lines.push(`[${displayName}]`);
         }
         break;
       }
       case "todo":
-        flushBuffers(entries, buffers, options);
-        entries.push(activityEntry("[Tasks]"));
+        flushBuffers(lines, buffers);
+        lines.push("[Tasks]");
         for (const entry of item.items) {
           const checkbox = entry.completed ? "[x]" : "[ ]";
-          const text = `- ${checkbox} ${entry.text}`;
-          entries.push(activityEntry(text));
+          lines.push(`- ${checkbox} ${entry.text}`);
         }
         break;
       case "error":
-        flushBuffers(entries, buffers, options);
-        entries.push(activityEntry(`[Error] ${item.message}`));
+        flushBuffers(lines, buffers);
+        lines.push(`[Error] ${item.message}`);
         break;
       case "compaction":
-        flushBuffers(entries, buffers, options);
-        entries.push(activityEntry("[Compacted]"));
+        flushBuffers(lines, buffers);
+        lines.push("[Compacted]");
         break;
     }
   }
 
-  flushBuffers(entries, buffers, options);
+  flushBuffers(lines, buffers);
 
-  return entries;
-}
-
-function curateAgentActivityEntries(
-  timeline: AgentTimelineItem[],
-  options?: ActivityCuratorOptions,
-): ActivityEntry[] {
-  const collapsed = projectForCuration(timeline);
-  return curateProjectedActivityEntries(collapsed, options);
-}
-
-/**
- * Convert normalized agent timeline items into a concise text summary.
- */
-export function curateAgentActivity(
-  timeline: AgentTimelineItem[],
-  options?: ActivityCuratorOptions,
-): string {
-  const entries = curateAgentActivityEntries(timeline, options);
-  return entries.length > 0
-    ? entries.map((entry) => entry.text).join("\n")
-    : "No activity to display.";
-}
-
-interface ForkCursorBoundary {
-  timelineEpoch: string;
-  cursor: { epoch: string; seq: number };
-}
-
-function selectForkContextRows(input: {
-  rows: readonly AgentTimelineRow[];
-  cursorBoundary?: ForkCursorBoundary | null;
-  boundaryMessageId?: string | null;
-}): {
-  items: AgentTimelineItem[];
-  boundaryCursor: { epoch: string; seq: number } | null;
-  boundaryMessageId: string | null;
-} {
-  const boundaryCursor = input.cursorBoundary?.cursor ?? null;
-  const boundaryMessageId = input.boundaryMessageId?.trim() || null;
-  if (!boundaryCursor && !boundaryMessageId) {
-    const projected = projectTimelineRows({ rows: input.rows, mode: "projected" });
-    return {
-      items: projected.map((entry) => entry.item),
-      boundaryCursor: null,
-      boundaryMessageId: null,
-    };
-  }
-
-  if (
-    input.cursorBoundary &&
-    input.cursorBoundary.cursor.epoch !== input.cursorBoundary.timelineEpoch
-  ) {
-    throw new Error("Selected timeline position is no longer available.");
-  }
-  const boundaryIndex = boundaryCursor
-    ? input.rows.findIndex((row) => row.seq === boundaryCursor.seq)
-    : input.rows.findLastIndex(
-        (row) => row.item.type === "assistant_message" && row.item.messageId === boundaryMessageId,
-      );
-  if (boundaryIndex < 0) {
-    throw new Error(
-      boundaryCursor
-        ? "Selected timeline position is no longer available."
-        : "Selected assistant message is no longer available.",
-    );
-  }
-  const selectedRows = input.rows.slice(0, boundaryIndex + 1);
-  const projected = projectTimelineRows({ rows: selectedRows, mode: "projected" });
-
-  return {
-    items: projected.map((entry) => entry.item),
-    boundaryCursor,
-    boundaryMessageId,
-  };
-}
-
-function trimContextMetadata(value: string | null | undefined): string | null {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : null;
-}
-
-function buildForkContextText(input: {
-  body: string;
-  agentTitle?: string | null;
-  cwd?: string | null;
-}): string {
-  const header = ["Chat history from a previous Paseo agent."];
-  const agentTitle = trimContextMetadata(input.agentTitle);
-  const cwd = trimContextMetadata(input.cwd);
-  if (agentTitle) {
-    header.push(`Source agent: ${agentTitle}`);
-  }
-  if (cwd) {
-    header.push(`Source directory: ${cwd}`);
-  }
-  return `<chat-history-summary>\n${header.join("\n")}\n\n${input.body}\n</chat-history-summary>`;
-}
-
-export function buildAgentForkContextAttachment(input: {
-  rows: readonly AgentTimelineRow[];
-  cursorBoundary?: ForkCursorBoundary | null;
-  boundaryMessageId?: string | null;
-  agentTitle?: string | null;
-  cwd?: string | null;
-}): {
-  attachment: TextAgentAttachment;
-  itemCount: number;
-  boundaryCursor: { epoch: string; seq: number } | null;
-  boundaryMessageId: string | null;
-} {
-  const selected = selectForkContextRows({
-    rows: input.rows,
-    cursorBoundary: input.cursorBoundary,
-    boundaryMessageId: input.boundaryMessageId,
-  });
-  const entries = curateProjectedActivityEntries(selected.items, {
-    maxItems: 0,
-    labelAssistantMessages: true,
-    includeKinds: ["user_message", "assistant_message", "tool_call"],
-    includeExternalToolInput: false,
-  });
-  const body =
-    entries.length > 0
-      ? entries.map((entry) => entry.text).join("\n")
-      : "No chat history to display.";
-  return {
-    attachment: {
-      type: "text",
-      mimeType: "text/plain",
-      contextKind: "chat_history",
-      title: "Chat history",
-      text: buildForkContextText({
-        body,
-        agentTitle: input.agentTitle,
-        cwd: input.cwd,
-      }),
-    },
-    itemCount: selected.items.length,
-    boundaryCursor: selected.boundaryCursor,
-    boundaryMessageId: selected.boundaryMessageId,
-  };
+  return lines.length > 0 ? lines.join("\n") : "No activity to display.";
 }

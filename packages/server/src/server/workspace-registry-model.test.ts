@@ -1,157 +1,75 @@
-import { describe, expect, test } from "vitest";
-import { isAbsolute } from "node:path";
+import { describe, expect, test, vi } from "vitest";
 
-import {
-  checkoutFromPersistedWorkspacePlacement,
-  deriveWorkspaceKind,
-  generateWorkspaceId,
-  generateProjectId,
-  initialWorkspacePlacement,
-  reconcileWorkspacePlacement,
-} from "./workspace-registry-model.js";
+import { detectStaleWorkspaces } from "./workspace-registry-model.js";
 import { createPersistedWorkspaceRecord } from "./workspace-registry.js";
 
-describe("opaque registry ids", () => {
-  test("generates opaque project ids", () => {
-    expect(generateProjectId()).toMatch(/^prj_[0-9a-f]{16}$/);
+function createWorkspaceRecord(workspaceId: string) {
+  return createPersistedWorkspaceRecord({
+    workspaceId,
+    projectId: workspaceId,
+    cwd: workspaceId,
+    kind: "directory",
+    displayName: workspaceId.split("/").at(-1) ?? workspaceId,
+    createdAt: "2026-03-01T00:00:00.000Z",
+    updatedAt: "2026-03-01T00:00:00.000Z",
+  });
+}
+
+describe("detectStaleWorkspaces", () => {
+  test("returns workspace ids whose directories no longer exist", async () => {
+    const checkDirectoryExists = vi.fn(async (cwd: string) => cwd !== "/tmp/missing");
+
+    const staleWorkspaceIds = await detectStaleWorkspaces({
+      activeWorkspaces: [
+        createWorkspaceRecord("/tmp/existing"),
+        createWorkspaceRecord("/tmp/missing"),
+      ],
+      agentRecords: [],
+      checkDirectoryExists,
+    });
+
+    expect(Array.from(staleWorkspaceIds)).toEqual(["/tmp/missing"]);
+    expect(checkDirectoryExists.mock.calls).toEqual([["/tmp/existing"], ["/tmp/missing"]]);
   });
 
-  test("generates opaque workspace ids that are not filesystem paths", () => {
-    const workspaceId = generateWorkspaceId();
-
-    expect(workspaceId).toMatch(/^wks_[0-9a-f]+$/);
-    expect(isAbsolute(workspaceId)).toBe(false);
-  });
-});
-
-describe("workspace kind", () => {
-  test("classifies plain git worktrees as workspaces of kind worktree", () => {
-    expect(
-      deriveWorkspaceKind({
-        cwd: "/tmp/repo-feature",
-        isGit: true,
-        currentBranch: "feature/plain",
-        remoteUrl: "https://github.com/acme/repo.git",
-        worktreeRoot: "/tmp/repo-feature",
-        isPaseoOwnedWorktree: false,
-        mainRepoRoot: "/tmp/repo",
-      }),
-    ).toBe("worktree");
-  });
-});
-
-describe("workspace placement", () => {
-  test("defines checkout and created-worktree placement completely", () => {
-    expect(
-      initialWorkspacePlacement({
-        source: "checkout",
-        cwd: "/repo",
-        checkout: {
-          cwd: "/repo",
-          isGit: true,
-          currentBranch: " main ",
-          remoteUrl: null,
-          worktreeRoot: "/repo",
-          isPaseoOwnedWorktree: false,
-          mainRepoRoot: null,
+  test("returns workspace ids when all matching agents are archived", async () => {
+    const staleWorkspaceIds = await detectStaleWorkspaces({
+      activeWorkspaces: [createWorkspaceRecord("/tmp/repo"), createWorkspaceRecord("/tmp/other")],
+      agentRecords: [
+        {
+          cwd: "/tmp/repo",
+          archivedAt: "2026-03-02T00:00:00.000Z",
         },
-      }),
-    ).toEqual({
-      cwd: "/repo",
-      kind: "local_checkout",
-      displayName: "main",
-      branch: "main",
-      worktreeRoot: "/repo",
-      baseBranch: null,
-      isPaseoOwnedWorktree: false,
-      mainRepoRoot: null,
+        {
+          cwd: "/tmp/other",
+          archivedAt: null,
+        },
+      ],
+      checkDirectoryExists: async () => true,
     });
-    expect(
-      initialWorkspacePlacement({
-        source: "created_worktree",
-        cwd: "/repo-feature/app",
-        worktreeRoot: "/repo-feature",
-        branch: "feature/placement",
-        baseBranch: "main",
-        mainRepoRoot: "/repo",
-      }),
-    ).toEqual({
-      cwd: "/repo-feature/app",
-      kind: "worktree",
-      displayName: "feature/placement",
-      branch: "feature/placement",
-      worktreeRoot: "/repo-feature",
-      baseBranch: "main",
-      isPaseoOwnedWorktree: true,
-      mainRepoRoot: "/repo",
-    });
+
+    expect(Array.from(staleWorkspaceIds)).toEqual(["/tmp/repo"]);
   });
 
-  test("updates live placement while preserving its durable name and base branch", () => {
-    const workspace = createPersistedWorkspaceRecord({
-      workspaceId: "workspace-one",
-      projectId: "project-one",
-      cwd: "/repo-feature",
-      kind: "worktree",
-      displayName: "Keep this name",
-      branch: "old-branch",
-      worktreeRoot: "/old-root",
-      baseBranch: "release",
-      isPaseoOwnedWorktree: true,
-      mainRepoRoot: "/repo",
-      createdAt: "2026-03-01T00:00:00.000Z",
-      updatedAt: "2026-03-01T00:00:00.000Z",
+  test("keeps workspaces with no agents or at least one active agent", async () => {
+    const staleWorkspaceIds = await detectStaleWorkspaces({
+      activeWorkspaces: [
+        createWorkspaceRecord("/tmp/active"),
+        createWorkspaceRecord("/tmp/no-agents"),
+      ],
+      agentRecords: [
+        {
+          cwd: "/tmp/active",
+          archivedAt: "2026-03-02T00:00:00.000Z",
+        },
+        {
+          cwd: "/tmp/active/../active",
+          archivedAt: null,
+        },
+      ],
+      checkDirectoryExists: async () => true,
     });
 
-    const update = reconcileWorkspacePlacement({
-      workspace,
-      checkout: {
-        cwd: workspace.cwd,
-        isGit: true,
-        currentBranch: "renamed-branch",
-        remoteUrl: null,
-        worktreeRoot: "/repo-feature",
-        isPaseoOwnedWorktree: false,
-        mainRepoRoot: "/repo",
-      },
-      updatedAt: "2026-03-02T00:00:00.000Z",
-    });
-
-    expect(update?.fields).toEqual({
-      branch: "renamed-branch",
-      worktreeRoot: "/repo-feature",
-      isPaseoOwnedWorktree: false,
-    });
-    expect(update?.workspace).toMatchObject({
-      displayName: "Keep this name",
-      baseBranch: "release",
-      branch: "renamed-branch",
-    });
-  });
-
-  test("projects persisted placement to the wire checkout", () => {
-    const workspace = createPersistedWorkspaceRecord({
-      workspaceId: "workspace-one",
-      projectId: "project-one",
-      cwd: "/repo-feature/app",
-      kind: "worktree",
-      displayName: "feature",
-      branch: "feature",
-      worktreeRoot: "/repo-feature",
-      isPaseoOwnedWorktree: true,
-      mainRepoRoot: "/repo",
-      createdAt: "2026-03-01T00:00:00.000Z",
-      updatedAt: "2026-03-01T00:00:00.000Z",
-    });
-
-    expect(checkoutFromPersistedWorkspacePlacement({ workspace })).toEqual({
-      cwd: "/repo-feature/app",
-      isGit: true,
-      currentBranch: "feature",
-      remoteUrl: null,
-      worktreeRoot: "/repo-feature",
-      isPaseoOwnedWorktree: true,
-      mainRepoRoot: "/repo",
-    });
+    expect(Array.from(staleWorkspaceIds)).toEqual([]);
   });
 });

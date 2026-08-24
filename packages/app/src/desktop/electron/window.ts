@@ -1,8 +1,4 @@
-import {
-  getDesktopHost,
-  type DesktopWindowBridge,
-  type DesktopWindowControlsOverlayUpdate,
-} from "@/desktop/host";
+import { getDesktopHost, type DesktopWindowBridge } from "@/desktop/host";
 
 export function getDesktopWindow(): DesktopWindowBridge | null {
   const getter = getDesktopHost()?.window?.getCurrentWindow;
@@ -30,15 +26,4 @@ export async function isDesktopFullscreen(): Promise<boolean> {
     return false;
   }
   return await win.isFullscreen();
-}
-
-export async function updateDesktopWindowControls(
-  update: DesktopWindowControlsOverlayUpdate,
-): Promise<void> {
-  const win = getDesktopWindow();
-  if (!win || typeof win.updateWindowControls !== "function") {
-    return;
-  }
-
-  await win.updateWindowControls(update);
 }

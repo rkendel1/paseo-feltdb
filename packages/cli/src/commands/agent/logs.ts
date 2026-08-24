@@ -1,13 +1,8 @@
 import { Command } from "commander";
 import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
 import type { CommandOptions } from "../../output/index.js";
-import {
-  fetchProjectedTimelineItems,
-  LIVE_HISTORY_FETCH_TIMEOUT_MS,
-} from "../../utils/timeline.js";
-import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
-import type { AgentStreamMessage } from "@getpaseo/protocol/messages";
+import { fetchProjectedTimelineItems } from "../../utils/timeline.js";
+import type { DaemonClient, AgentStreamMessage, AgentTimelineItem } from "@getpaseo/server";
 import { curateAgentActivity } from "@getpaseo/server";
 
 export function addLogsOptions(cmd: Command): Command {
@@ -35,9 +30,8 @@ export const NO_ACTIVITY_MESSAGE = "No activity to display.";
 export async function fetchAgentTimelineItems(
   client: DaemonClient,
   agentId: string,
-  options?: { timeoutMs?: number },
 ): Promise<AgentTimelineItem[]> {
-  return fetchProjectedTimelineItems({ client, agentId, timeoutMs: options?.timeoutMs });
+  return fetchProjectedTimelineItems({ client, agentId });
 }
 
 export function formatAgentActivityTranscript(
@@ -92,7 +86,7 @@ export async function runLogsCommand(
   options: AgentLogsOptions,
   _command: Command,
 ): Promise<AgentLogsResult> {
-  const host = getDaemonHost({ host: options.host });
+  const host = getDaemonHost({ host: options.host as string | undefined });
 
   if (!id) {
     console.error("Error: Agent ID required");
@@ -102,7 +96,7 @@ export async function runLogsCommand(
 
   let client: DaemonClient;
   try {
-    client = await connectToDaemon({ host: options.host });
+    client = await connectToDaemon({ host: options.host as string | undefined });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`Error: Cannot connect to daemon at ${host}: ${message}`);
@@ -111,7 +105,7 @@ export async function runLogsCommand(
   }
 
   try {
-    const fetchResult = await client.fetchAgent({ agentId: id });
+    const fetchResult = await client.fetchAgent(id);
     if (!fetchResult) {
       console.error(`Error: No agent found matching: ${id}`);
       console.error("Use `paseo ls` to list available agents");
@@ -177,14 +171,7 @@ async function runFollowMode(
   const tailCount = parseTailCount(options.tail) ?? DEFAULT_FOLLOW_TAIL;
 
   // First, get existing timeline.
-  let existingItems: AgentTimelineItem[] = [];
-  try {
-    existingItems = await fetchAgentTimelineItems(client, agentId, {
-      timeoutMs: LIVE_HISTORY_FETCH_TIMEOUT_MS,
-    });
-  } catch (error) {
-    console.warn("Warning: failed to fetch existing timeline", error);
-  }
+  let existingItems = await fetchAgentTimelineItems(client, agentId);
 
   // Apply filter to existing items
   if (options.filter) {

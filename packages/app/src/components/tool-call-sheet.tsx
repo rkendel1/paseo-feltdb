@@ -1,29 +1,28 @@
-import React, { createContext, useContext, useCallback, useMemo } from "react";
-import type { ReactNode } from "react";
+import React, { createContext, useContext, useCallback, useMemo, useRef, ReactNode } from "react";
 import { View, Text, Pressable } from "react-native";
-import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { useTranslation } from "react-i18next";
-import { BottomSheetScrollView, BottomSheetBackdrop } from "@gorhom/bottom-sheet";
-import { X } from "lucide-react-native";
-import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
+import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import Animated from "react-native-reanimated";
 import {
-  IsolatedBottomSheetModal,
-  type ContextBridge,
-  useIsolatedBottomSheetVisibility,
-} from "@/components/ui/isolated-bottom-sheet-modal";
-import type { ToolCallIconComponent } from "@/utils/tool-call-icon";
+  BottomSheetModal,
+  BottomSheetScrollView,
+  BottomSheetBackdrop,
+  BottomSheetBackgroundProps,
+} from "@gorhom/bottom-sheet";
+import { X } from "lucide-react-native";
+import type { ToolCallDetail } from "@server/server/agent/agent-sdk-types";
+import { resolveToolCallIcon } from "@/utils/tool-call-icon";
 import { ToolCallDetailsContent } from "./tool-call-details";
 
 // ----- Types -----
 
-export interface ToolCallSheetData {
+export type ToolCallSheetData = {
+  toolName: string;
   displayName: string;
   summary?: string;
   detail?: ToolCallDetail;
   errorText?: string;
-  icon: ToolCallIconComponent;
   showLoadingSkeleton?: boolean;
-}
+};
 
 interface ToolCallSheetContextValue {
   openToolCall: (data: ToolCallSheetData) => void;
@@ -42,42 +41,16 @@ export function useToolCallSheet(): ToolCallSheetContextValue {
   return context;
 }
 
-export function useToolCallSheetContextBridge(): ContextBridge {
-  const context = useToolCallSheet();
-  return useCallback(
-    (children) => (
-      <ToolCallSheetContext.Provider value={context}>{children}</ToolCallSheetContext.Provider>
-    ),
-    [context],
+// ----- Custom Background Component -----
+
+function CustomSheetBackground({ style }: BottomSheetBackgroundProps) {
+  const { theme } = useUnistyles();
+  const containerStyle = useMemo(
+    () => [style, { backgroundColor: theme.colors.surface2, borderRadius: 16 }],
+    [style, theme.colors.surface2],
   );
+  return <Animated.View pointerEvents="none" style={containerStyle} />;
 }
-
-interface ToolCallHeaderIconProps {
-  icon: ToolCallIconComponent;
-  size: number;
-  color?: string;
-}
-
-function ToolCallHeaderIcon({ icon: Icon, size, color }: ToolCallHeaderIconProps) {
-  return <Icon size={size} color={color} />;
-}
-
-const ThemedToolCallHeaderIcon = withUnistyles(ToolCallHeaderIcon, (theme) => ({
-  color: theme.colors.foreground,
-}));
-const ThemedCloseIcon = withUnistyles(X, (theme) => ({
-  color: theme.colors.foregroundMuted,
-}));
-
-export const ToolCallSheetModal = withUnistyles(IsolatedBottomSheetModal, (theme) => ({
-  backgroundStyle: {
-    backgroundColor: theme.colors.surface2,
-    borderRadius: 16,
-  },
-  handleIndicatorStyle: {
-    backgroundColor: theme.colors.palette.zinc[600],
-  },
-}));
 
 // ----- Provider Component -----
 
@@ -86,33 +59,25 @@ interface ToolCallSheetProviderProps {
 }
 
 export function ToolCallSheetProvider({ children }: ToolCallSheetProviderProps) {
+  const bottomSheetRef = useRef<BottomSheetModal>(null);
   const [sheetData, setSheetData] = React.useState<ToolCallSheetData | null>(null);
-  const [isSheetOpen, setIsSheetOpen] = React.useState(false);
 
   const snapPoints = useMemo(() => ["60%", "95%"], []);
 
   const openToolCall = useCallback((data: ToolCallSheetData) => {
     setSheetData(data);
-    setIsSheetOpen(true);
+    bottomSheetRef.current?.present();
   }, []);
 
   const closeToolCall = useCallback(() => {
-    setIsSheetOpen(false);
+    bottomSheetRef.current?.dismiss();
   }, []);
 
-  const {
-    sheetRef: bottomSheetRef,
-    handleSheetChange,
-    handleSheetDismiss,
-  } = useIsolatedBottomSheetVisibility({
-    visible: isSheetOpen,
-    onClose: closeToolCall,
-  });
-
-  const handleToolCallSheetDismiss = useCallback(() => {
-    handleSheetDismiss();
-    setSheetData(null);
-  }, [handleSheetDismiss]);
+  const handleSheetChange = useCallback((index: number) => {
+    if (index === -1) {
+      setSheetData(null);
+    }
+  }, []);
 
   const renderBackdrop = useCallback(
     (props: React.ComponentProps<typeof BottomSheetBackdrop>) => (
@@ -129,19 +94,20 @@ export function ToolCallSheetProvider({ children }: ToolCallSheetProviderProps) 
   return (
     <ToolCallSheetContext.Provider value={contextValue}>
       {children}
-      <ToolCallSheetModal
+      <BottomSheetModal
         ref={bottomSheetRef}
-        contextBridge={null}
         snapPoints={snapPoints}
         index={0}
+        stackBehavior="replace"
         enableDynamicSizing={false}
         onChange={handleSheetChange}
-        onDismiss={handleToolCallSheetDismiss}
         backdropComponent={renderBackdrop}
         enablePanDownToClose
+        backgroundStyle={styles.sheetBackground}
+        handleIndicatorStyle={styles.handleIndicator}
       >
         {sheetData && <ToolCallSheetContent data={sheetData} onClose={closeToolCall} />}
-      </ToolCallSheetModal>
+      </BottomSheetModal>
     </ToolCallSheetContext.Provider>
   );
 }
@@ -154,27 +120,22 @@ interface ToolCallSheetContentProps {
 }
 
 function ToolCallSheetContent({ data, onClose }: ToolCallSheetContentProps) {
-  const { t } = useTranslation();
-  const { displayName, detail, errorText, icon: IconComponent, showLoadingSkeleton } = data;
+  const { toolName, displayName, detail, errorText, showLoadingSkeleton } = data;
+
+  const IconComponent = resolveToolCallIcon(toolName, detail);
 
   return (
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
-          <ThemedToolCallHeaderIcon icon={IconComponent} size={20} />
+          <IconComponent size={20} color={styles.headerIcon.color} />
           <Text style={styles.headerTitle} numberOfLines={1}>
             {displayName}
           </Text>
         </View>
-        <Pressable
-          onPress={onClose}
-          style={styles.closeButton}
-          accessibilityRole="button"
-          accessibilityLabel={t("common.actions.close")}
-          testID="tool-call-sheet-close"
-        >
-          <ThemedCloseIcon size={20} />
+        <Pressable onPress={onClose} style={styles.closeButton}>
+          <X size={20} color={styles.closeIcon.color} />
         </Pressable>
       </View>
 
@@ -194,6 +155,12 @@ function ToolCallSheetContent({ data, onClose }: ToolCallSheetContentProps) {
 // ----- Styles -----
 
 const styles = StyleSheet.create((theme) => ({
+  sheetBackground: {
+    backgroundColor: theme.colors.surface2,
+  },
+  handleIndicator: {
+    backgroundColor: theme.colors.palette.zinc[600],
+  },
   container: {
     flex: 1,
     backgroundColor: theme.colors.surface2,
@@ -213,14 +180,20 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[2],
     flex: 1,
   },
+  headerIcon: {
+    color: theme.colors.foreground,
+  },
   headerTitle: {
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.lg,
     fontWeight: theme.fontWeight.semibold,
     color: theme.colors.foreground,
     flex: 1,
   },
   closeButton: {
     padding: theme.spacing[2],
+  },
+  closeIcon: {
+    color: theme.colors.foregroundMuted,
   },
   content: {
     flex: 1,

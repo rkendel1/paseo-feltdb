@@ -1,4 +1,4 @@
-import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
+import type { AgentPermissionRequest } from "@server/server/agent/agent-sdk-types";
 
 /**
  * Pending permission structure

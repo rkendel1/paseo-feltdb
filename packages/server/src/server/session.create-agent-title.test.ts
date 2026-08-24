@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { resolveCreateAgentTitles } from "./agent/create-agent-title.js";
+import { resolveCreateAgentTitles } from "./session.js";
 
 describe("resolveCreateAgentTitles", () => {
   test("derives a provisional title from prompt when explicit title is absent", () => {

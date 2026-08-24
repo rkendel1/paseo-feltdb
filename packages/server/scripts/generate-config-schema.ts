@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
 
-import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import { PersistedConfigSchema } from "../src/server/persisted-config.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -13,12 +13,9 @@ function main() {
   const outPath = path.join(repoRoot, "packages/website/public/schemas/paseo.config.v1.json");
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
 
-  const schema = z.toJSONSchema(PersistedConfigSchema, {
-    target: "draft-07",
-    unrepresentable: "any",
-    io: "input",
+  const schema = zodToJsonSchema(PersistedConfigSchema, {
+    name: "PaseoConfigV1",
   });
-  schema.title = "PaseoConfigV1";
 
   fs.writeFileSync(outPath, JSON.stringify(schema, null, 2) + "\n", "utf8");
   process.stdout.write(`Wrote ${outPath}\n`);

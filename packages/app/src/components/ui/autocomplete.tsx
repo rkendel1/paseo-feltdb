@@ -1,18 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
-import {
-  ScrollView,
-  Text,
-  View,
-  Pressable,
-  type LayoutChangeEvent,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
-  type PressableStateCallbackType,
-} from "react-native";
+import { useCallback, useEffect, useRef } from "react";
+import { ScrollView, Text, View, Pressable, type LayoutChangeEvent } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
-import { useTranslation } from "react-i18next";
 import { File, Folder } from "lucide-react-native";
-import type { Theme } from "@/styles/theme";
+import { Theme } from "@/styles/theme";
 import { getAutocompleteScrollOffset } from "./autocomplete-utils";
 
 export interface AutocompleteOption {
@@ -34,7 +24,7 @@ interface AutocompleteProps {
   maxHeight?: number;
 }
 
-const BOLT_GLYPH_PATTERN = /\u26A1|\uFE0F/gu;
+const BOLT_GLYPH_PATTERN = /[\u26A1\uFE0F]/g;
 
 function removeBoltGlyphs(value?: string): string | undefined {
   if (!value) {
@@ -44,93 +34,17 @@ function removeBoltGlyphs(value?: string): string | undefined {
   return cleaned.length > 0 ? cleaned : undefined;
 }
 
-interface AutocompleteRowProps {
-  index: number;
-  option: AutocompleteOption;
-  isSelected: boolean;
-  mutedColor: string;
-  onSelect: (option: AutocompleteOption) => void;
-  onRowLayout: (index: number, event: LayoutChangeEvent) => void;
-}
-
-function AutocompleteRow({
-  index,
-  option,
-  isSelected,
-  mutedColor,
-  onSelect,
-  onRowLayout,
-}: AutocompleteRowProps) {
-  const optionLabel = removeBoltGlyphs(option.label) ?? option.label;
-  const optionDescription = removeBoltGlyphs(option.description);
-  const isFileOrDir = option.kind === "directory" || option.kind === "file";
-
-  const handleLayout = useCallback(
-    (event: LayoutChangeEvent) => onRowLayout(index, event),
-    [index, onRowLayout],
-  );
-  const handlePress = useCallback(() => onSelect(option), [onSelect, option]);
-  const pressableStyle = useCallback(
-    ({ hovered = false, pressed }: PressableStateCallbackType & { hovered?: boolean }) => [
-      styles.item,
-      (hovered || pressed || isSelected) && styles.itemActive,
-    ],
-    [isSelected],
-  );
-
-  return (
-    <Pressable onLayout={handleLayout} onPress={handlePress} style={pressableStyle}>
-      {isFileOrDir ? (
-        <>
-          <View style={styles.itemLeading}>
-            {option.kind === "directory" ? (
-              <Folder size={14} color={mutedColor} />
-            ) : (
-              <File size={14} color={mutedColor} />
-            )}
-          </View>
-          <View style={styles.itemMain}>
-            <View style={styles.itemHeader}>
-              <Text style={styles.itemLabel}>{optionLabel}</Text>
-              {removeBoltGlyphs(option.detail) ? (
-                <Text style={styles.itemDetail}>{removeBoltGlyphs(option.detail)}</Text>
-              ) : null}
-            </View>
-            {optionDescription ? (
-              <Text style={styles.itemDescription} numberOfLines={1}>
-                {optionDescription}
-              </Text>
-            ) : null}
-          </View>
-        </>
-      ) : (
-        <View style={styles.itemMainRow}>
-          <Text style={styles.itemLabel}>{optionLabel}</Text>
-          {optionDescription ? (
-            <Text style={styles.itemDescriptionInline} numberOfLines={1}>
-              {optionDescription}
-            </Text>
-          ) : null}
-        </View>
-      )}
-    </Pressable>
-  );
-}
-
 export function Autocomplete({
   options,
   selectedIndex,
   onSelect,
   isLoading = false,
   errorMessage,
-  loadingText,
-  emptyText,
+  loadingText = "Loading...",
+  emptyText = "No results found",
   maxHeight = 220,
 }: AutocompleteProps) {
-  const { t } = useTranslation();
   const { theme } = useUnistyles();
-  const resolvedLoadingText = loadingText ?? t("common.states.loading");
-  const resolvedEmptyText = emptyText ?? t("common.empty.noResults");
   const scrollRef = useRef<ScrollView>(null);
   const rowLayoutsRef = useRef<Map<number, { top: number; height: number }>>(new Map());
   const viewportHeightRef = useRef(0);
@@ -195,10 +109,6 @@ export function Autocomplete({
     [ensureActiveItemVisible],
   );
 
-  const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    scrollOffsetRef.current = event.nativeEvent.contentOffset.y;
-  }, []);
-
   const handleRowLayout = useCallback(
     (index: number, event: LayoutChangeEvent) => {
       rowLayoutsRef.current.set(index, {
@@ -210,14 +120,11 @@ export function Autocomplete({
     [ensureActiveItemVisible],
   );
 
-  const selectedOption = options[selectedIndex];
-  const containerStyle = useMemo(() => [styles.container, { maxHeight }], [maxHeight]);
-
   if (isLoading) {
     return (
-      <View style={containerStyle}>
+      <View style={[styles.container, { maxHeight }]}>
         <View style={styles.emptyItem}>
-          <Text style={styles.emptyText}>{resolvedLoadingText}</Text>
+          <Text style={styles.emptyText}>{loadingText}</Text>
         </View>
       </View>
     );
@@ -225,7 +132,7 @@ export function Autocomplete({
 
   if (errorMessage) {
     return (
-      <View style={containerStyle}>
+      <View style={[styles.container, { maxHeight }]}>
         <View style={styles.emptyItem}>
           <Text style={styles.emptyText}>Error: {errorMessage}</Text>
         </View>
@@ -235,13 +142,15 @@ export function Autocomplete({
 
   if (options.length === 0) {
     return (
-      <View style={containerStyle}>
+      <View style={[styles.container, { maxHeight }]}>
         <View style={styles.emptyItem}>
-          <Text style={styles.emptyText}>{resolvedEmptyText}</Text>
+          <Text style={styles.emptyText}>{emptyText}</Text>
         </View>
       </View>
     );
   }
+
+  const selectedOption = options[selectedIndex];
 
   return (
     <View style={styles.outerWrapper}>
@@ -258,35 +167,77 @@ export function Autocomplete({
           ) : null}
         </View>
       ) : null}
-      <View style={containerStyle}>
+      <View style={[styles.container, { maxHeight }]}>
         <ScrollView
           ref={scrollRef}
           onLayout={handleScrollViewLayout}
           onContentSizeChange={pinToBottom}
-          onScroll={handleScroll}
+          onScroll={(event) => {
+            scrollOffsetRef.current = event.nativeEvent.contentOffset.y;
+          }}
           scrollEventThrottle={16}
           style={styles.scrollView}
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="always"
         >
-          {options.map((option, index) => (
-            <AutocompleteRow
-              key={option.id}
-              index={index}
-              option={option}
-              isSelected={index === selectedIndex}
-              mutedColor={theme.colors.foregroundMuted}
-              onSelect={onSelect}
-              onRowLayout={handleRowLayout}
-            />
-          ))}
+          {options.map((option, index) => {
+            const isSelected = index === selectedIndex;
+            const optionLabel = removeBoltGlyphs(option.label) ?? option.label;
+            const optionDescription = removeBoltGlyphs(option.description);
+            const isFileOrDir = option.kind === "directory" || option.kind === "file";
+            return (
+              <Pressable
+                key={option.id}
+                onLayout={(event) => handleRowLayout(index, event)}
+                onPress={() => onSelect(option)}
+                style={({ hovered = false, pressed }) => [
+                  styles.item,
+                  (hovered || pressed || isSelected) && styles.itemActive,
+                ]}
+              >
+                {isFileOrDir ? (
+                  <>
+                    <View style={styles.itemLeading}>
+                      {option.kind === "directory" ? (
+                        <Folder size={14} color={theme.colors.foregroundMuted} />
+                      ) : (
+                        <File size={14} color={theme.colors.foregroundMuted} />
+                      )}
+                    </View>
+                    <View style={styles.itemMain}>
+                      <View style={styles.itemHeader}>
+                        <Text style={styles.itemLabel}>{optionLabel}</Text>
+                        {removeBoltGlyphs(option.detail) ? (
+                          <Text style={styles.itemDetail}>{removeBoltGlyphs(option.detail)}</Text>
+                        ) : null}
+                      </View>
+                      {optionDescription ? (
+                        <Text style={styles.itemDescription} numberOfLines={1}>
+                          {optionDescription}
+                        </Text>
+                      ) : null}
+                    </View>
+                  </>
+                ) : (
+                  <View style={styles.itemMainRow}>
+                    <Text style={styles.itemLabel}>{optionLabel}</Text>
+                    {optionDescription ? (
+                      <Text style={styles.itemDescriptionInline} numberOfLines={1}>
+                        {optionDescription}
+                      </Text>
+                    ) : null}
+                  </View>
+                )}
+              </Pressable>
+            );
+          })}
         </ScrollView>
       </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create((theme: Theme) => ({
+const styles = StyleSheet.create(((theme: Theme) => ({
   outerWrapper: {
     gap: theme.spacing[1],
   },
@@ -297,21 +248,25 @@ const styles = StyleSheet.create((theme: Theme) => ({
     borderRadius: theme.borderRadius.lg,
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[3],
-    ...theme.shadow.md,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 8,
   },
   detailLabel: {
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.normal,
   },
   detailDescription: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.xs,
     marginTop: theme.spacing[1],
   },
   detailHint: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.xs,
     marginTop: theme.spacing[1],
   },
   container: {
@@ -320,7 +275,11 @@ const styles = StyleSheet.create((theme: Theme) => ({
     borderColor: theme.colors.borderAccent,
     borderRadius: theme.borderRadius.lg,
     overflow: "hidden",
-    ...theme.shadow.md,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 8,
   },
   scrollView: {
     flexGrow: 0,
@@ -363,22 +322,22 @@ const styles = StyleSheet.create((theme: Theme) => ({
   },
   itemLabel: {
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.normal,
   },
   itemDetail: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.xs,
   },
   itemDescription: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.xs,
     marginTop: 2,
   },
   itemDescriptionInline: {
     flex: 1,
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.xs,
   },
   emptyItem: {
     paddingHorizontal: theme.spacing[3],
@@ -386,6 +345,6 @@ const styles = StyleSheet.create((theme: Theme) => ({
   },
   emptyText: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.sm,
   },
-})) as unknown as Record<string, object>;
+})) as any) as Record<string, any>;

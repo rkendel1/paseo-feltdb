@@ -7,7 +7,6 @@ export interface DeferredInit {
 }
 
 const initPromises = new Map<string, DeferredInit>();
-export const INIT_TIMEOUT_MS = 65_000;
 
 export function getInitKey(serverId: string, agentId: string): string {
   return `${serverId}:${agentId}`;
@@ -37,19 +36,11 @@ export function createInitDeferred(key: string, requestDirection: "tail" | "afte
   return deferred;
 }
 
-export function refreshInitTimeout(input: {
-  key: string;
-  onTimeout: () => void;
-  timeoutMs?: number;
-}): void {
-  const timeoutId = setTimeout(input.onTimeout, input.timeoutMs ?? INIT_TIMEOUT_MS);
-  const deferred = initPromises.get(input.key);
+export function attachInitTimeout(key: string, timeoutId: ReturnType<typeof setTimeout>): void {
+  const deferred = initPromises.get(key);
   if (!deferred) {
     clearTimeout(timeoutId);
     return;
-  }
-  if (deferred.timeoutId) {
-    clearTimeout(deferred.timeoutId);
   }
   deferred.timeoutId = timeoutId;
 }

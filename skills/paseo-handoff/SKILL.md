@@ -1,65 +1,144 @@
 ---
 name: paseo-handoff
-description: Hand off the current task to another agent with full context. Use when the user says "handoff", "hand off", "hand this to", or wants to pass work to another agent.
+description: Hand off the current task to another agent with full context. Use when the user says "handoff", "hand off", "hand this to", or wants to pass work to another agent (Codex or Claude).
 user-invocable: true
 ---
 
 # Handoff Skill
 
-Transfer the current task — context, decisions, failed attempts, constraints — to a fresh agent. The receiving agent starts with **zero context**, so the handoff prompt must be a self-contained briefing.
+You are handing off the current task to another agent. Your job is to write a comprehensive handoff prompt and launch the agent via Paseo CLI.
 
 **User's arguments:** $ARGUMENTS
 
+---
+
 ## Prerequisites
 
-Read the **paseo** skill. Call `list_profiles` before choosing the receiving agent. Do not create it until you have read the configured profiles and their `notes`.
+Load the **Paseo skill** first — it contains the CLI reference for all agent commands.
 
-## Parsing arguments
+## What Is a Handoff
 
-1. **Agent profile** — explicit profile name first; otherwise choose the profile whose `notes` best match the work. Materialize it into `create_agent` as described by the **paseo** skill. If no profile fits, use Paseo's provider discovery fallback.
-2. **Isolation** — "in a worktree" / "worktree" → create a workspace with `isolation: "worktree"`, using a short branch name derived from the task.
-3. **Task description** — anything else the user said.
+A handoff transfers your current task — including all context, decisions, failed attempts, and constraints — to a fresh agent that will carry it to completion. The handoff prompt is the most important part: the receiving agent starts with **zero context**, so everything it needs must be in the prompt.
 
-## The handoff prompt
+## Parsing Arguments
 
-The receiving agent has zero context. Include:
+Parse `$ARGUMENTS` to determine:
+
+1. **Provider and model** — who to hand off to
+2. **Worktree** — whether to run in an isolated git worktree
+3. **Task description** — any additional context the user provided
+
+### Provider Resolution
+
+| User says | Provider | Model | Mode |
+|---|---|---|---|
+| *(nothing)* | `codex` | `gpt-5.4` | `full-access` |
+| `codex` | `codex` | `gpt-5.4` | `full-access` |
+| `claude` | `claude` | `opus` | `bypass` |
+| `opus` | `claude` | `opus` | `bypass` |
+| `sonnet` | `claude` | `sonnet` | `bypass` |
+
+Default is **Codex** with `gpt-5.4`.
+
+### Worktree Resolution
+
+If the user says "in a worktree" or "worktree", add `--worktree` with a short descriptive branch name derived from the task. Worktrees require a `--base` branch — use the current branch in the working directory (run `git branch --show-current` to get it).
+
+## Writing the Handoff Prompt
+
+This is the critical step. The receiving agent has **zero context** about your conversation. The handoff prompt must be a self-contained briefing document.
+
+### Must Include
+
+1. **Task description** — What needs to be done, in clear imperative language
+2. **Task qualifiers** — Preserve the semantics of what the user asked for:
+   - If the user asked to **investigate without editing**, say "DO NOT edit any files"
+   - If the user asked to **fix**, say "implement the fix"
+   - If the user asked to **refactor**, say "refactor" not "rewrite"
+   - Carry forward the exact intent
+3. **Relevant files** — List every file path that matters, with brief descriptions of what each contains
+4. **Current state** — What has been done so far, what's working, what's not
+5. **What was tried** — Any approaches attempted and why they failed or were abandoned
+6. **Decisions made** — Anything you and the user agreed on (design choices, constraints, trade-offs)
+7. **Acceptance criteria** — How the agent knows it's done
+8. **Constraints** — Anything the agent must NOT do
+
+### Template
 
 ```
 ## Task
-[Imperative description.]
+
+[Clear, imperative description of what to do]
 
 ## Context
-[Why this task exists, required context.]
 
-## Relevant files
-- `path/to/file.ts` — [what it is and why it matters]
+[Why this task exists, background the agent needs]
 
-## Current state
-[What's done, what works, what doesn't.]
+## Relevant Files
 
-## What was tried
-- [Approach] — [why it failed or was abandoned]
+- `path/to/file.ts` — [what it does and why it matters]
+- `path/to/other.ts` — [what it does and why it matters]
+
+## Current State
+
+[What's been done, what works, what doesn't]
+
+## What Was Tried
+
+- [Approach 1] — [why it failed/was abandoned]
+- [Approach 2] — [partial success, but...]
 
 ## Decisions
-- [Decision — rationale]
 
-## Acceptance criteria
-- [ ] [Criterion]
+- [Decision 1 — rationale]
+- [Decision 2 — rationale]
+
+## Acceptance Criteria
+
+- [ ] [Criterion 1]
+- [ ] [Criterion 2]
 
 ## Constraints
-- [Must-not / must-preserve]
+
+- [Do not do X]
+- [Must preserve Y]
 ```
 
-**Preserve task semantics.** Investigate-only → "DO NOT edit files." Fix → "implement the fix." Refactor → "refactor, not rewrite." Carry the user's exact intent.
+## Launching the Agent
 
-## Launch
+### Default (Codex, no worktree)
 
-Prepare the handoff in a dedicated workspace:
+```bash
+paseo run -d --mode full-access --provider codex --name "[Handoff] Task description" "$prompt"
+```
 
-1. Select the current workspace or call `create_workspace` with the requested isolation.
-2. Call `create_agent` with a `[Handoff] <task>` title, the briefing as initial prompt, and the selected `workspaceId` when explicit placement is needed.
-3. Return the agent and workspace to the user, explaining that it remains in your subagent track until they detach it manually.
+### Claude (Opus, no worktree)
 
-Do not encode independence as a create mode and do not invoke CLI or wire-level detach operations. Detach is a user gesture in the subagents track.
+```bash
+paseo run -d --mode bypass --model opus --name "[Handoff] Task description" "$prompt"
+```
 
-Do not wait or poll for the agent to finish.
+### Codex in a worktree
+
+```bash
+base=$(git branch --show-current)
+paseo run -d --mode full-access --provider codex --worktree task-branch-name --base "$base" --name "[Handoff] Task description" "$prompt"
+```
+
+### Claude in a worktree
+
+```bash
+base=$(git branch --show-current)
+paseo run -d --mode bypass --model opus --worktree task-branch-name --base "$base" --name "[Handoff] Task description" "$prompt"
+```
+
+## After Launch
+
+1. Print the agent ID and the command to follow along:
+   ```
+   Handed off to [provider] ([model]). Agent ID: <id>
+   Follow along: paseo logs <id> -f
+   Wait for completion: paseo wait <id>
+   ```
+2. Do **not** wait for the agent by default — the user can choose to wait or move on.
+3. If the user wants to wait, run `paseo wait <id>` and then `paseo logs <id>` when done.

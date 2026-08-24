@@ -1,59 +1,41 @@
-import {
-  deriveAgentStateBucket,
-  type AgentAttentionReason,
-  type AgentStateBucketInput,
-} from "@getpaseo/protocol/agent-state-bucket";
+import type { AgentLifecycleStatus } from "@server/shared/agent-lifecycle";
+
+export type SidebarAttentionReason = "finished" | "error" | "permission" | null | undefined;
 
 export type SidebarStateBucket = "needs_input" | "failed" | "running" | "attention" | "done";
-export type SidebarAttentionReason = AgentAttentionReason;
 
-export function deriveSidebarStateBucket(input: AgentStateBucketInput): SidebarStateBucket {
-  return deriveAgentStateBucket(input);
-}
-
-export function isSidebarActiveAgent(input: AgentStateBucketInput): boolean {
-  return deriveSidebarStateBucket(input) !== "done";
-}
-
-// Most urgent first, for collapsing a project's workspaces into one badge. This is
-// deliberately NOT STATUS_BUCKET_ORDER below, which ranks "attention" above "running": on a
-// collapsed project row we want an actively-working project to keep showing the loader,
-// so "running" outranks "attention" here. needs_input and failed still win over both;
-// done stays last.
-const STATUS_BUCKET_PRIORITY: readonly SidebarStateBucket[] = [
-  "needs_input",
-  "failed",
-  "running",
-  "attention",
-  "done",
-];
-
-/**
- * The order states are listed in when all of them are shown side by side rather than collapsed
- * into one — the sidebar's status groups, and the subagent pill's segments. Anything the user has
- * to act on comes before anything that is still moving on its own.
- */
-export const STATUS_BUCKET_ORDER: readonly SidebarStateBucket[] = [
-  "needs_input",
-  "failed",
-  "attention",
-  "running",
-  "done",
-] as const;
-
-/**
- * Collapses many workspace status buckets into the single most urgent one, so a
- * collapsed project row can stand in for the child rows it hides.
- */
-export function aggregateSidebarStateBuckets(
-  buckets: Iterable<SidebarStateBucket>,
-): SidebarStateBucket {
-  let bestRank = STATUS_BUCKET_PRIORITY.length - 1;
-  for (const bucket of buckets) {
-    const rank = STATUS_BUCKET_PRIORITY.indexOf(bucket);
-    if (rank !== -1 && rank < bestRank) {
-      bestRank = rank;
-    }
+export function deriveSidebarStateBucket(input: {
+  status: AgentLifecycleStatus;
+  pendingPermissionCount?: number;
+  requiresAttention?: boolean;
+  attentionReason?: SidebarAttentionReason;
+}): SidebarStateBucket {
+  if ((input.pendingPermissionCount ?? 0) > 0) {
+    return "needs_input";
   }
-  return STATUS_BUCKET_PRIORITY[bestRank] ?? "done";
+  // Legacy fallback for snapshots persisted before permission state was decoupled
+  // from unread attention.
+  if (input.attentionReason === "permission") {
+    return "needs_input";
+  }
+  if (input.status === "error" || input.attentionReason === "error") {
+    return "failed";
+  }
+  if (input.status === "running" || input.status === "initializing") {
+    return "running";
+  }
+  if (input.requiresAttention) {
+    // Unread/attention-needed completed agents are active in sidebar logic.
+    return "attention";
+  }
+  return "done";
+}
+
+export function isSidebarActiveAgent(input: {
+  status: AgentLifecycleStatus;
+  pendingPermissionCount?: number;
+  requiresAttention?: boolean;
+  attentionReason?: SidebarAttentionReason;
+}): boolean {
+  return deriveSidebarStateBucket(input) !== "done";
 }

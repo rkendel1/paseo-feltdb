@@ -1,9 +1,3 @@
-import {
-  compareMatchScores,
-  type MatchScore,
-  scoreTextFields,
-} from "@getpaseo/protocol/search/text-match";
-
 export type ComboboxOptionKind = "directory" | "file";
 
 export interface ComboboxOptionModel {
@@ -11,17 +5,6 @@ export interface ComboboxOptionModel {
   label: string;
   description?: string;
   kind?: ComboboxOptionKind;
-}
-
-const DESCRIPTION_FALLBACK_TIER = 99;
-
-function scoreOption(opt: ComboboxOptionModel, search: string): MatchScore | null {
-  const best = scoreTextFields(search, [opt.label, opt.id]);
-  if (best) return best;
-  if (!opt.description) return null;
-  const descriptionScore = scoreTextFields(search, [opt.description]);
-  if (!descriptionScore) return null;
-  return { ...descriptionScore, tier: descriptionScore.tier + DESCRIPTION_FALLBACK_TIER };
 }
 
 export interface BuildVisibleComboboxOptionsInput {
@@ -52,29 +35,18 @@ export function shouldShowCustomComboboxOption(input: {
   );
 }
 
-export function filterAndRankComboboxOptions(
-  options: ComboboxOptionModel[],
-  search: string,
-): ComboboxOptionModel[] {
-  if (!search) return options;
-  const scored: { opt: ComboboxOptionModel; score: MatchScore }[] = [];
-  for (const opt of options) {
-    const score = scoreOption(opt, search);
-    if (score) scored.push({ opt, score });
-  }
-  scored.sort((a, b) => {
-    const cmp = compareMatchScores(a.score, b.score);
-    if (cmp !== 0) return cmp;
-    return a.opt.label.localeCompare(b.opt.label);
-  });
-  return scored.map((entry) => entry.opt);
-}
-
 export function buildVisibleComboboxOptions(
   input: BuildVisibleComboboxOptionsInput,
 ): ComboboxOptionModel[] {
   const normalizedSearch = input.searchable ? input.searchQuery.trim().toLowerCase() : "";
-  const filteredOptions = filterAndRankComboboxOptions(input.options, normalizedSearch);
+  const filteredOptions = normalizedSearch
+    ? input.options.filter(
+        (opt) =>
+          opt.label.toLowerCase().includes(normalizedSearch) ||
+          opt.id.toLowerCase().includes(normalizedSearch) ||
+          opt.description?.toLowerCase().includes(normalizedSearch),
+      )
+    : input.options;
 
   const sanitizedSearchValue = input.searchQuery.trim();
   const showCustomOption = shouldShowCustomComboboxOption({
@@ -111,7 +83,7 @@ export function orderVisibleComboboxOptions(
   if (optionsPosition !== "above-search") {
     return visibleOptions;
   }
-  return [...visibleOptions].toReversed();
+  return [...visibleOptions].reverse();
 }
 
 export function getComboboxFallbackIndex(

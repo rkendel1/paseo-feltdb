@@ -4,32 +4,7 @@
 
 <h1 align="center">Paseo</h1>
 
-<p align="center">
-  <a href="README.md">English</a> ·
-  <a href="README.zh-CN.md">简体中文</a> ·
-  <a href="README.ja.md">日本語</a> ·
-  <a href="README.ko.md">한국어</a>
-</p>
-
-<p align="center">
-  <a href="https://github.com/getpaseo/paseo/stargazers">
-    <img src="https://img.shields.io/github/stars/getpaseo/paseo?style=flat&logo=github" alt="GitHub stars">
-  </a>
-  <a href="https://github.com/getpaseo/paseo/releases">
-    <img src="https://img.shields.io/github/v/release/getpaseo/paseo?style=flat&logo=github" alt="GitHub release">
-  </a>
-  <a href="https://x.com/moboudra">
-    <img src="https://img.shields.io/badge/%40moboudra-555?logo=x" alt="X">
-  </a>
-  <a href="https://discord.gg/jz8T2uahpH">
-    <img src="https://img.shields.io/badge/Discord-555?logo=discord" alt="Discord">
-  </a>
-  <a href="https://www.reddit.com/r/PaseoAI/">
-    <img src="https://img.shields.io/badge/Reddit-555?logo=reddit" alt="Reddit">
-  </a>
-</p>
-
-<p align="center">One interface for Claude Code, Codex, Copilot, OpenCode, and Pi agents.</p>
+<p align="center">One interface for all your Claude Code, Codex and OpenCode agents.</p>
 
 <p align="center">
   <img src="https://paseo.sh/hero-mockup.png" alt="Paseo app screenshot" width="100%">
@@ -39,65 +14,36 @@
   <img src="https://paseo.sh/mobile-mockup.png" alt="Paseo mobile app" width="100%">
 </p>
 
+---
+
 Run agents in parallel on your own machines. Ship from your phone or your desk.
 
 - **Self-hosted:** Agents run on your machine with your full dev environment. Use your tools, your configs, and your skills.
-- **Multi-provider:** Claude Code, Codex, Copilot, OpenCode, and Pi through the same interface. Pick the right model for each job.
+- **Multi-provider:** Claude Code, Codex, and OpenCode through the same interface. Pick the right model for each job.
 - **Voice control:** Dictate tasks or talk through problems in voice mode. Hands-free when you need it.
 - **Cross-device:** iOS, Android, desktop, web, and CLI. Start work at your desk, check in from your phone, script it from the terminal.
 - **Privacy-first:** Paseo doesn't have any telemetry, tracking, or forced log-ins.
 
 ## Getting Started
 
-Paseo runs a local server called the daemon that manages your coding agents. Clients like the desktop app, mobile app, web app, and CLI connect to it.
+### Desktop app
 
-### Prerequisites
+Download from [paseo.sh/download](https://paseo.sh/download) or the [GitHub releases page](https://github.com/getpaseo/paseo/releases). The app bundles its own daemon, so there's nothing else to install. It can also connect to daemons running on other machines.
 
-You need at least one agent CLI installed and configured with your credentials:
+### Headless / server mode
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-- [Codex](https://github.com/openai/codex)
-- [GitHub Copilot](https://github.com/features/copilot/cli/)
-- [OpenCode](https://github.com/anomalyco/opencode)
-- [Pi](https://pi.dev)
-
-### Desktop app (recommended)
-
-Download it from [paseo.sh/download](https://paseo.sh/download) or the [GitHub releases page](https://github.com/getpaseo/paseo/releases). Open the app and the daemon starts automatically. Nothing else to install.
-
-To connect from your phone, open **Settings → your host → Pair Device**.
-
-### CLI / headless
-
-Install the CLI and start Paseo:
+Run the daemon on any machine:
 
 ```bash
 npm install -g @getpaseo/cli
 paseo
 ```
 
-Paseo starts locally, then asks whether to enable the end-to-end encrypted relay for device pairing. If you decline, connect directly over TCP, Tailscale, or another VPN. This path is useful for servers and remote machines.
+Then connect from any client — desktop, web, mobile, or CLI. See [paseo.sh/download](https://paseo.sh/download) for all options.
 
 For full setup and configuration, see:
-
 - [Docs](https://paseo.sh/docs)
-- [Connectivity guide](https://paseo.sh/docs/connectivity)
 - [Configuration reference](https://paseo.sh/docs/configuration)
-
-### Docker
-
-Run the Paseo daemon and self-hosted web UI in Docker:
-
-```bash
-docker run -d --name paseo \
-  -p 6767:6767 \
-  -e PASEO_PASSWORD=change-me \
-  -v "$PWD/paseo-home:/home/paseo" \
-  -v "$PWD:/workspace" \
-  ghcr.io/getpaseo/paseo:latest
-```
-
-Open `http://localhost:6767` after it starts. Extend the base image with the agent CLIs you use, then provide credentials through environment variables or the persistent `/home/paseo` volume. See the [Docker documentation](docs/docker.md) for full setup details.
 
 ## CLI
 
@@ -105,7 +51,7 @@ Everything you can do in the app, you can do from the terminal.
 
 ```bash
 paseo run --provider claude/opus-4.6 "implement user authentication"
-paseo run --provider codex/gpt-5.5 --worktree feature-x "implement feature X"
+paseo run --provider codex/gpt-5.4 --worktree feature-x "implement feature X"
 
 paseo ls                           # list running agents
 paseo attach abc123                # stream live output
@@ -117,33 +63,9 @@ paseo --host workstation.local:6767 run "run the full test suite"
 
 See the [full CLI reference](https://paseo.sh/docs/cli) for more.
 
-## TypeScript SDK
+## Orchestration skills (Unstable)
 
-Build issue integrations, dashboards, and orchestration services with `@getpaseo/client`:
-
-```ts
-import { createPaseoClient } from "@getpaseo/client";
-
-const client = createPaseoClient({ url: "ws://127.0.0.1:6767/ws" });
-await client.connect();
-
-const agent = await client.agents.create({
-  config: { provider: "codex/gpt-5.5" },
-  cwd: "/Users/me/dev/storefront",
-  prompt: "Review the current diff and name the riskiest change.",
-});
-
-const result = await agent.waitForFinish();
-console.log(result.lastMessage);
-
-await client.close();
-```
-
-See the [SDK quickstart](https://paseo.sh/docs/sdk/quickstart), [recipes](https://paseo.sh/docs/sdk/recipes), and [API reference](https://paseo.sh/docs/sdk/reference).
-
-## Skills
-
-Skills teach your agent to use Paseo to orchestrate other agents.
+Experimental skills that teach agents how to use the Paseo CLI to orchestrate other agents. I am updating these very frequently as I learn new things, expect changes without notice, might be coupled to my own setup, use at your own risk.
 
 ```bash
 npx skills add getpaseo/paseo
@@ -151,19 +73,27 @@ npx skills add getpaseo/paseo
 
 Then use them in any agent conversation:
 
-- `/paseo-handoff` — hand off work between agents. I use this to plan with Claude and then handoff to Codex to implement.
-- `/paseo-advisor` — spin up a single agent as an advisor for a second opinion, without delegating the work itself.
-- `/paseo-committee` — form a committee of two contrasting agents to step back, do root cause analysis, and produce a plan.
+```bash
+# Use handoff when you discuss something with an agent but want another one to implement.
+# I use this to plan with Claude and then handoff to Codex to implement.
+/paseo-handoff hand off the authentication fix to codex 5.4 in a worktree
+
+# Use loops when you have clear acceptance criteria (aka Ralph loops).
+/paseo-loop loop a codex agent to fix the backend tests, use sonnet to verify, max 10 iterations
+
+# Orchestrator teaches the agent how to create teams and manage them via a chat room.
+# Very opinionated and expects both Codex and Claude to work.
+/paseo-orchestrator spin up a team to implement the database refactor, use chat to coordinate. use claude to plan and codex to implement and review
+```
 
 ## Development
 
 Quick monorepo package map:
-
 - `packages/server`: Paseo daemon (agent process orchestration, WebSocket API, MCP server)
 - `packages/app`: Expo client (iOS, Android, web)
 - `packages/cli`: `paseo` CLI for daemon and agent workflows
 - `packages/desktop`: Electron desktop app
-- `packages/relay`: Relay transport and encryption used by the daemon and clients
+- `packages/relay`: Relay package for remote connectivity
 - `packages/website`: Marketing site and documentation (`paseo.sh`)
 
 Common commands:
@@ -178,18 +108,12 @@ npm run dev:app
 npm run dev:desktop
 npm run dev:website
 
-# build the server stack
-npm run build:server
+# build the daemon
+npm run build:daemon
 
 # repo-wide checks
 npm run typecheck
 ```
-
-## Related projects
-
-- [getpaseo/paseo-relay](https://github.com/getpaseo/paseo-relay) — official distributed relay, written in Elixir
-- [paseo-skins](https://github.com/huangguang1999/paseo-skins) — community themes and a zero-patch desktop theme loader with an Agent Skill
-- [paseo-vscode](https://marketplace.visualstudio.com/items?itemName=hinnes.paseo-vscode) — VS Code extension
 
 ## License
 

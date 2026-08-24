@@ -16,7 +16,6 @@ import { mkdtemp, rm, mkdir } from "fs/promises";
 import { existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { fileURLToPath } from "url";
 import { ChildProcess, spawn } from "child_process";
 import { getAvailablePort } from "./network.ts";
 
@@ -44,7 +43,6 @@ const TEST_DAEMON_ENV_DEFAULTS: Record<string, string> = {
   PASEO_VOICE_MODE_ENABLED: process.env.PASEO_VOICE_MODE_ENABLED ?? "0",
 };
 const TEST_DAEMON_HOST = "127.0.0.1";
-const TSX_ENTRY = fileURLToPath(import.meta.resolve("tsx/cli"));
 
 const DEFAULT_OUTPUT_CAPTURE_LIMIT = 256 * 1024;
 const TEST_OUTPUT_CAPTURE_LIMIT = Number.parseInt(
@@ -52,10 +50,10 @@ const TEST_OUTPUT_CAPTURE_LIMIT = Number.parseInt(
   10,
 );
 
-interface OutputCapture {
+type OutputCapture = {
   value: string;
   truncated: boolean;
-}
+};
 
 function createOutputCapture(): OutputCapture {
   return { value: "", truncated: false };
@@ -128,17 +126,24 @@ async function terminateProcessTree(processRef: ChildProcess, timeoutMs: number)
   signalProcessTree(pid, "SIGTERM");
 
   await new Promise<void>((resolve) => {
-    const done = () => resolve();
-    const onExit = () => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
       clearTimeout(timeoutId);
-      done();
+      resolve();
     };
+
     const timeoutId = setTimeout(() => {
       signalProcessTree(pid, "SIGKILL");
-      processRef.removeListener("exit", onExit);
-      done();
+      finish();
     }, timeoutMs);
-    processRef.once("exit", onExit);
+
+    processRef.once("exit", () => {
+      finish();
+    });
   });
 }
 
@@ -169,44 +174,33 @@ export async function createTempDirs(): Promise<{ paseoHome: string; workDir: st
  * Wait for daemon to be ready by running `paseo agent ls`
  * This connects via WebSocket and ensures the daemon is responsive
  */
-async function probeDaemonReady(port: number, env?: NodeJS.ProcessEnv): Promise<boolean> {
-  try {
-    const { exitCode } = await runPaseoCli(
-      {
-        port,
-        wsUrl: `ws://${TEST_DAEMON_HOST}:${port}`,
-        paseoHome: "",
-        workDir: "",
-        process: null,
-        isReady: false,
-        stop: async () => {},
-      },
-      ["agent", "ls"],
-      { env },
-    );
-    return exitCode === 0;
-  } catch {
-    return false;
-  }
-}
+async function waitForDaemonReady(port: number, timeout = 30000): Promise<void> {
+  const start = Date.now();
 
-async function waitForDaemonReady(
-  port: number,
-  timeout = 30000,
-  env?: NodeJS.ProcessEnv,
-): Promise<void> {
-  const deadline = Date.now() + timeout;
+  while (Date.now() - start < timeout) {
+    try {
+      const { exitCode } = await runPaseoCli(
+        {
+          port,
+          wsUrl: `ws://${TEST_DAEMON_HOST}:${port}`,
+          paseoHome: "",
+          workDir: "",
+          process: null,
+          isReady: false,
+          stop: async () => {},
+        },
+        ["agent", "ls"],
+      );
 
-  async function poll(): Promise<void> {
-    if (await probeDaemonReady(port, env)) return;
-    if (Date.now() >= deadline) {
-      throw new Error(`Daemon failed to become ready on port ${port} within ${timeout}ms`);
+      if (exitCode === 0) {
+        return; // Daemon is ready
+      }
+    } catch {
+      // Connection failed, keep trying
     }
     await sleep(100);
-    return poll();
   }
-
-  return poll();
+  throw new Error(`Daemon failed to become ready on port ${port} within ${timeout}ms`);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -224,7 +218,6 @@ export async function startTestDaemon(options?: {
   paseoHome?: string;
   workDir?: string;
   timeout?: number;
-  env?: NodeJS.ProcessEnv;
 }): Promise<TestDaemonContext> {
   const port = options?.port ?? (await getAvailablePort());
   const { paseoHome, workDir } =
@@ -240,23 +233,18 @@ export async function startTestDaemon(options?: {
   const cliSrcPath = join(cliDir, "src", "index.ts");
 
   // Start daemon process using tsx to run TypeScript directly
-  const daemonProcess = spawn(
-    process.execPath,
-    [TSX_ENTRY, cliSrcPath, "daemon", "start", "--foreground"],
-    {
-      env: {
-        ...process.env,
-        ...TEST_DAEMON_ENV_DEFAULTS,
-        PASEO_HOME: paseoHome,
-        PASEO_LISTEN: `${TEST_DAEMON_HOST}:${port}`,
-        // Force no TTY to prevent QR code output
-        CI: "true",
-        ...options?.env,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32",
+  const daemonProcess = spawn("npx", ["tsx", cliSrcPath, "daemon", "start", "--foreground"], {
+    env: {
+      ...process.env,
+      ...TEST_DAEMON_ENV_DEFAULTS,
+      PASEO_HOME: paseoHome,
+      PASEO_LISTEN: `${TEST_DAEMON_HOST}:${port}`,
+      // Force no TTY to prevent QR code output
+      CI: "true",
     },
-  );
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+  });
 
   const stdout = createOutputCapture();
   const stderr = createOutputCapture();
@@ -319,7 +307,7 @@ export async function startTestDaemon(options?: {
 
   // Wait for daemon to be ready
   try {
-    await waitForDaemonReady(port, timeout, options?.env);
+    await waitForDaemonReady(port, timeout);
     ctx.isReady = true;
   } catch (err) {
     // Daemon failed to start - clean up and rethrow
@@ -327,7 +315,6 @@ export async function startTestDaemon(options?: {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(
       `Failed to start test daemon: ${message}\nStdout: ${formatOutputCapture(stdout)}\nStderr: ${formatOutputCapture(stderr)}`,
-      { cause: err },
     );
   }
 
@@ -346,7 +333,6 @@ export async function runPaseoCli(
   options?: {
     timeout?: number;
     cwd?: string;
-    env?: NodeJS.ProcessEnv;
   },
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const timeout = options?.timeout ?? 60000;
@@ -356,13 +342,12 @@ export async function runPaseoCli(
   const cliSrcPath = join(cliDir, "src", "index.ts");
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(process.execPath, [TSX_ENTRY, cliSrcPath, ...args], {
+    const proc = spawn("npx", ["tsx", cliSrcPath, ...args], {
       env: {
         ...process.env,
         ...TEST_DAEMON_ENV_DEFAULTS,
         PASEO_HOST: `${TEST_DAEMON_HOST}:${ctx.port}`,
         PASEO_HOME: ctx.paseoHome,
-        ...options?.env,
       },
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
@@ -409,15 +394,12 @@ export async function runPaseoCli(
  *
  * This is the main entry point for E2E tests.
  */
-export async function createE2ETestContext(options?: {
-  timeout?: number;
-  env?: NodeJS.ProcessEnv;
-}): Promise<
+export async function createE2ETestContext(options?: { timeout?: number }): Promise<
   TestDaemonContext & {
     /** Run a paseo CLI command against this daemon */
     paseo: (
       args: string[],
-      opts?: { timeout?: number; cwd?: string; env?: NodeJS.ProcessEnv },
+      opts?: { timeout?: number; cwd?: string },
     ) => Promise<{
       exitCode: number;
       stdout: string;
@@ -425,12 +407,10 @@ export async function createE2ETestContext(options?: {
     }>;
   }
 > {
-  const ctx = await startTestDaemon({ timeout: options?.timeout, env: options?.env });
+  const ctx = await startTestDaemon({ timeout: options?.timeout });
 
-  const paseo = (
-    args: string[],
-    opts?: { timeout?: number; cwd?: string; env?: NodeJS.ProcessEnv },
-  ) => runPaseoCli(ctx, args, opts);
+  const paseo = (args: string[], opts?: { timeout?: number; cwd?: string }) =>
+    runPaseoCli(ctx, args, opts);
 
   return {
     ...ctx,

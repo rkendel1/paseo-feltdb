@@ -1,11 +1,11 @@
 import os from "node:os";
 
-import { ConnectionOfferV2Schema, type ConnectionOffer } from "@getpaseo/protocol/connection-offer";
+import { ConnectionOfferV2Schema, type ConnectionOffer } from "../shared/connection-offer.js";
 
-interface BuildOfferEndpointsArgs {
+type BuildOfferEndpointsArgs = {
   listenHost: string;
   port: number;
-}
+};
 
 export function buildOfferEndpoints({ listenHost, port }: BuildOfferEndpointsArgs): string[] {
   const endpoints: string[] = [];
@@ -30,7 +30,7 @@ export function buildOfferEndpoints({ listenHost, port }: BuildOfferEndpointsArg
 export async function createConnectionOfferV2(args: {
   serverId: string;
   daemonPublicKeyB64: string;
-  relay: { endpoint: string; useTls?: boolean };
+  relay: { endpoint: string };
 }): Promise<ConnectionOffer> {
   return ConnectionOfferV2Schema.parse({
     v: 2,

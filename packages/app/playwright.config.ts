@@ -4,42 +4,29 @@ import { defineConfig, devices } from "@playwright/test";
 // This allows multiple test runs in parallel across different worktrees
 const baseURL =
   process.env.E2E_BASE_URL ?? `http://localhost:${process.env.E2E_METRO_PORT ?? "8081"}`;
-const relayDeploymentSpec = "**/relay-deployment-reconnect.real.spec.ts";
 
 export default defineConfig({
-  testDir: "./e2e/browser",
-  globalSetup: "./e2e/support/global-setup.ts",
+  testDir: "./e2e",
+  globalSetup: "./e2e/global-setup.ts",
   timeout: 60_000,
   expect: {
     timeout: 10_000,
   },
-  // Files run concurrently, while each worker owns its daemon state. Keeping a
-  // spec on one worker avoids repeating its file-level setup across daemons.
+  // E2E tests share a single daemon/relay/metro stack from global setup.
+  // Running tests concurrently causes cross-test contention and non-deterministic failures.
   fullyParallel: false,
-  workers: Number(process.env.E2E_WORKERS ?? (process.env.CI ? "2" : "1")),
+  workers: 1,
   retries: process.env.CI ? 1 : 0,
   reporter: [["list"]],
   use: {
     baseURL,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
-    video: process.env.E2E_RECORD_VIDEO === "1" ? "on" : "retain-on-failure",
+    video: "retain-on-failure",
   },
   projects: [
     {
-      name: "browser",
-      testIgnore: ["**/*.real.spec.ts"],
-      use: { ...devices["Desktop Chrome"] },
-    },
-    {
-      name: "real-provider",
-      testMatch: ["**/*.real.spec.ts"],
-      testIgnore: [relayDeploymentSpec],
-      use: { ...devices["Desktop Chrome"] },
-    },
-    {
-      name: "relay-deployment",
-      testMatch: [relayDeploymentSpec],
+      name: "Desktop Chrome",
       use: { ...devices["Desktop Chrome"] },
     },
   ],

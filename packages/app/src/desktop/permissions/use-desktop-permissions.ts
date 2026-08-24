@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useTranslation } from "react-i18next";
 import {
   getDesktopPermissionSnapshot,
   requestDesktopPermission,
@@ -10,34 +9,36 @@ import {
 import { sendOsNotification } from "@/utils/os-notifications";
 
 export interface UseDesktopPermissionsReturn {
-  isDesktopApp: boolean;
+  isDesktop: boolean;
   snapshot: DesktopPermissionSnapshot | null;
   isRefreshing: boolean;
   requestingPermission: DesktopPermissionKind | null;
-  testNotificationState: TestNotificationState;
+  isSendingTestNotification: boolean;
+  testNotificationError: string | null;
   refreshPermissions: () => Promise<void>;
   requestPermission: (kind: DesktopPermissionKind) => Promise<void>;
   sendTestNotification: () => Promise<void>;
 }
 
-export type TestNotificationState =
-  | { status: "idle" }
-  | { status: "sending" }
-  | { status: "success" }
-  | { status: "error"; message: string };
+const EMPTY_NOTIFICATION_STATUS = {
+  state: "unknown" as const,
+  detail: "Notification status has not been checked yet.",
+};
+
+const EMPTY_MICROPHONE_STATUS = {
+  state: "unknown" as const,
+  detail: "Microphone status has not been checked yet.",
+};
 
 export function useDesktopPermissions(): UseDesktopPermissionsReturn {
-  const { t } = useTranslation();
-  const isDesktopApp = shouldShowDesktopPermissionSection();
+  const isDesktop = shouldShowDesktopPermissionSection();
   const isMountedRef = useRef(true);
   const [snapshot, setSnapshot] = useState<DesktopPermissionSnapshot | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [requestingPermission, setRequestingPermission] = useState<DesktopPermissionKind | null>(
     null,
   );
-  const [testNotificationState, setTestNotificationState] = useState<TestNotificationState>({
-    status: "idle",
-  });
+  const [isSendingTestNotification, setIsSendingTestNotification] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -46,7 +47,7 @@ export function useDesktopPermissions(): UseDesktopPermissionsReturn {
   }, []);
 
   const refreshPermissions = useCallback(async () => {
-    if (!isDesktopApp) {
+    if (!isDesktop) {
       return;
     }
 
@@ -64,11 +65,11 @@ export function useDesktopPermissions(): UseDesktopPermissionsReturn {
         setIsRefreshing(false);
       }
     }
-  }, [isDesktopApp]);
+  }, [isDesktop]);
 
   const requestPermission = useCallback(
     async (kind: DesktopPermissionKind) => {
-      if (!isDesktopApp) {
+      if (!isDesktop) {
         return;
       }
 
@@ -82,14 +83,8 @@ export function useDesktopPermissions(): UseDesktopPermissionsReturn {
         setSnapshot((previous) => {
           const base: DesktopPermissionSnapshot = previous ?? {
             checkedAt: Date.now(),
-            notifications: {
-              state: "unknown",
-              detail: t("desktop.permissions.empty.notifications"),
-            },
-            microphone: {
-              state: "unknown",
-              detail: t("desktop.permissions.empty.microphone"),
-            },
+            notifications: EMPTY_NOTIFICATION_STATUS,
+            microphone: EMPTY_MICROPHONE_STATUS,
           };
 
           if (kind === "notifications") {
@@ -115,55 +110,50 @@ export function useDesktopPermissions(): UseDesktopPermissionsReturn {
         await refreshPermissions();
       }
     },
-    [isDesktopApp, refreshPermissions, t],
+    [isDesktop, refreshPermissions],
   );
 
+  const [testNotificationError, setTestNotificationError] = useState<string | null>(null);
+
   const sendTestNotification = useCallback(async () => {
-    if (!isDesktopApp) {
+    if (!isDesktop) {
       return;
     }
 
-    setTestNotificationState({ status: "sending" });
+    setIsSendingTestNotification(true);
+    setTestNotificationError(null);
     try {
       const sent = await sendOsNotification({
-        title: t("desktop.permissions.testNotification.title"),
-        body: t("desktop.permissions.testNotification.body"),
+        title: "Paseo notification test",
+        body: "If you can see this, desktop notifications work.",
       });
-      if (!isMountedRef.current) {
-        return;
+      if (!sent) {
+        setTestNotificationError("Notification was not delivered. Check System Settings > Notifications.");
       }
-      setTestNotificationState(
-        sent
-          ? { status: "success" }
-          : {
-              status: "error",
-              message: t("desktop.permissions.testNotification.notDelivered"),
-            },
-      );
-    } catch {
+    } catch (error) {
+      setTestNotificationError("Failed to send notification.");
+    } finally {
       if (isMountedRef.current) {
-        setTestNotificationState({
-          status: "error",
-          message: t("desktop.permissions.testNotification.failed"),
-        });
+        setIsSendingTestNotification(false);
       }
     }
-  }, [isDesktopApp, t]);
+  }, [isDesktop]);
 
   useEffect(() => {
-    if (!isDesktopApp) {
+    if (!isDesktop) {
       return;
     }
 
     void refreshPermissions();
-  }, [isDesktopApp, refreshPermissions]);
+  }, [isDesktop, refreshPermissions]);
 
   return {
-    isDesktopApp,
+    isDesktop,
     snapshot,
     isRefreshing,
     requestingPermission,
-    testNotificationState,
+    isSendingTestNotification,
+    testNotificationError,
     refreshPermissions,
     requestPermission,
     sendTestNotification,

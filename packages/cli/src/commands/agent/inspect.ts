@@ -1,6 +1,5 @@
 import type { Command } from "commander";
-import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
-import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
+import type { AgentSnapshotPayload } from "@getpaseo/server";
 import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
 import type { CommandOptions, ListResult, OutputSchema, CommandError } from "../../output/index.js";
 
@@ -105,28 +104,30 @@ function resolveModel(snapshot: AgentSnapshotPayload): string | null {
   return normalizeModelId(snapshot.runtimeInfo?.model) ?? normalizeModelId(snapshot.model);
 }
 
-function buildLastUsage(snapshot: AgentSnapshotPayload): AgentInspect["LastUsage"] {
-  if (!snapshot.lastUsage) return null;
-  return {
-    InputTokens: snapshot.lastUsage.inputTokens ?? 0,
-    OutputTokens: snapshot.lastUsage.outputTokens ?? 0,
-    CachedTokens: snapshot.lastUsage.cachedInputTokens ?? 0,
-    CostUsd: snapshot.lastUsage.totalCostUsd ?? 0,
-  };
-}
-
-function buildCapabilities(snapshot: AgentSnapshotPayload): AgentInspect["Capabilities"] {
-  if (!snapshot.capabilities) return null;
-  return {
-    Streaming: snapshot.capabilities.supportsStreaming ?? false,
-    Persistence: snapshot.capabilities.supportsSessionPersistence ?? false,
-    DynamicModes: snapshot.capabilities.supportsDynamicModes ?? false,
-    McpServers: snapshot.capabilities.supportsMcpServers ?? false,
-  };
-}
-
 /** Convert agent snapshot to inspection data */
 function toInspectData(snapshot: AgentSnapshotPayload): AgentInspect {
+  const lastUsage = snapshot.lastUsage
+    ? {
+        InputTokens: snapshot.lastUsage.inputTokens ?? 0,
+        OutputTokens: snapshot.lastUsage.outputTokens ?? 0,
+        CachedTokens: snapshot.lastUsage.cachedInputTokens ?? 0,
+        CostUsd: snapshot.lastUsage.totalCostUsd ?? 0,
+      }
+    : null;
+
+  const capabilities = snapshot.capabilities
+    ? {
+        Streaming: snapshot.capabilities.supportsStreaming ?? false,
+        Persistence: snapshot.capabilities.supportsSessionPersistence ?? false,
+        DynamicModes: snapshot.capabilities.supportsDynamicModes ?? false,
+        McpServers: snapshot.capabilities.supportsMcpServers ?? false,
+      }
+    : null;
+
+  // Extract worktree and parentAgentId from labels if they exist
+  const worktree = snapshot.labels?.["paseo.worktree"] ?? null;
+  const parentAgentId = snapshot.labels?.["paseo.parent-agent-id"] ?? null;
+
   return {
     Id: snapshot.id,
     Name: snapshot.title ?? "-",
@@ -140,8 +141,8 @@ function toInspectData(snapshot: AgentSnapshotPayload): AgentInspect {
     Cwd: snapshot.cwd,
     CreatedAt: snapshot.createdAt,
     UpdatedAt: snapshot.updatedAt,
-    LastUsage: buildLastUsage(snapshot),
-    Capabilities: buildCapabilities(snapshot),
+    LastUsage: lastUsage,
+    Capabilities: capabilities,
     AvailableModes: snapshot.availableModes
       ? snapshot.availableModes.map((m) => ({ id: m.id, label: m.label }))
       : null,
@@ -149,8 +150,8 @@ function toInspectData(snapshot: AgentSnapshotPayload): AgentInspect {
       id: p.id,
       tool: p.name ?? "unknown",
     })),
-    Worktree: snapshot.labels?.["paseo.worktree"] ?? null,
-    ParentAgentId: snapshot.labels?.[PARENT_AGENT_ID_LABEL] ?? null,
+    Worktree: worktree,
+    ParentAgentId: parentAgentId,
   };
 }
 
@@ -217,7 +218,7 @@ export async function runInspectCommand(
   options: AgentInspectOptions,
   _command: Command,
 ): Promise<AgentInspectResult> {
-  const host = getDaemonHost({ host: options.host });
+  const host = getDaemonHost({ host: options.host as string | undefined });
 
   // Validate arguments
   if (!agentIdArg || agentIdArg.trim().length === 0) {
@@ -231,7 +232,7 @@ export async function runInspectCommand(
 
   let client;
   try {
-    client = await connectToDaemon({ host: options.host });
+    client = await connectToDaemon({ host: options.host as string | undefined });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const error: CommandError = {
@@ -243,7 +244,7 @@ export async function runInspectCommand(
   }
 
   try {
-    const fetchResult = await client.fetchAgent({ agentId: agentIdArg });
+    const fetchResult = await client.fetchAgent(agentIdArg);
     if (!fetchResult) {
       const error: CommandError = {
         code: "AGENT_NOT_FOUND",

@@ -1,13 +1,9 @@
-import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
+import type { AgentTimelineItem, DaemonClient } from "@getpaseo/server";
 
-export const LIVE_HISTORY_FETCH_TIMEOUT_MS = 2_000;
-
-interface FetchProjectedTimelineItemsInput {
+type FetchProjectedTimelineItemsInput = {
   client: DaemonClient;
   agentId: string;
-  timeoutMs?: number;
-}
+};
 
 export async function fetchProjectedTimelineItems(
   input: FetchProjectedTimelineItemsInput,
@@ -16,7 +12,6 @@ export async function fetchProjectedTimelineItems(
     direction: "tail",
     limit: 0,
     projection: "projected",
-    timeout: input.timeoutMs,
   });
   return timeline.entries.map((entry) => entry.item);
 }

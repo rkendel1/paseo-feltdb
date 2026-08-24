@@ -24,7 +24,7 @@ export function findActiveFileMention(input: FindActiveFileMentionInput): FileMe
   for (
     let atIndex = beforeCursor.lastIndexOf("@");
     atIndex >= 0;
-    atIndex = atIndex === 0 ? -1 : beforeCursor.lastIndexOf("@", atIndex - 1)
+    atIndex = beforeCursor.lastIndexOf("@", atIndex - 1)
   ) {
     const query = beforeCursor.slice(atIndex + 1);
     if (INVALID_MENTION_QUERY_CHARS.test(query)) {
@@ -40,13 +40,9 @@ export function findActiveFileMention(input: FindActiveFileMentionInput): FileMe
   return null;
 }
 
-export function formatQuotedFileMentionPath(relativePath: string): string {
-  const safePath = relativePath.replace(/"/g, '\\"');
-  return `"${safePath}"`;
-}
-
 export function applyFileMentionReplacement(input: ApplyFileMentionReplacementInput): string {
+  const safePath = input.relativePath.replace(/"/g, '\\"');
   const before = input.text.slice(0, input.mention.start);
   const after = input.text.slice(input.mention.end);
-  return `${before}${formatQuotedFileMentionPath(input.relativePath)}${after}`;
+  return `${before}"${safePath}"${after}`;
 }

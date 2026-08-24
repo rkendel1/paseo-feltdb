@@ -1,6 +1,4 @@
 import { generateMessageId } from "@/types/stream";
-import { isAbsolutePath } from "@/utils/path";
-import { isRasterImageMimeType } from "./file-types";
 
 export function generateAttachmentId(): string {
   return `att_${generateMessageId()}`;
@@ -15,17 +13,11 @@ export function normalizeMimeType(input: string | undefined | null): string {
 }
 
 export function parseDataUrl(dataUrl: string): { mimeType: string; base64: string } {
-  const match = /^data:([^,]*),([\s\S]+)$/i.exec(dataUrl.trim());
+  const match = /^data:([^;,]+)?;base64,(.+)$/i.exec(dataUrl);
   if (!match) {
     throw new Error("Malformed data URL for attachment.");
   }
-  const metadata = match[1] ?? "";
-  const base64 = match[2]?.replace(/\s/g, "");
-  const [mimeTypeRaw, ...parameters] = metadata.split(";").map((part) => part.trim());
-  const isBase64 = parameters.some((part) => part.toLowerCase() === "base64");
-  if (!isBase64) {
-    throw new Error("Attachment data URL is not base64 encoded.");
-  }
+  const [, mimeTypeRaw, base64] = match;
   if (!base64) {
     throw new Error("Attachment data URL is missing base64 payload.");
   }
@@ -35,74 +27,10 @@ export function parseDataUrl(dataUrl: string): { mimeType: string; base64: strin
   };
 }
 
-function hashString(value: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
-}
-
-export function parseImageDataUrl(
-  uri: string,
-): { mimeType: string; base64: string; cacheKey: string } | null {
-  if (!uri.trim().toLowerCase().startsWith("data:image/")) {
-    return null;
-  }
-
-  try {
-    const parsed = parseDataUrl(uri);
-    if (!isRasterImageMimeType(parsed.mimeType)) {
-      return null;
-    }
-    const fingerprint = `${parsed.mimeType}\0${parsed.base64}`;
-    return {
-      ...parsed,
-      cacheKey: `data-image:${parsed.mimeType}:${parsed.base64.length}:${hashString(fingerprint)}`,
-    };
-  } catch {
-    return null;
-  }
-}
-
-export function createImageSourceCacheKey(source: string): string {
-  return parseImageDataUrl(source)?.cacheKey ?? source;
-}
-
-export function getFileNameFromPath(path: string | null | undefined): string | null {
-  const trimmed = path?.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const normalized = trimmed.replace(/\\/g, "/").replace(/\/+$/, "");
-  const fileName = normalized.split("/").pop()?.trim();
-  return fileName || null;
-}
-
-export function createPreviewAttachmentId(input: {
-  mimeType: string;
-  path?: string | null;
-  size?: number | null;
-  modifiedAt?: string | null;
-  contentLength?: number | null;
-  contentKey?: string | null;
-}): string {
-  const path = input.path?.trim() ?? "";
-  const size = Number.isFinite(input.size) ? String(input.size) : "";
-  const modifiedAt = input.modifiedAt?.trim() ?? "";
-  const contentLength = Number.isFinite(input.contentLength) ? String(input.contentLength) : "";
-  const contentKey = input.contentKey?.trim() ?? "";
-  const identity = `${input.mimeType}\0${path}\0${size}\0${modifiedAt}\0${contentLength}`;
-  const hash = hashString(contentKey ? `${identity}\0${contentKey}` : identity);
-  return `preview_${size || contentLength || "unknown"}_${hash}`;
-}
-
 export async function blobToBase64(blob: Blob): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
-    reader.addEventListener("load", () => {
+    reader.onload = () => {
       if (typeof reader.result !== "string") {
         reject(new Error("Unexpected FileReader result while encoding attachment."));
         return;
@@ -113,10 +41,10 @@ export async function blobToBase64(blob: Blob): Promise<string> {
         return;
       }
       resolve(payload);
-    });
-    reader.addEventListener("error", () => {
+    };
+    reader.onerror = () => {
       reject(reader.error ?? new Error("Failed to read attachment blob."));
-    });
+    };
     reader.readAsDataURL(blob);
   });
 }
@@ -125,62 +53,17 @@ export function pathToFileUri(path: string): string {
   if (path.startsWith("file://")) {
     return path;
   }
-
-  if (!isAbsolutePath(path)) {
-    return path;
-  }
-
   if (path.startsWith("/")) {
     return `file://${path}`;
   }
-
-  // UNC paths: \\server\share -> file://server/share
-  if (path.startsWith("\\\\")) {
-    return `file:${path.replace(/\\/g, "/")}`;
-  }
-
-  return `file:///${path.replace(/\\/g, "/")}`;
-}
-
-function decodeFilePathSource(source: string): string {
-  try {
-    return decodeURIComponent(source);
-  } catch {
-    return source;
-  }
-}
-
-function normalizeWindowsDrivePath(path: string): string {
-  if (!/^[A-Za-z]:[\\/]/.test(path)) {
-    return path;
-  }
-  return path.replace(/\\/g, "/");
-}
-
-function isMarkdownEncodedWindowsDrivePath(source: string): boolean {
-  return /^[A-Za-z]:(?:%5[Cc]|%2[Ff])/.test(source);
+  return path;
 }
 
 export function fileUriToPath(uri: string): string {
   if (!uri.startsWith("file://")) {
     return uri;
   }
-  const fileSource = uri.slice("file://".length);
-  const decodedPath = decodeFilePathSource(fileSource);
-  if (!fileSource.startsWith("/")) {
-    return `\\\\${decodedPath.replace(/\//g, "\\")}`;
-  }
-  return normalizeWindowsDrivePath(decodedPath.replace(/^\/([A-Za-z]:[\\/])/, "$1"));
-}
-
-export function localFileSourceToPath(source: string): string {
-  let path = source;
-  if (source.startsWith("file://")) {
-    path = fileUriToPath(source);
-  } else if (isMarkdownEncodedWindowsDrivePath(source)) {
-    path = decodeFilePathSource(source);
-  }
-  return normalizeWindowsDrivePath(path);
+  return decodeURIComponent(uri.replace(/^file:\/\//, ""));
 }
 
 export function getFileExtensionFromName(fileName: string | null | undefined): string {

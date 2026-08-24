@@ -1,12 +1,11 @@
-import type {
-  DaemonTransport,
-  DaemonTransportFactory,
-} from "@getpaseo/client/internal/daemon-client";
-import type { LocalTransportTarget } from "./desktop-daemon";
+import type { DaemonTransport, DaemonTransportFactory } from "@server/client/daemon-client";
 import {
-  defaultLocalDaemonTransportRpc,
-  type LocalDaemonTransportRpc,
-} from "./local-daemon-transport-rpc";
+  closeLocalTransportSession,
+  listenToLocalTransportEvents,
+  openLocalTransportSession,
+  sendLocalTransportMessage,
+  type LocalTransportTarget,
+} from "./desktop-daemon";
 
 const LOCAL_TRANSPORT_SCHEME = "paseo+local:";
 
@@ -14,7 +13,7 @@ function encodeBinaryToBase64(data: Uint8Array | ArrayBuffer): string {
   const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
   let binary = "";
   for (let index = 0; index < bytes.length; index += 1) {
-    binary += String.fromCharCode(bytes[index]);
+    binary += String.fromCharCode(bytes[index]!);
   }
   return globalThis.btoa(binary);
 }
@@ -50,9 +49,7 @@ function parseLocalDaemonTransportUrl(url: string): LocalTransportTarget {
   };
 }
 
-export function createDesktopLocalDaemonTransportFactory(
-  rpc: LocalDaemonTransportRpc = defaultLocalDaemonTransportRpc,
-): DaemonTransportFactory | null {
+export function createDesktopLocalDaemonTransportFactory(): DaemonTransportFactory | null {
   return ({ url }) => {
     const target = parseLocalDaemonTransportUrl(url);
     let sessionId: string | null = null;
@@ -63,7 +60,7 @@ export function createDesktopLocalDaemonTransportFactory(
     const openHandlers = new Set<() => void>();
     const closeHandlers = new Set<(event?: unknown) => void>();
     const errorHandlers = new Set<(event?: unknown) => void>();
-    const messageHandlers = new Set<(data: unknown, isBinary: boolean) => void>();
+    const messageHandlers = new Set<(data: unknown) => void>();
 
     const emitOpen = () => {
       if (didEmitOpen || disposed) {
@@ -84,59 +81,55 @@ export function createDesktopLocalDaemonTransportFactory(
         handler(event);
       }
     };
-    const emitMessage = (data: unknown, isBinary: boolean) => {
+    const emitMessage = (data: unknown) => {
       for (const handler of messageHandlers) {
-        handler(data, isBinary);
+        handler(data);
       }
     };
 
-    void rpc
-      .listenToEvents((payload) => {
-        if (disposed || !sessionId || payload.sessionId !== sessionId) {
+    void listenToLocalTransportEvents((payload) => {
+      if (disposed || !sessionId || payload.sessionId !== sessionId) {
+        return;
+      }
+      if (payload.kind === "open") {
+        emitOpen();
+        return;
+      }
+      if (payload.kind === "message") {
+        if (payload.text) {
+          emitMessage({ data: payload.text });
           return;
         }
-        if (payload.kind === "open") {
-          emitOpen();
-          return;
+        if (payload.binaryBase64) {
+          emitMessage({ data: decodeBase64ToBytes(payload.binaryBase64) });
         }
-        if (payload.kind === "message") {
-          if (payload.text) {
-            emitMessage(payload.text, false);
-            return;
-          }
-          if (payload.binaryBase64) {
-            emitMessage(decodeBase64ToBytes(payload.binaryBase64), true);
-          }
-          return;
-        }
-        if (payload.kind === "close") {
-          emitClose(payload);
-          return;
-        }
-        emitError(payload.error ?? "Local daemon transport error");
-      })
+        return;
+      }
+      if (payload.kind === "close") {
+        emitClose(payload);
+        return;
+      }
+      emitError(payload.error ?? "Local daemon transport error");
+    })
       .then((cleanup) => {
         if (disposed) {
           cleanup();
           return;
         }
         unlisten = cleanup;
-        return;
       })
       .catch((error) => {
         emitError(error);
       });
 
-    void rpc
-      .openSession(target)
+    void openLocalTransportSession(target)
       .then((id) => {
         if (disposed) {
-          void rpc.closeSession(id).catch((error) => emitError(error));
+          void closeLocalTransportSession(id).catch((error) => emitError(error));
           return;
         }
         sessionId = id;
         emitOpen();
-        return;
       })
       .catch((error) => {
         emitError(error);
@@ -148,20 +141,24 @@ export function createDesktopLocalDaemonTransportFactory(
           return;
         }
         if (typeof data === "string") {
-          void rpc.sendMessage({ sessionId, text: data }).catch((error) => emitError(error));
+          void sendLocalTransportMessage({ sessionId, text: data }).catch((error) =>
+            emitError(error),
+          );
           return;
         }
         const binaryBase64 = encodeBinaryToBase64(
           data instanceof ArrayBuffer ? data : new Uint8Array(data),
         );
-        void rpc.sendMessage({ sessionId, binaryBase64 }).catch((error) => emitError(error));
+        void sendLocalTransportMessage({ sessionId, binaryBase64 }).catch((error) =>
+          emitError(error),
+        );
       },
       close: () => {
         disposed = true;
         const currentSessionId = sessionId;
         sessionId = null;
         if (currentSessionId) {
-          void rpc.closeSession(currentSessionId).catch((error) => emitError(error));
+          void closeLocalTransportSession(currentSessionId).catch((error) => emitError(error));
         }
         unlisten?.();
         unlisten = null;

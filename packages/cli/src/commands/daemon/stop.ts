@@ -1,9 +1,5 @@
 import type { Command } from "commander";
-import {
-  stopLocalDaemon,
-  DEFAULT_STOP_TIMEOUT_MS,
-  DEFAULT_KILL_TIMEOUT_MS,
-} from "./local-daemon.js";
+import { stopLocalDaemon, DEFAULT_STOP_TIMEOUT_MS } from "./local-daemon.js";
 import type {
   CommandOptions,
   SingleResult,
@@ -15,9 +11,6 @@ interface StopResult {
   action: "stopped" | "not_running";
   home: string;
   pid: string;
-  forced: boolean;
-  usedLifecycleRpc: boolean;
-  reason: "not_running" | "lifecycle_shutdown_rpc" | "owner_pid_signal" | "owner_pid_sigkill";
   message: string;
 }
 
@@ -37,17 +30,17 @@ const stopResultSchema: OutputSchema<StopResult> = {
 
 export type StopCommandResult = SingleResult<StopResult>;
 
-function parseSecondsOption(raw: unknown, fallbackMs: number, label: string): number {
+function parseTimeoutMs(raw: unknown): number {
   if (typeof raw !== "string" || raw.trim().length === 0) {
-    return fallbackMs;
+    return DEFAULT_STOP_TIMEOUT_MS;
   }
 
   const seconds = Number(raw);
   if (!Number.isFinite(seconds) || seconds <= 0) {
     const error: CommandError = {
       code: "INVALID_TIMEOUT",
-      message: `Invalid ${label} value: ${raw}`,
-      details: `${label} must be a positive number of seconds`,
+      message: `Invalid timeout value: ${raw}`,
+      details: "Timeout must be a positive number of seconds",
     };
     throw error;
   }
@@ -61,24 +54,16 @@ export async function runStopCommand(
 ): Promise<StopCommandResult> {
   const home = typeof options.home === "string" ? options.home : undefined;
   const force = options.force === true;
-  const timeoutMs = parseSecondsOption(options.timeout, DEFAULT_STOP_TIMEOUT_MS, "timeout");
-  const killTimeoutMs = parseSecondsOption(
-    options.killTimeout,
-    DEFAULT_KILL_TIMEOUT_MS,
-    "kill-timeout",
-  );
+  const timeoutMs = parseTimeoutMs(options.timeout);
 
   try {
-    const result = await stopLocalDaemon({ home, force, timeoutMs, killTimeoutMs });
+    const result = await stopLocalDaemon({ home, force, timeoutMs });
     return {
       type: "single",
       data: {
         action: result.action,
         home: result.home,
         pid: result.pid === null ? "-" : String(result.pid),
-        forced: result.forced,
-        usedLifecycleRpc: result.usedLifecycleRpc,
-        reason: result.reason,
         message: result.message,
       },
       schema: stopResultSchema,

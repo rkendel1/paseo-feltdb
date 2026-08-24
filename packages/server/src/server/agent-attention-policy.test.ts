@@ -1,234 +1,239 @@
 import { describe, expect, it } from "vitest";
 import {
-  computeNotificationPlan,
-  isPushEligibleAttentionReason,
-  type ClientPresenceState,
-  PRESENCE_THRESHOLD_MS,
+  computeShouldNotifyClient,
+  computeShouldSendPush,
+  type ClientAttentionState,
 } from "./agent-attention-policy.js";
 
-function state(overrides: Partial<ClientPresenceState>): ClientPresenceState {
+function state(overrides: Partial<ClientAttentionState>): ClientAttentionState {
   return {
-    appVisible: true,
+    deviceType: null,
     focusedAgentId: null,
-    focusedTerminalId: null,
-    lastActivityAtMs: null,
+    isStale: false,
+    appVisible: false,
     ...overrides,
   };
 }
 
-describe("computeNotificationPlan", () => {
-  const nowMs = Date.parse("2026-04-19T12:00:00.000Z");
-  const staleAtMs = nowMs - PRESENCE_THRESHOLD_MS - 1;
-  const presentAtMs = nowMs - PRESENCE_THRESHOLD_MS + 1;
-
-  it("does not suppress notifications when a focused client is stale", () => {
-    const staleFocused = state({
+describe("computeShouldNotifyClient", () => {
+  it("suppresses notifications when someone is actively focused on the agent", () => {
+    const activeOnAgent = state({
+      deviceType: "web",
       focusedAgentId: "agent-1",
-      lastActivityAtMs: staleAtMs,
+      isStale: false,
+      appVisible: true,
     });
-
-    expect(
-      computeNotificationPlan({
-        allStates: [staleFocused],
-        focusTarget: { kind: "agent", id: "agent-1" },
-        pushEligible: true,
-        nowMs,
-      }),
-    ).toEqual({ inAppRecipientIndex: null, shouldPush: true });
-  });
-
-  it("suppresses notifications when a focused client is present", () => {
-    const staleFocused = state({
-      focusedAgentId: "agent-1",
-      lastActivityAtMs: staleAtMs,
-    });
-    const presentFocused = state({
-      focusedAgentId: "agent-1",
-      lastActivityAtMs: presentAtMs,
-    });
-
-    expect(
-      computeNotificationPlan({
-        allStates: [staleFocused, presentFocused],
-        focusTarget: { kind: "agent", id: "agent-1" },
-        pushEligible: true,
-        nowMs,
-      }),
-    ).toEqual({ inAppRecipientIndex: null, shouldPush: false });
-  });
-
-  it("does not suppress notifications when a focused client is backgrounded", () => {
-    const backgroundFocused = state({
+    const staleMobile = state({
+      deviceType: "mobile",
+      focusedAgentId: null,
+      isStale: true,
       appVisible: false,
-      focusedAgentId: "agent-1",
-      lastActivityAtMs: presentAtMs,
     });
 
     expect(
-      computeNotificationPlan({
-        allStates: [backgroundFocused],
-        focusTarget: { kind: "agent", id: "agent-1" },
-        pushEligible: true,
-        nowMs,
+      computeShouldNotifyClient({
+        clientState: staleMobile,
+        allClientStates: [activeOnAgent, staleMobile],
+        agentId: "agent-1",
       }),
-    ).toEqual({ inAppRecipientIndex: 0, shouldPush: false });
+    ).toBe(false);
   });
 
-  it("treats present clients focused on different agents as eligible", () => {
+  it("notifies unidentified clients by default when agent is not actively focused", () => {
+    const unknownClient = state({
+      deviceType: null,
+      focusedAgentId: null,
+      isStale: false,
+      appVisible: false,
+    });
+
     expect(
-      computeNotificationPlan({
-        allStates: [
-          state({
-            focusedAgentId: "agent-2",
-            lastActivityAtMs: nowMs - 1_000,
-          }),
-        ],
-        focusTarget: { kind: "agent", id: "agent-1" },
-        pushEligible: true,
-        nowMs,
+      computeShouldNotifyClient({
+        clientState: unknownClient,
+        allClientStates: [unknownClient],
+        agentId: "agent-2",
       }),
-    ).toEqual({ inAppRecipientIndex: 0, shouldPush: false });
+    ).toBe(true);
   });
 
-  it("chooses the present client with the greatest clamped activity timestamp", () => {
+  it("notifies active visible clients when they are focused on an agent", () => {
+    const focusedWeb = state({
+      deviceType: "web",
+      focusedAgentId: "agent-2",
+      isStale: false,
+      appVisible: true,
+    });
+
     expect(
-      computeNotificationPlan({
-        allStates: [
-          state({ lastActivityAtMs: nowMs - 10_000 }),
-          state({ lastActivityAtMs: nowMs - 1_000 }),
-          state({ lastActivityAtMs: staleAtMs }),
-        ],
-        focusTarget: { kind: "agent", id: "agent-1" },
-        pushEligible: true,
-        nowMs,
+      computeShouldNotifyClient({
+        clientState: focusedWeb,
+        allClientStates: [focusedWeb],
+        agentId: "agent-3",
       }),
-    ).toEqual({ inAppRecipientIndex: 1, shouldPush: false });
+    ).toBe(true);
   });
 
-  it("uses the lower index when present clients have identical timestamps", () => {
+  it("suppresses active clients that are not focused on an agent", () => {
+    const activeButNotFocused = state({
+      deviceType: "web",
+      focusedAgentId: null,
+      isStale: false,
+      appVisible: true,
+    });
+
     expect(
-      computeNotificationPlan({
-        allStates: [
-          state({ lastActivityAtMs: nowMs - 1_000 }),
-          state({ lastActivityAtMs: nowMs - 1_000 }),
-        ],
-        focusTarget: { kind: "agent", id: "agent-1" },
-        pushEligible: true,
-        nowMs,
+      computeShouldNotifyClient({
+        clientState: activeButNotFocused,
+        allClientStates: [activeButNotFocused],
+        agentId: "agent-4",
       }),
-    ).toEqual({ inAppRecipientIndex: 0, shouldPush: false });
+    ).toBe(false);
   });
 
-  it("clamps future timestamps to now and treats them as present", () => {
+  it("suppresses stale mobile notifications when an active web client exists", () => {
+    const staleMobile = state({
+      deviceType: "mobile",
+      focusedAgentId: null,
+      isStale: true,
+      appVisible: false,
+    });
+    const activeWeb = state({
+      deviceType: "web",
+      focusedAgentId: null,
+      isStale: false,
+      appVisible: true,
+    });
+
     expect(
-      computeNotificationPlan({
-        allStates: [
-          state({ lastActivityAtMs: nowMs - 1 }),
-          state({ lastActivityAtMs: nowMs + 600_000 }),
-        ],
-        focusTarget: { kind: "agent", id: "agent-1" },
-        pushEligible: true,
-        nowMs,
+      computeShouldNotifyClient({
+        clientState: staleMobile,
+        allClientStates: [staleMobile, activeWeb],
+        agentId: "agent-5",
       }),
-    ).toEqual({ inAppRecipientIndex: 1, shouldPush: false });
+    ).toBe(false);
   });
 
-  it("never treats no-heartbeat clients as present", () => {
+  it("allows stale mobile notifications when no active web client exists", () => {
+    const staleMobile = state({
+      deviceType: "mobile",
+      focusedAgentId: null,
+      isStale: true,
+      appVisible: false,
+    });
+    const staleWeb = state({
+      deviceType: "web",
+      focusedAgentId: null,
+      isStale: true,
+      appVisible: false,
+    });
+
     expect(
-      computeNotificationPlan({
-        allStates: [state({ lastActivityAtMs: null })],
-        focusTarget: { kind: "agent", id: "agent-1" },
-        pushEligible: true,
-        nowMs,
+      computeShouldNotifyClient({
+        clientState: staleMobile,
+        allClientStates: [staleMobile, staleWeb],
+        agentId: "agent-6",
       }),
-    ).toEqual({ inAppRecipientIndex: null, shouldPush: true });
+    ).toBe(true);
   });
 
-  it("falls back to push for non-error attention when no clients are present", () => {
+  it("suppresses stale web notifications when a mobile client is also present", () => {
+    const staleWeb = state({
+      deviceType: "web",
+      focusedAgentId: null,
+      isStale: true,
+      appVisible: false,
+    });
+    const staleMobile = state({
+      deviceType: "mobile",
+      focusedAgentId: null,
+      isStale: true,
+      appVisible: false,
+    });
+
     expect(
-      computeNotificationPlan({
-        allStates: [state({ lastActivityAtMs: staleAtMs })],
-        focusTarget: { kind: "agent", id: "agent-1" },
-        pushEligible: true,
-        nowMs,
+      computeShouldNotifyClient({
+        clientState: staleWeb,
+        allClientStates: [staleWeb, staleMobile],
+        agentId: "agent-7",
       }),
-    ).toEqual({ inAppRecipientIndex: null, shouldPush: true });
+    ).toBe(false);
   });
 
-  it("does not push error attention when no clients are present", () => {
-    expect(
-      computeNotificationPlan({
-        allStates: [state({ lastActivityAtMs: staleAtMs })],
-        focusTarget: { kind: "agent", id: "agent-1" },
-        pushEligible: false,
-        nowMs,
-      }),
-    ).toEqual({ inAppRecipientIndex: null, shouldPush: false });
-  });
+  it("allows stale web notifications when there are no mobile or unidentified clients", () => {
+    const staleWeb = state({
+      deviceType: "web",
+      focusedAgentId: null,
+      isStale: true,
+      appVisible: false,
+    });
 
-  it("lets a foreground mobile-style client with recent activity win as most recent", () => {
     expect(
-      computeNotificationPlan({
-        allStates: [
-          state({ focusedAgentId: "agent-2", lastActivityAtMs: nowMs - 20_000 }),
-          state({ focusedAgentId: null, lastActivityAtMs: nowMs - 500 }),
-        ],
-        focusTarget: { kind: "agent", id: "agent-1" },
-        pushEligible: true,
-        nowMs,
+      computeShouldNotifyClient({
+        clientState: staleWeb,
+        allClientStates: [staleWeb],
+        agentId: "agent-8",
       }),
-    ).toEqual({ inAppRecipientIndex: 1, shouldPush: false });
-  });
-
-  it("selects no in-app recipient and pushes when two web-style clients are stale", () => {
-    expect(
-      computeNotificationPlan({
-        allStates: [state({ lastActivityAtMs: staleAtMs }), state({ lastActivityAtMs: staleAtMs })],
-        focusTarget: { kind: "agent", id: "agent-1" },
-        pushEligible: true,
-        nowMs,
-      }),
-    ).toEqual({ inAppRecipientIndex: null, shouldPush: true });
-  });
-
-  it("never suppresses when focusTarget is null even if a client focuses a matching id", () => {
-    expect(
-      computeNotificationPlan({
-        allStates: [state({ focusedAgentId: "terminal-1", lastActivityAtMs: nowMs - 500 })],
-        focusTarget: null,
-        pushEligible: true,
-        nowMs,
-      }),
-    ).toEqual({ inAppRecipientIndex: 0, shouldPush: false });
-  });
-
-  it("suppresses terminal notifications when a present visible client focuses the terminal", () => {
-    expect(
-      computeNotificationPlan({
-        allStates: [state({ focusedTerminalId: "terminal-1", lastActivityAtMs: nowMs - 500 })],
-        focusTarget: { kind: "terminal", id: "terminal-1" },
-        pushEligible: true,
-        nowMs,
-      }),
-    ).toEqual({ inAppRecipientIndex: null, shouldPush: false });
-  });
-
-  it("pushes for a null-focus target when no client is present and push is eligible", () => {
-    expect(
-      computeNotificationPlan({
-        allStates: [state({ lastActivityAtMs: staleAtMs })],
-        focusTarget: null,
-        pushEligible: true,
-        nowMs,
-      }),
-    ).toEqual({ inAppRecipientIndex: null, shouldPush: true });
+    ).toBe(true);
   });
 });
 
-describe("isPushEligibleAttentionReason", () => {
-  it("allows push for finished and permission but not error", () => {
-    expect(isPushEligibleAttentionReason("finished")).toBe(true);
-    expect(isPushEligibleAttentionReason("permission")).toBe(true);
-    expect(isPushEligibleAttentionReason("error")).toBe(false);
+describe("computeShouldSendPush", () => {
+  it("never sends push for error attention events", () => {
+    expect(
+      computeShouldSendPush({
+        reason: "error",
+        allClientStates: [],
+      }),
+    ).toBe(false);
+  });
+
+  it("suppresses push when any active web client exists", () => {
+    expect(
+      computeShouldSendPush({
+        reason: "finished",
+        allClientStates: [
+          state({
+            deviceType: "web",
+            isStale: false,
+            appVisible: true,
+          }),
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("suppresses push when a mobile app is actively visible", () => {
+    expect(
+      computeShouldSendPush({
+        reason: "permission",
+        allClientStates: [
+          state({
+            deviceType: "mobile",
+            isStale: false,
+            appVisible: true,
+          }),
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("sends push when no active web client or foreground mobile client exists", () => {
+    expect(
+      computeShouldSendPush({
+        reason: "finished",
+        allClientStates: [
+          state({
+            deviceType: "mobile",
+            isStale: true,
+            appVisible: false,
+          }),
+          state({
+            deviceType: "web",
+            isStale: true,
+            appVisible: false,
+          }),
+        ],
+      }),
+    ).toBe(true);
   });
 });

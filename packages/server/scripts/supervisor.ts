@@ -1,59 +1,24 @@
-import { fork, spawn, type ChildProcess } from "child_process";
-import { mkdirSync } from "node:fs";
-import path from "node:path";
-import { createStream as createRotatingFileStream } from "rotating-file-stream";
-import { signalProcessTree } from "../src/utils/tree-kill.js";
-
-const WORKER_HEARTBEAT_INTERVAL_MS = 1_000;
-const WORKER_TERMINATION_GRACE_MS = 10_000;
-
-interface SupervisorLogFileOptions {
-  path: string;
-  rotate: {
-    maxSize: string;
-    maxFiles: number;
-  };
-}
+import { fork, type ChildProcess } from "child_process";
 
 type WorkerLifecycleMessage =
   | {
       type: "paseo:shutdown";
-      reason?: string;
-    }
-  | {
-      type: "paseo:ready";
-      listen: string;
     }
   | {
       type: "paseo:restart";
       reason?: string;
     };
 
-interface SupervisorHeartbeatMessage {
-  type: "paseo:supervisor-heartbeat";
-}
-
-interface SupervisorOptions {
+type SupervisorOptions = {
   name: string;
   startupMessage: string;
   resolveWorkerEntry: () => string;
   workerArgs?: string[];
   workerEnv?: NodeJS.ProcessEnv;
   workerExecArgv?: string[];
-  resolveWorkerSpawnSpec?: (workerEntry: string) => {
-    command: string;
-    args: string[];
-    env?: NodeJS.ProcessEnv;
-  } | null;
-  onWorkerReady?: (message: { listen: string }) => Promise<void> | void;
   restartOnCrash?: boolean;
   onSupervisorExit?: () => Promise<void> | void;
-  logFile?: SupervisorLogFileOptions;
-}
-
-export interface SupervisorController {
-  requestShutdown(reason: string): void;
-}
+};
 
 function describeExit(code: number | null, signal: NodeJS.Signals | null): string {
   return signal ?? (typeof code === "number" ? `code ${code}` : "unknown");
@@ -65,18 +30,7 @@ function parseLifecycleMessage(msg: unknown): WorkerLifecycleMessage | null {
   }
   const type = (msg as { type?: unknown }).type;
   if (type === "paseo:shutdown") {
-    const reason = (msg as { reason?: unknown }).reason;
-    return {
-      type: "paseo:shutdown",
-      ...(typeof reason === "string" && reason.trim().length > 0 ? { reason } : {}),
-    };
-  }
-  if (type === "paseo:ready") {
-    const listen = (msg as { listen?: unknown }).listen;
-    if (typeof listen !== "string" || listen.trim().length === 0) {
-      return null;
-    }
-    return { type: "paseo:ready", listen };
+    return { type: "paseo:shutdown" };
   }
   if (type === "paseo:restart") {
     const reason = (msg as { reason?: unknown }).reason;
@@ -88,75 +42,20 @@ function parseLifecycleMessage(msg: unknown): WorkerLifecycleMessage | null {
   return null;
 }
 
-function toRotatingFileStreamSize(size: string): string {
-  const trimmed = size.trim();
-  const match = trimmed.match(/^(\d+)\s*([bBkKmMgG])?$/);
-  if (!match) {
-    return trimmed;
-  }
-
-  const value = match[1];
-  const unit = (match[2] ?? "M").toUpperCase();
-  return `${value}${unit}`;
-}
-
-function createSupervisorLogStream(options: SupervisorLogFileOptions | undefined) {
-  if (!options) {
-    return null;
-  }
-
-  mkdirSync(path.dirname(options.path), { recursive: true });
-  return createRotatingFileStream(path.basename(options.path), {
-    path: path.dirname(options.path),
-    size: toRotatingFileStreamSize(options.rotate.maxSize),
-    maxFiles: options.rotate.maxFiles,
-  });
-}
-
-export function runSupervisor(options: SupervisorOptions): SupervisorController {
+export function runSupervisor(options: SupervisorOptions): void {
   const restartOnCrash = options.restartOnCrash ?? false;
   const workerArgs = options.workerArgs ?? process.argv.slice(2);
   const workerEnv = options.workerEnv ?? process.env;
   const workerExecArgv = options.workerExecArgv ?? ["--import", "tsx"];
-  const resolveWorkerSpawnSpec = options.resolveWorkerSpawnSpec;
 
   let child: ChildProcess | null = null;
   let restarting = false;
   let shuttingDown = false;
   let exiting = false;
-  let forceKillTimer: NodeJS.Timeout | null = null;
-  const logStream = createSupervisorLogStream(options.logFile);
-
-  const writeDurableChunk = (chunk: string | Buffer): void => {
-    logStream?.write(chunk);
-  };
-
-  const writeLifecycleLog = (message: string, fields: Record<string, unknown> = {}): void => {
-    writeDurableChunk(
-      `${JSON.stringify({
-        level: "info",
-        time: new Date().toISOString(),
-        pid: process.pid,
-        name: options.name,
-        msg: message,
-        ...fields,
-      })}\n`,
-    );
-  };
 
   const log = (message: string): void => {
     process.stderr.write(`[${options.name}] ${message}\n`);
-    writeLifecycleLog(message);
   };
-
-  const closeLogStream = (): Promise<void> =>
-    new Promise((resolve) => {
-      if (!logStream) {
-        resolve();
-        return;
-      }
-      logStream.end(resolve);
-    });
 
   const exitSupervisor = (code: number): void => {
     if (exiting) {
@@ -168,44 +67,9 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
         const message = error instanceof Error ? error.message : String(error);
         log(`Supervisor exit cleanup failed: ${message}`);
       })
-      .then(closeLogStream)
       .finally(() => {
         process.exit(code);
       });
-  };
-
-  const clearForceKillTimer = (): void => {
-    if (forceKillTimer) {
-      clearTimeout(forceKillTimer);
-      forceKillTimer = null;
-    }
-  };
-
-  const scheduleForceKill = (reason: string): void => {
-    if (!child) {
-      return;
-    }
-    const currentChild = child;
-    clearForceKillTimer();
-    forceKillTimer = setTimeout(() => {
-      forceKillTimer = null;
-      if (child !== currentChild) {
-        return;
-      }
-      writeLifecycleLog("Worker did not exit after SIGTERM; forcing SIGKILL", {
-        reason,
-        supervisorPid: process.pid,
-        workerPid: currentChild.pid ?? null,
-      });
-      void signalProcessTree(currentChild, "SIGKILL").catch((error) => {
-        writeLifecycleLog("Failed to force-kill worker process tree", {
-          error: error instanceof Error ? error.message : String(error),
-          supervisorPid: process.pid,
-          workerPid: currentChild.pid ?? null,
-        });
-      });
-    }, WORKER_TERMINATION_GRACE_MS);
-    forceKillTimer.unref();
   };
 
   const spawnWorker = () => {
@@ -220,50 +84,10 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
       return;
     }
 
-    const spawnSpec = resolveWorkerSpawnSpec?.(workerEntry) ?? null;
-    writeLifecycleLog("Spawning worker", { workerEntry });
-    if (spawnSpec) {
-      child = spawn(spawnSpec.command, spawnSpec.args, {
-        stdio: ["inherit", "pipe", "pipe", "ipc"],
-        env: spawnSpec.env ?? workerEnv,
-      });
-    } else {
-      child = fork(workerEntry, workerArgs, {
-        stdio: ["inherit", "pipe", "pipe", "ipc"],
-        env: workerEnv,
-        execArgv: workerExecArgv,
-      });
-    }
-
-    const currentChild = child;
-    const heartbeat = setInterval(() => {
-      const message: SupervisorHeartbeatMessage = { type: "paseo:supervisor-heartbeat" };
-      if (currentChild.connected) {
-        currentChild.send?.(message, (error) => {
-          if (error) {
-            writeLifecycleLog("Worker heartbeat IPC send failed", {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        });
-      } else {
-        writeLifecycleLog("Worker heartbeat skipped because IPC channel is disconnected");
-      }
-    }, WORKER_HEARTBEAT_INTERVAL_MS);
-    heartbeat.unref();
-
-    child.on("disconnect", () => {
-      writeLifecycleLog("Worker IPC channel disconnected");
-    });
-
-    child.stdout?.on("data", (chunk: Buffer) => {
-      process.stdout.write(chunk);
-      writeDurableChunk(chunk);
-    });
-
-    child.stderr?.on("data", (chunk: Buffer) => {
-      process.stderr.write(chunk);
-      writeDurableChunk(chunk);
+    child = fork(workerEntry, workerArgs, {
+      stdio: "inherit",
+      env: workerEnv,
+      execArgv: workerExecArgv,
     });
 
     child.on("message", (msg: unknown) => {
@@ -272,34 +96,16 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
         return;
       }
 
-      if (lifecycleMessage.type === "paseo:ready") {
-        writeLifecycleLog("Worker ready", { listen: lifecycleMessage.listen });
-        Promise.resolve(options.onWorkerReady?.({ listen: lifecycleMessage.listen })).catch(
-          (error) => {
-            const message = error instanceof Error ? error.message : String(error);
-            log(`Worker ready callback failed: ${message}`);
-          },
-        );
-        return;
-      }
-
       if (lifecycleMessage.type === "paseo:shutdown") {
-        const reason = lifecycleMessage.reason ?? "worker_requested_shutdown";
-        writeLifecycleLog("Worker requested shutdown", { reason });
-        requestShutdown(reason);
+        requestShutdown("Shutdown requested by worker");
         return;
       }
 
-      const reason = lifecycleMessage.reason ?? "worker_requested_restart";
-      writeLifecycleLog("Worker requested restart", { reason });
-      requestRestart(reason);
+      requestRestart("Restart requested by worker");
     });
 
     child.on("exit", (code, signal) => {
-      clearInterval(heartbeat);
-      clearForceKillTimer();
       const exitDescriptor = describeExit(code, signal);
-      writeLifecycleLog("Worker exited", { code, signal, exit: exitDescriptor });
 
       if (shuttingDown) {
         log(`Worker exited (${exitDescriptor}). Supervisor shutting down.`);
@@ -307,37 +113,16 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
         return;
       }
 
-      const crashed =
-        restartOnCrash &&
-        ((code !== 0 && code !== null) || (signal !== null && signal !== "SIGTERM"));
-
-      if (restarting || crashed) {
+      if (restarting || (restartOnCrash && code !== 0 && code !== null)) {
         restarting = false;
-        log(
-          crashed
-            ? `Worker crashed (${exitDescriptor}). Restarting worker...`
-            : `Worker exited (${exitDescriptor}). Restarting worker...`,
-        );
+        log(`Worker exited (${exitDescriptor}). Restarting worker...`);
         spawnWorker();
         return;
       }
 
       log(`Worker exited (${exitDescriptor}). Supervisor exiting.`);
-      exitSupervisor(typeof code === "number" ? code : 1);
+      exitSupervisor(typeof code === "number" ? code : 0);
     });
-  };
-
-  const signalWorker = (signal: NodeJS.Signals, reason: string): void => {
-    if (!child) {
-      return;
-    }
-    writeLifecycleLog("Supervisor sending signal to worker", {
-      reason,
-      signal,
-      supervisorPid: process.pid,
-      workerPid: child.pid ?? null,
-    });
-    child.kill(signal);
   };
 
   const requestRestart = (reason: string) => {
@@ -345,10 +130,8 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
       return;
     }
     restarting = true;
-    writeLifecycleLog("Restart requested", { reason });
     log(`${reason}. Stopping worker for restart...`);
-    signalWorker("SIGTERM", reason);
-    scheduleForceKill(reason);
+    child.kill("SIGTERM");
   };
 
   const requestShutdown = (reason: string) => {
@@ -357,26 +140,21 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
     }
     shuttingDown = true;
     restarting = false;
-    writeLifecycleLog("Supervisor shutdown requested", { reason });
     log(`${reason}. Stopping worker...`);
     if (!child) {
       exitSupervisor(0);
       return;
     }
-    signalWorker("SIGTERM", reason);
-    scheduleForceKill(reason);
+    child.kill("SIGTERM");
   };
 
   const forwardSignal = (signal: NodeJS.Signals) => {
-    requestShutdown(`supervisor_received_${signal}`);
+    requestShutdown(`Received ${signal}`);
   };
 
   process.on("SIGINT", () => forwardSignal("SIGINT"));
   process.on("SIGTERM", () => forwardSignal("SIGTERM"));
 
   process.stdout.write(`[${options.name}] ${options.startupMessage}\n`);
-  writeLifecycleLog(options.startupMessage);
   spawnWorker();
-
-  return { requestShutdown };
 }

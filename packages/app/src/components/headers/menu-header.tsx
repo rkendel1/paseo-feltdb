@@ -1,20 +1,15 @@
-import { useCallback, useMemo, type ReactNode } from "react";
-import { useTranslation } from "react-i18next";
-import { View, type StyleProp, type ViewStyle } from "react-native";
-import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import type { ReactNode } from "react";
+import { Text, View, type StyleProp, type ViewStyle } from "react-native";
+import { StyleSheet, UnistylesRuntime, useUnistyles } from "react-native-unistyles";
 import { PanelLeft } from "lucide-react-native";
 import { ScreenHeader } from "./screen-header";
-import { ScreenTitle } from "./screen-title";
-import { HeaderToggleButton, headerIconSlotStyle } from "./header-toggle-button";
-import { selectIsAgentListOpen, usePanelStore } from "@/stores/panel-store";
-import { useIsCompactFormFactor } from "@/constants/layout";
+import { HeaderToggleButton } from "./header-toggle-button";
+import { usePanelStore } from "@/stores/panel-store";
 import { getShortcutOs } from "@/utils/shortcut-platform";
-import { useHasWindowChromeObstruction, useOwnsWindowChromeCorner } from "@/utils/desktop-window";
 
 interface MenuHeaderProps {
   title?: string;
   rightContent?: ReactNode;
-  borderless?: boolean;
 }
 
 interface SidebarMenuToggleProps {
@@ -29,150 +24,94 @@ const MOBILE_MENU_LINE_SHORT_WIDTH = 8;
 const MOBILE_MENU_LINE_HEIGHT = 2;
 
 function MobileMenuIcon({ color }: { color: string }) {
-  const lineStyle = useMemo(() => [styles.mobileMenuLine, { backgroundColor: color }], [color]);
-  const shortLineStyle = useMemo(
-    () => [styles.mobileMenuLine, styles.mobileMenuLineShort, { backgroundColor: color }],
-    [color],
-  );
   return (
     <View style={styles.mobileMenuIcon} pointerEvents="none">
-      <View style={lineStyle} />
-      <View style={lineStyle} />
-      <View style={shortLineStyle} />
+      <View style={[styles.mobileMenuLine, { backgroundColor: color }]} />
+      <View style={[styles.mobileMenuLine, { backgroundColor: color }]} />
+      <View
+        style={[styles.mobileMenuLine, styles.mobileMenuLineShort, { backgroundColor: color }]}
+      />
     </View>
   );
 }
 
-function SidebarMenuToggleButton({
-  isMobile,
-  extraMutedIdleIcon = false,
-  resolvedStyle,
+export function SidebarMenuToggle({
+  style,
   tooltipSide = "right",
   testID = "menu-button",
   nativeID = "menu-button",
-}: Omit<SidebarMenuToggleProps, "style"> & {
-  isMobile: boolean;
-  extraMutedIdleIcon?: boolean;
-  resolvedStyle: StyleProp<ViewStyle>;
-}) {
+}: SidebarMenuToggleProps = {}) {
   const { theme } = useUnistyles();
-  const { t } = useTranslation();
-  const isOpen = usePanelStore((state) => selectIsAgentListOpen(state, { isCompact: isMobile }));
-  const toggleAgentListForLayout = usePanelStore((state) => state.toggleAgentListForLayout);
-  const toggleShortcutKeys = useMemo(
-    () => (getShortcutOs() === "mac" ? ["mod", "B"] : ["mod", "."]),
-    [],
-  );
+  const isMobile = UnistylesRuntime.breakpoint === "xs" || UnistylesRuntime.breakpoint === "sm";
+  const mobileView = usePanelStore((state) => state.mobileView);
+  const desktopAgentListOpen = usePanelStore((state) => state.desktop.agentListOpen);
+  const toggleAgentList = usePanelStore((state) => state.toggleAgentList);
+  const toggleShortcutKeys = getShortcutOs() === "mac" ? ["mod", "B"] : ["mod", "."];
 
-  const handlePress = useCallback(() => {
-    toggleAgentListForLayout({ isCompact: isMobile });
-  }, [toggleAgentListForLayout, isMobile]);
-
-  const accessibilityState = useMemo(() => ({ expanded: isOpen }), [isOpen]);
+  const isOpen = isMobile ? mobileView === "agent-list" : desktopAgentListOpen;
+  const menuIconColor =
+    !isMobile && isOpen ? theme.colors.foreground : theme.colors.foregroundMuted;
 
   return (
     <HeaderToggleButton
-      onPress={handlePress}
-      tooltipLabel={t("shell.menu.toggleSidebar")}
+      onPress={toggleAgentList}
+      tooltipLabel="Toggle sidebar"
       tooltipKeys={toggleShortcutKeys}
       tooltipSide={tooltipSide}
       testID={testID}
       nativeID={nativeID}
-      style={resolvedStyle}
+      style={style}
       accessible
       accessibilityRole="button"
-      accessibilityLabel={isOpen ? t("shell.menu.close") : t("shell.menu.open")}
-      accessibilityState={accessibilityState}
+      accessibilityLabel={isOpen ? "Close menu" : "Open menu"}
+      accessibilityState={{ expanded: isOpen }}
     >
-      {({ hovered, pressed }) => {
-        let color = extraMutedIdleIcon
-          ? theme.colors.foregroundExtraMuted
-          : theme.colors.foregroundMuted;
-        if (hovered || pressed) {
-          color = theme.colors.foreground;
-        }
-        return isMobile ? (
-          <MobileMenuIcon color={color} />
-        ) : (
-          <PanelLeft size={theme.iconSize.md} color={color} />
-        );
-      }}
+      {isMobile ? (
+        <MobileMenuIcon color={menuIconColor} />
+      ) : (
+        <PanelLeft size={theme.iconSize.md} color={menuIconColor} />
+      )}
     </HeaderToggleButton>
   );
 }
 
-export function SidebarMenuToggle({ style, ...props }: SidebarMenuToggleProps = {}) {
-  const isMobile = useIsCompactFormFactor();
-  const ownsTopLeft = useOwnsWindowChromeCorner("top-left");
-  const hasTopLeftWindowControls = useHasWindowChromeObstruction("top-left");
-  const resolvedStyle = useMemo(() => [styles.leadingToggle, style], [style]);
-  const placeholderStyle = useMemo(
-    () => [headerIconSlotStyle.slot, resolvedStyle],
-    [resolvedStyle],
-  );
-
-  if (!isMobile && !ownsTopLeft) {
-    return null;
-  }
-
-  if (!isMobile && hasTopLeftWindowControls) {
-    return (
-      <View pointerEvents="none" style={placeholderStyle}>
-        <View style={styles.desktopMenuIconSpace} />
-      </View>
-    );
-  }
-
-  return <SidebarMenuToggleButton {...props} isMobile={isMobile} resolvedStyle={resolvedStyle} />;
-}
-
-export function WindowSidebarMenuToggle({ style, ...props }: SidebarMenuToggleProps = {}) {
-  const resolvedStyle = useMemo(() => [styles.leadingToggle, style], [style]);
-  return (
-    <SidebarMenuToggleButton
-      {...props}
-      isMobile={false}
-      extraMutedIdleIcon
-      resolvedStyle={resolvedStyle}
-    />
-  );
-}
-
-export function MenuHeader({ title, rightContent, borderless }: MenuHeaderProps) {
+export function MenuHeader({ title, rightContent }: MenuHeaderProps) {
   return (
     <ScreenHeader
       left={
         <>
           <SidebarMenuToggle />
-          {title && <ScreenTitle>{title}</ScreenTitle>}
+          {title && (
+            <Text style={styles.title} numberOfLines={1}>
+              {title}
+            </Text>
+          )}
         </>
       }
       right={rightContent}
       leftStyle={styles.left}
-      borderless={borderless}
     />
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
-  leadingToggle: {
-    marginLeft: {
-      xs: 0,
-      md: -theme.spacing[2],
-    },
-  },
   left: {
     gap: theme.spacing[2],
+  },
+  title: {
+    flex: 1,
+    fontSize: theme.fontSize.base,
+    fontWeight: {
+      xs: "400",
+      md: "300",
+    },
+    color: theme.colors.foreground,
   },
   mobileMenuIcon: {
     width: MOBILE_MENU_LINE_WIDTH,
     height: 12,
     justifyContent: "space-between",
     alignItems: "flex-start",
-  },
-  desktopMenuIconSpace: {
-    width: theme.iconSize.md,
-    height: theme.iconSize.md,
   },
   mobileMenuLine: {
     width: MOBILE_MENU_LINE_WIDTH,

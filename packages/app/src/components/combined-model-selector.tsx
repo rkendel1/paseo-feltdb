@@ -1,295 +1,291 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
-import { useTranslation } from "react-i18next";
-import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import type { AgentProvider } from "@getpaseo/protocol/agent-types";
-import type { AgentProfilePicker, AgentProfileSeed } from "@/agent-profiles";
-import { ComboboxTrigger } from "@/components/ui/combobox-trigger";
-import { LoadingSpinner } from "@/components/ui/loading-spinner";
-import { Combobox, type ComboboxOption, type ComboboxProps } from "@/components/ui/combobox";
-import { ModelBrowser, ModelProviderGlyph, useModelBrowser } from "@/components/model-browser";
-import { isNative, isWeb } from "@/constants/platform";
-import type { ProviderSelectorProvider } from "@/provider-selection/provider-selection";
-import { ICON_SIZE, type Theme } from "@/styles/theme";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { View, Text, Pressable, Platform } from "react-native";
+import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { ArrowLeft, Check, ChevronDown, ChevronRight } from "lucide-react-native";
+import type { AgentModelDefinition, AgentProvider } from "@server/server/agent/agent-sdk-types";
+import type { AgentProviderDefinition } from "@server/server/agent/provider-manifest";
+import { Combobox, ComboboxItem, SearchInput } from "@/components/ui/combobox";
+import { getProviderIcon } from "@/components/provider-icons";
 
-const EMPTY_COMBOBOX_OPTIONS: ComboboxOption[] = [];
-const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
+const INLINE_MODEL_THRESHOLD = 8;
 
-const foregroundMutedMapping = (theme: Theme) => ({
-  color: theme.colors.foregroundMuted,
-});
+type DrillDownView = { provider: string };
 
-function noop() {}
+function resolveDefaultModelLabel(models: AgentModelDefinition[] | undefined): string {
+  if (!models || models.length === 0) {
+    return "Select model";
+  }
+  return (models.find((model) => model.isDefault) ?? models[0])?.label ?? "Select model";
+}
 
 interface CombinedModelSelectorProps {
-  providers: ProviderSelectorProvider[];
+  providerDefinitions: AgentProviderDefinition[];
+  allProviderModels: Map<string, AgentModelDefinition[]>;
   selectedProvider: string;
   selectedModel: string;
   onSelect: (provider: AgentProvider, modelId: string) => void;
   isLoading: boolean;
-  profiles?: AgentProfilePicker | null;
-  onApplyProfile?: (profileId: string) => void;
-  onEditProfiles?: () => void;
-  onCreateProfile?: (seed: AgentProfileSeed) => void;
-  onEditProfile?: (profileId: string) => void;
-  renderTrigger?: (input: {
-    selectedModelLabel: string;
-    onPress: () => void;
-    disabled: boolean;
-    isOpen: boolean;
-    hovered: boolean;
-    pressed: boolean;
-  }) => React.ReactNode;
-  onOpen?: () => void;
-  onClose?: () => void;
-  onRetryProvider?: (provider: AgentProvider) => void;
-  isRetryingProvider?: boolean;
   disabled?: boolean;
-  serverId?: string | null;
-  desktopPlacement?: ComboboxProps["desktopPlacement"];
-  desktopMinWidth?: number;
-  /**
-   * Render the custom trigger as a full-width form field: the outer Pressable
-   * becomes a transparent passthrough that stretches its child edge-to-edge and
-   * stops painting its own hover/pressed background and rounded corners. The
-   * trigger itself owns the field visuals and reads hovered/pressed to show its
-   * active state. Without this the trigger stays a content-width toolbar chip
-   * (the composer's layout).
-   */
-  triggerFill?: boolean;
-  toolbar?: {
-    glyphSize: number;
-    showCaret: boolean;
-  };
 }
 
 export function CombinedModelSelector({
-  providers,
+  providerDefinitions,
+  allProviderModels,
   selectedProvider,
   selectedModel,
   onSelect,
   isLoading,
-  profiles = null,
-  onApplyProfile,
-  onEditProfiles,
-  onCreateProfile,
-  onEditProfile,
-  renderTrigger,
-  onOpen,
-  onClose,
-  onRetryProvider,
-  isRetryingProvider = false,
   disabled = false,
-  serverId = null,
-  desktopPlacement,
-  desktopMinWidth,
-  triggerFill = false,
-  toolbar,
 }: CombinedModelSelectorProps) {
-  const { t } = useTranslation();
+  const { theme } = useUnistyles();
   const anchorRef = useRef<View>(null);
   const [isOpen, setIsOpen] = useState(false);
-  const [isContentReady, setIsContentReady] = useState(isWeb);
-  const browser = useModelBrowser({
-    providers,
-    selectedProvider,
-    selectedModel,
-    isLoading,
-    profiles,
-    serverId,
-  });
-  const { prepareToOpen, reset } = browser;
+  const [view, setView] = useState<"groups" | DrillDownView>("groups");
+  const [searchQuery, setSearchQuery] = useState("");
 
   const handleOpenChange = useCallback(
     (open: boolean) => {
       setIsOpen(open);
       if (open) {
-        prepareToOpen();
-        onOpen?.();
-        return;
+        const models = allProviderModels.get(selectedProvider);
+        if (models && models.length > INLINE_MODEL_THRESHOLD) {
+          setView({ provider: selectedProvider });
+        }
+      } else {
+        setView("groups");
+        setSearchQuery("");
       }
-      reset();
-      onClose?.();
     },
-    [onClose, onOpen, prepareToOpen, reset],
+    [allProviderModels, selectedProvider],
   );
 
   const handleSelect = useCallback(
     (provider: string, modelId: string) => {
-      onSelect(provider, modelId);
-      handleOpenChange(false);
+      onSelect(provider as AgentProvider, modelId);
+      setIsOpen(false);
+      setView("groups");
+      setSearchQuery("");
     },
-    [handleOpenChange, onSelect],
+    [onSelect],
   );
 
-  useEffect(() => {
-    if (isWeb) return () => {};
-    if (!isOpen) {
-      setIsContentReady(false);
-      return () => {};
-    }
-    const frame = requestAnimationFrame(() => {
-      setIsContentReady(true);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [isOpen]);
+  const ProviderIcon = getProviderIcon(selectedProvider);
 
-  const handleTriggerPress = useCallback(() => {
-    handleOpenChange(!isOpen);
-  }, [handleOpenChange, isOpen]);
-
-  const triggerStyle = useCallback(
-    ({ pressed, hovered }: PressableStateCallbackType & { hovered?: boolean }) => {
-      if (triggerFill) {
-        return [
-          styles.trigger,
-          styles.customTriggerWrapper,
-          styles.triggerFill,
-          disabled && styles.triggerDisabled,
-        ];
-      }
-      return [
-        styles.trigger,
-        Boolean(hovered) && styles.triggerHovered,
-        (pressed || isOpen) && styles.triggerPressed,
-        disabled && styles.triggerDisabled,
-        renderTrigger ? styles.customTriggerWrapper : null,
-      ];
-    },
-    [disabled, isOpen, renderTrigger, triggerFill],
-  );
-
-  const handleApplyProfile = useCallback(
-    (profileId: string) => {
-      onApplyProfile?.(profileId);
-      handleOpenChange(false);
-    },
-    [handleOpenChange, onApplyProfile],
-  );
-
-  const handleEditProfiles = useCallback(() => {
-    handleOpenChange(false);
-    onEditProfiles?.();
-  }, [handleOpenChange, onEditProfiles]);
-
-  const handleCreateProfile = useCallback(
-    (seed: AgentProfileSeed) => {
-      handleOpenChange(false);
-      onCreateProfile?.(seed);
-    },
-    [handleOpenChange, onCreateProfile],
-  );
-
-  const handleEditProfile = useCallback(
-    (profileId: string) => {
-      handleOpenChange(false);
-      onEditProfile?.(profileId);
-    },
-    [handleOpenChange, onEditProfile],
-  );
-
-  const selectorBody = isContentReady ? (
-    <ModelBrowser
-      state={browser}
-      onSelect={handleSelect}
-      onApplyProfile={handleApplyProfile}
-      onEditProfiles={onEditProfiles ? handleEditProfiles : undefined}
-      onCreateProfile={onCreateProfile ? handleCreateProfile : undefined}
-      onEditProfile={onEditProfile ? handleEditProfile : undefined}
-      onRetryProvider={onRetryProvider}
-      isRetryingProvider={isRetryingProvider}
-      scrolling={isWeb ? "independent" : "sheet"}
-    />
-  ) : (
-    <View style={styles.sheetLoadingState}>
-      <ThemedLoadingSpinner size={ICON_SIZE.sm} uniProps={foregroundMutedMapping} />
-      <Text style={styles.sheetLoadingText}>{t("modelSelector.loadingSelector")}</Text>
-    </View>
-  );
+  const selectedModelLabel = useMemo(() => {
+    const models = allProviderModels.get(selectedProvider);
+    if (!models) return isLoading ? "Loading..." : "Select model";
+    const model = models.find((m) => m.id === selectedModel);
+    return model?.label ?? resolveDefaultModelLabel(models);
+  }, [allProviderModels, selectedProvider, selectedModel, isLoading]);
 
   return (
     <>
-      {renderTrigger ? (
-        <Pressable
-          ref={anchorRef}
-          collapsable={false}
-          disabled={disabled}
-          onPress={handleTriggerPress}
-          style={triggerStyle}
-          accessibilityRole="button"
-          accessibilityLabel={t("modelSelector.selectedModel", {
-            model: browser.selectedModelLabel,
-          })}
-          testID="combined-model-selector"
-        >
-          {({ pressed, hovered }: PressableStateCallbackType & { hovered?: boolean }) =>
-            renderTrigger({
-              selectedModelLabel: browser.triggerLabel,
-              onPress: handleTriggerPress,
-              disabled,
-              isOpen,
-              hovered: Boolean(hovered),
-              pressed,
-            })
-          }
-        </Pressable>
-      ) : (
-        <ComboboxTrigger
-          ref={anchorRef}
-          collapsable={false}
-          disabled={disabled}
-          onPress={handleTriggerPress}
-          style={triggerStyle}
-          accessibilityRole="button"
-          accessibilityLabel={t("modelSelector.selectedModel", {
-            model: browser.selectedModelLabel,
-          })}
-          testID="combined-model-selector"
-          chevron={toolbar?.showCaret === false ? null : undefined}
-        >
-          {selectedProvider.trim().length > 0 ? (
-            <View style={toolbar?.glyphSize === 20 ? styles.toolbarGlyph20 : styles.toolbarGlyph16}>
-              <ModelProviderGlyph
-                provider={selectedProvider}
-                size={toolbar?.glyphSize ?? ICON_SIZE.md}
-              />
-            </View>
-          ) : null}
-          <Text style={styles.triggerText} numberOfLines={1} ellipsizeMode="tail">
-            {browser.triggerLabel}
-          </Text>
-        </ComboboxTrigger>
-      )}
+      <Pressable
+        ref={anchorRef}
+        collapsable={false}
+        disabled={disabled}
+        onPress={() => handleOpenChange(!isOpen)}
+        style={({ pressed, hovered }) => [
+          styles.trigger,
+          hovered && styles.triggerHovered,
+          (pressed || isOpen) && styles.triggerPressed,
+          disabled && styles.triggerDisabled,
+        ]}
+        accessibilityRole="button"
+        accessibilityLabel={`Select model (${selectedModelLabel})`}
+        testID="combined-model-selector"
+      >
+        <ProviderIcon size={theme.iconSize.md} color={theme.colors.foregroundMuted} />
+        <Text style={styles.triggerText}>{selectedModelLabel}</Text>
+        <ChevronDown size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
+      </Pressable>
       <Combobox
-        options={EMPTY_COMBOBOX_OPTIONS}
+        options={[]}
         value=""
-        onSelect={noop}
+        onSelect={() => {}}
         open={isOpen}
         onOpenChange={handleOpenChange}
         anchorRef={anchorRef}
-        desktopPlacement={desktopPlacement}
-        desktopMinWidth={desktopMinWidth}
-        desktopLockWidth
-        desktopFixedHeight={browser.desktopFixedHeight}
-        desktopChildrenScrollEnabled={false}
-        header={browser.header}
-        mobileChildrenScrollEnabled={!browser.isProviderView || !isNative}
-        mobileChildrenContentContainerStyle={styles.mobileBrowserContent}
+        desktopPlacement="top-start"
+        title="Select model"
       >
-        {selectorBody}
+        {view === "groups" ? (
+          <GroupsView
+            providerDefinitions={providerDefinitions}
+            allProviderModels={allProviderModels}
+            selectedProvider={selectedProvider}
+            selectedModel={selectedModel}
+            onSelect={handleSelect}
+            onDrillDown={(provider) => {
+              setView({ provider });
+              setSearchQuery("");
+            }}
+          />
+        ) : (
+          <DrillDownModelView
+            provider={view.provider}
+            providerDefinitions={providerDefinitions}
+            models={allProviderModels.get(view.provider) ?? []}
+            selectedProvider={selectedProvider}
+            selectedModel={selectedModel}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            onSelect={handleSelect}
+            onBack={() => {
+              setView("groups");
+              setSearchQuery("");
+            }}
+          />
+        )}
       </Combobox>
     </>
   );
 }
 
+function GroupsView({
+  providerDefinitions,
+  allProviderModels,
+  selectedProvider,
+  selectedModel,
+  onSelect,
+  onDrillDown,
+}: {
+  providerDefinitions: AgentProviderDefinition[];
+  allProviderModels: Map<string, AgentModelDefinition[]>;
+  selectedProvider: string;
+  selectedModel: string;
+  onSelect: (provider: string, modelId: string) => void;
+  onDrillDown: (provider: string) => void;
+}) {
+  const { theme } = useUnistyles();
+
+  return (
+    <View>
+      {providerDefinitions.map((def, index) => {
+        const models = allProviderModels.get(def.id) ?? [];
+        const isInline = models.length <= INLINE_MODEL_THRESHOLD;
+        const ProvIcon = getProviderIcon(def.id);
+
+        return (
+          <View key={def.id}>
+            {index > 0 ? <View style={styles.separator} /> : null}
+
+            {isInline ? (
+              <>
+                <View style={styles.sectionHeading}>
+                  <ProvIcon size={14} color={theme.colors.foregroundMuted} />
+                  <Text style={styles.sectionHeadingText}>{def.label}</Text>
+                </View>
+                {models.map((model) => (
+                  <ComboboxItem
+                    key={model.id}
+                    label={model.label}
+                    selected={model.id === selectedModel && def.id === selectedProvider}
+                    onPress={() => onSelect(def.id, model.id)}
+                  />
+                ))}
+              </>
+            ) : (
+              <Pressable
+                onPress={() => onDrillDown(def.id)}
+                style={({ pressed, hovered }) => [
+                  styles.drillDownRow,
+                  hovered && styles.drillDownRowHovered,
+                  pressed && styles.drillDownRowPressed,
+                ]}
+              >
+                <ProvIcon size={14} color={theme.colors.foregroundMuted} />
+                <Text style={styles.drillDownText}>{def.label}</Text>
+                <View style={styles.drillDownTrailing}>
+                  <Text style={styles.drillDownCount}>{models.length}</Text>
+                  <ChevronRight size={14} color={theme.colors.foregroundMuted} />
+                </View>
+              </Pressable>
+            )}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function DrillDownModelView({
+  provider,
+  providerDefinitions,
+  models,
+  selectedProvider,
+  selectedModel,
+  searchQuery,
+  onSearchChange,
+  onSelect,
+  onBack,
+}: {
+  provider: string;
+  providerDefinitions: AgentProviderDefinition[];
+  models: AgentModelDefinition[];
+  selectedProvider: string;
+  selectedModel: string;
+  searchQuery: string;
+  onSearchChange: (query: string) => void;
+  onSelect: (provider: string, modelId: string) => void;
+  onBack: () => void;
+}) {
+  const { theme } = useUnistyles();
+  const ProvIcon = getProviderIcon(provider);
+  const providerLabel = providerDefinitions.find((d) => d.id === provider)?.label ?? provider;
+
+  const filteredModels = useMemo(() => {
+    if (!searchQuery.trim()) return models;
+    const q = searchQuery.toLowerCase();
+    return models.filter(
+      (m) => m.label.toLowerCase().includes(q) || m.id.toLowerCase().includes(q),
+    );
+  }, [models, searchQuery]);
+
+  return (
+    <View>
+      <Pressable
+        onPress={onBack}
+        style={({ pressed, hovered }) => [
+          styles.backButton,
+          hovered && styles.backButtonHovered,
+          pressed && styles.backButtonPressed,
+        ]}
+      >
+        <ArrowLeft size={14} color={theme.colors.foregroundMuted} />
+        <ProvIcon size={14} color={theme.colors.foregroundMuted} />
+        <Text style={styles.backButtonText}>{providerLabel}</Text>
+      </Pressable>
+
+      <SearchInput
+        placeholder="Search models..."
+        value={searchQuery}
+        onChangeText={onSearchChange}
+        autoFocus={Platform.OS === "web"}
+      />
+
+      {filteredModels.map((model) => (
+        <ComboboxItem
+          key={model.id}
+          label={model.label}
+          description={model.description}
+          selected={model.id === selectedModel && provider === selectedProvider}
+          onPress={() => onSelect(provider, model.id)}
+        />
+      ))}
+
+      {filteredModels.length === 0 ? (
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyStateText}>No models match your search</Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create((theme) => ({
-  mobileBrowserContent: {
-    paddingHorizontal: 0,
-  },
   trigger: {
     height: 28,
-    minWidth: 0,
-    flexShrink: 1,
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "transparent",
@@ -300,16 +296,6 @@ const styles = StyleSheet.create((theme) => ({
   triggerHovered: {
     backgroundColor: theme.colors.surface2,
   },
-  toolbarGlyph16: {
-    width: 16,
-    height: 16,
-    flexShrink: 0,
-  },
-  toolbarGlyph20: {
-    width: 20,
-    height: 20,
-    flexShrink: 0,
-  },
   triggerPressed: {
     backgroundColor: theme.colors.surface0,
   },
@@ -317,33 +303,80 @@ const styles = StyleSheet.create((theme) => ({
     opacity: 0.5,
   },
   triggerText: {
-    minWidth: 0,
-    flexShrink: 1,
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.normal,
   },
-  customTriggerWrapper: {
-    paddingHorizontal: 0,
-    paddingVertical: 0,
-    height: "auto",
+  separator: {
+    height: 1,
+    backgroundColor: theme.colors.border,
+    marginVertical: theme.spacing[1],
   },
-  triggerFill: {
-    alignSelf: "stretch",
-    flexShrink: 0,
-    flexDirection: "column",
-    alignItems: "stretch",
-    backgroundColor: "transparent",
-    borderRadius: 0,
-  },
-  sheetLoadingState: {
-    minHeight: 160,
-    justifyContent: "center",
+  sectionHeading: {
+    flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[1],
   },
-  sheetLoadingText: {
+  sectionHeadingText: {
+    fontSize: theme.fontSize.xs,
+    fontWeight: theme.fontWeight.normal,
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.base,
+  },
+  drillDownRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+    minHeight: 36,
+  },
+  drillDownRowHovered: {
+    backgroundColor: theme.colors.surface1,
+  },
+  drillDownRowPressed: {
+    backgroundColor: theme.colors.surface2,
+  },
+  drillDownText: {
+    flex: 1,
+    fontSize: theme.fontSize.xs,
+    color: theme.colors.foregroundMuted,
+  },
+  drillDownTrailing: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+  },
+  drillDownCount: {
+    fontSize: theme.fontSize.xs,
+    color: theme.colors.foregroundMuted,
+  },
+  backButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+    borderBottomWidth: 1,
+    borderBottomColor: theme.colors.border,
+  },
+  backButtonHovered: {
+    backgroundColor: theme.colors.surface1,
+  },
+  backButtonPressed: {
+    backgroundColor: theme.colors.surface2,
+  },
+  backButtonText: {
+    fontSize: theme.fontSize.xs,
+    color: theme.colors.foregroundMuted,
+  },
+  emptyState: {
+    paddingVertical: theme.spacing[4],
+    alignItems: "center",
+  },
+  emptyStateText: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
   },
 }));

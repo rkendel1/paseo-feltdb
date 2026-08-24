@@ -1,4 +1,4 @@
-import { isElectronRuntime } from "@/desktop/host";
+import { isDesktop } from "@/desktop/host";
 import type {
   AudioEngine,
   AudioEngineCallbacks,
@@ -39,7 +39,7 @@ function resampleToPcm16(input: Float32Array, inputRate: number, outputRate: num
     const i0 = Math.floor(sourceIndex);
     const i1 = Math.min(input.length - 1, i0 + 1);
     const frac = sourceIndex - i0;
-    const sample = input[i0] * (1 - frac) + input[i1] * frac;
+    const sample = input[i0]! * (1 - frac) + input[i1]! * frac;
     output[i] = floatToInt16(sample);
   }
 
@@ -64,8 +64,8 @@ function pcm16LeToAudioBuffer(
   const audioBuffer = context.createBuffer(1, sampleCount, sampleRate);
   const channel = audioBuffer.getChannelData(0);
   for (let i = 0; i < sampleCount; i += 1) {
-    const lo = bytes[i * 2];
-    const hi = bytes[i * 2 + 1];
+    const lo = bytes[i * 2]!;
+    const hi = bytes[i * 2 + 1]!;
     let value = (hi << 8) | lo;
     if (value & 0x8000) {
       value -= 0x10000;
@@ -77,8 +77,8 @@ function pcm16LeToAudioBuffer(
 
 async function decodeAudioData(context: AudioContext, buffer: ArrayBuffer): Promise<AudioBuffer> {
   const maybePromise = context.decodeAudioData(buffer.slice(0));
-  if (maybePromise && typeof maybePromise.then === "function") {
-    return maybePromise;
+  if (maybePromise && typeof (maybePromise as Promise<AudioBuffer>).then === "function") {
+    return maybePromise as Promise<AudioBuffer>;
   }
   return await new Promise<AudioBuffer>((resolve, reject) => {
     context.decodeAudioData(buffer.slice(0), resolve, reject);
@@ -192,9 +192,9 @@ export function createAudioEngine(
         fn();
       };
 
-      source.addEventListener("ended", () => {
+      source.onended = () => {
         settle(() => resolve(durationSec));
-      });
+      };
 
       try {
         source.start();
@@ -289,7 +289,7 @@ export function createAudioEngine(
           : true;
       const currentOrigin =
         typeof window !== "undefined" && window.location ? window.location.origin : "unknown";
-      const isDesktopApp = isElectronRuntime();
+      const isDesktopApp = isDesktop();
 
       if (missingNavigator) {
         throw new Error("Microphone capture is not supported in this environment");
@@ -323,7 +323,7 @@ export function createAudioEngine(
           const input = event.inputBuffer.getChannelData(0);
           let sumSquares = 0;
           for (let i = 0; i < input.length; i += 1) {
-            const sample = input[i];
+            const sample = input[i]!;
             sumSquares += sample * sample;
           }
           const rms = Math.sqrt(sumSquares / Math.max(1, input.length));
@@ -384,6 +384,7 @@ export function createAudioEngine(
         const active = refs.activePlayback;
         refs.activePlayback = null;
         try {
+          active.source.onended = null;
           active.source.stop();
         } catch {
           // Ignore best-effort stop errors.

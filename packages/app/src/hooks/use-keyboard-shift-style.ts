@@ -1,81 +1,75 @@
-import { createElement, useEffect, useMemo, type ReactNode } from "react";
+import { useEffect } from "react";
 import { Platform } from "react-native";
 import type { ViewStyle } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import {
-  useGenericKeyboardHandler,
-  useReanimatedKeyboardAnimation,
-} from "react-native-keyboard-controller";
+import { useReanimatedKeyboardAnimation } from "react-native-keyboard-controller";
 import {
   useAnimatedStyle,
   useDerivedValue,
   useSharedValue,
   type SharedValue,
 } from "react-native-reanimated";
-import {
-  DEFAULT_IOS_KEYBOARD_INSET_MIN_HEIGHT,
-  resolveKeyboardShift,
-} from "@/hooks/keyboard-shift-policy";
-import { KeyboardShiftContext, useKeyboardShift } from "@/hooks/keyboard-shift-context";
+
+const DEFAULT_IOS_KEYBOARD_INSET_MIN_HEIGHT = 120;
+
+function resolveKeyboardShift(input: {
+  rawKeyboardHeight: number;
+  bottomInset: number;
+  isIos: boolean;
+  iosMinHeight: number;
+  enabled: boolean;
+}): number {
+  "worklet";
+
+  if (!input.enabled) {
+    return 0;
+  }
+
+  // iOS can report a small accessory/prediction bar height during touch focus.
+  // Treat that as non-keyboard so layouts don't "bounce" while interacting.
+  if (input.isIos && input.rawKeyboardHeight < input.iosMinHeight) {
+    return 0;
+  }
+
+  return Math.max(0, input.rawKeyboardHeight - input.bottomInset);
+}
 
 type KeyboardShiftMode = "translate" | "padding";
 
-export function KeyboardShiftProvider({ children }: { children: ReactNode }) {
+export function useKeyboardShiftStyle(input: {
+  mode: KeyboardShiftMode;
+  enabled?: boolean;
+  iosMinHeight?: number;
+}): {
+  shift: SharedValue<number>;
+  style: ReturnType<typeof useAnimatedStyle<ViewStyle>>;
+} {
   const insets = useSafeAreaInsets();
-  const { height: keyboardHeight, progress: keyboardProgress } = useReanimatedKeyboardAnimation();
+  const { height: keyboardHeight } = useReanimatedKeyboardAnimation();
   const bottomInset = useSharedValue(insets.bottom);
+  const enabled = input.enabled ?? true;
   const isIos = Platform.OS === "ios";
+  const iosMinHeight = input.iosMinHeight ?? DEFAULT_IOS_KEYBOARD_INSET_MIN_HEIGHT;
 
   useEffect(() => {
     bottomInset.value = insets.bottom;
   }, [bottomInset, insets.bottom]);
 
-  useGenericKeyboardHandler(
-    {
-      onEnd: (event) => {
-        "worklet";
-        if (isIos) {
-          keyboardHeight.value = -event.height;
-          keyboardProgress.value = event.progress;
-        }
-      },
-    },
-    [isIos, keyboardHeight, keyboardProgress],
-  );
-
   const shift = useDerivedValue(() => {
     "worklet";
+    const rawKeyboardHeight = Math.abs(keyboardHeight.value);
     return resolveKeyboardShift({
-      rawKeyboardHeight: Math.abs(keyboardHeight.value),
-      keyboardProgress: keyboardProgress.value,
+      rawKeyboardHeight,
       bottomInset: bottomInset.value,
       isIos,
-      iosMinHeight: DEFAULT_IOS_KEYBOARD_INSET_MIN_HEIGHT,
+      iosMinHeight,
+      enabled,
     });
   });
 
-  const value = useMemo(
-    () => ({
-      shift,
-      bottomInset,
-    }),
-    [bottomInset, shift],
-  );
-
-  return createElement(KeyboardShiftContext.Provider, { value }, children);
-}
-
-export function useKeyboardShiftStyle(input: { mode: KeyboardShiftMode; enabled?: boolean }): {
-  shift: SharedValue<number>;
-  style: ReturnType<typeof useAnimatedStyle<ViewStyle>>;
-} {
-  const { shift, bottomInset } = useKeyboardShift();
-  const mode = input.mode;
-  const enabled = input.enabled ?? true;
-
   const style = useAnimatedStyle<ViewStyle>(() => {
     "worklet";
-    if (mode === "padding") {
+    if (input.mode === "padding") {
       if (!enabled) {
         return { paddingBottom: 0 };
       }
@@ -83,8 +77,8 @@ export function useKeyboardShiftStyle(input: { mode: KeyboardShiftMode; enabled?
       return { paddingBottom: bottomInset.value + shift.value };
     }
 
-    return { transform: [{ translateY: enabled ? -shift.value : 0 }] };
-  }, [enabled, mode]);
+    return { transform: [{ translateY: -shift.value }] };
+  }, [input.mode]);
 
   return { shift, style };
 }

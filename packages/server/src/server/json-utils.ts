@@ -41,15 +41,15 @@ export function ensureValidJson<T>(value: T): T {
     }
 
     if (typeof current === "object") {
-      if (seen.has(current)) {
+      if (seen.has(current as object)) {
         throw new Error("Cannot serialize circular structure to JSON");
       }
-      seen.add(current);
+      seen.add(current as object);
       const obj: Record<string, JsonValue> = {};
       for (const [key, val] of Object.entries(current as Record<string, unknown>)) {
         obj[key] = sanitize(val);
       }
-      seen.delete(current);
+      seen.delete(current as object);
       return obj;
     }
 

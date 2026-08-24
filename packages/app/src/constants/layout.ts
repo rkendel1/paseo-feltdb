@@ -1,26 +1,18 @@
-import { useUnistyles } from "react-native-unistyles";
-import { isWeb } from "@/constants/platform";
+import { Platform } from "react-native";
+import { isDesktop, isDesktopMac } from "@/desktop/host";
 
 export const FOOTER_HEIGHT = 75;
 
 // Shared header inner height (excluding safe area insets and border)
 // Used by both agent header (ScreenHeader) and explorer sidebar header
 // This ensures both headers have the same visual height
-export const HEADER_INNER_HEIGHT = 36;
+export const HEADER_INNER_HEIGHT = 48;
 export const HEADER_INNER_HEIGHT_MOBILE = 56;
 export const WORKSPACE_SECONDARY_HEADER_HEIGHT = 36;
 export const HEADER_TOP_PADDING_MOBILE = 8;
 
 // Max width for chat content (stream view, input area, new agent form)
 export const MAX_CONTENT_WIDTH = 820;
-export const COMPACT_FORM_FACTOR_WIDTH = 500;
-
-// Settings uses the canonical desktop list + detail layout. Its sidebar and
-// detail target must fit together before it can share width with app navigation.
-export const SETTINGS_DESKTOP_SIDEBAR_WIDTH = 320;
-export const SETTINGS_DESKTOP_DETAIL_MIN_WIDTH = 400;
-export const SETTINGS_DESKTOP_SPLIT_MIN_WIDTH =
-  SETTINGS_DESKTOP_SIDEBAR_WIDTH + SETTINGS_DESKTOP_DETAIL_MIN_WIDTH;
 
 // Desktop app constants for macOS traffic light buttons
 // These buttons (close/minimize/maximize) overlay the top-left corner
@@ -31,23 +23,51 @@ export const DESKTOP_TRAFFIC_LIGHT_HEIGHT = 45;
 export const DESKTOP_WINDOW_CONTROLS_WIDTH = 140;
 export const DESKTOP_WINDOW_CONTROLS_HEIGHT = 48;
 
-export {
-  getIsElectron as getIsElectronRuntime,
-  getIsElectronMac as getIsElectronRuntimeMac,
-} from "./platform";
-
-/**
- * Reactive hook — re-renders the component when the breakpoint changes.
- * Always use this instead of reading UnistylesRuntime.breakpoint directly.
- */
-export function useIsCompactFormFactor(): boolean {
-  const { rt } = useUnistyles();
-  return rt.breakpoint === "xs" || rt.breakpoint === "sm";
+// Check if running in desktop app (any OS)
+function isDesktopEnvironment(): boolean {
+  if (Platform.OS !== "web") return false;
+  return isDesktop();
 }
 
-// SplitContainer relies on dnd-kit and DOM-backed accessibility helpers.
-// Keep that capability distinct from desktop-width layout so touch tablets
-// can use the desktop shell without entering web-only code paths.
-export function supportsDesktopPaneSplits(): boolean {
-  return isWeb;
+// Check if running in desktop host on macOS
+function isDesktopEnvironmentMac(): boolean {
+  if (Platform.OS !== "web") return false;
+  return isDesktopMac();
+}
+
+// Cached result - only cache true, keep checking if false (in case desktop globals load later)
+let _isDesktopMacCached: boolean | null = null;
+let _isDesktopCached: boolean | null = null;
+
+export function getIsDesktopMac(): boolean {
+  if (_isDesktopMacCached === true) {
+    return true;
+  }
+  const result = isDesktopEnvironmentMac();
+  if (result) {
+    _isDesktopMacCached = true;
+  }
+  return result;
+}
+
+export function getIsDesktop(): boolean {
+  if (_isDesktopCached === true) {
+    return true;
+  }
+  const result = isDesktopEnvironment();
+  if (result) {
+    _isDesktopCached = true;
+  }
+  return result;
+}
+
+// Get traffic light padding values (only non-zero on desktop macOS)
+export function getTrafficLightPadding(): { left: number; top: number } {
+  if (!getIsDesktopMac()) {
+    return { left: 0, top: 0 };
+  }
+  return {
+    left: DESKTOP_TRAFFIC_LIGHT_WIDTH,
+    top: DESKTOP_TRAFFIC_LIGHT_HEIGHT,
+  };
 }

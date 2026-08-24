@@ -72,15 +72,33 @@ async function getActualRecordingUri(createdAt: Date): Promise<string | null> {
   }
 }
 
+/**
+ * Convert audio file URI to Blob for daemon transport
+ * Returns a Blob-like object that works in React Native
+ */
 async function uriToBlob(uri: string): Promise<Blob> {
+  // Use expo-file-system to read the file
   const file = new File(uri);
   const base64 = await file.base64();
-  const binaryString = atob(base64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return new Blob([bytes], { type: "audio/m4a" });
+  const size = file.size;
+
+  // React Native doesn't support creating Blobs from binary data
+  // Create a Blob-like object that has the methods we need
+  const blobLike = {
+    type: "audio/m4a",
+    size: size,
+    arrayBuffer: async () => {
+      // Convert base64 to ArrayBuffer
+      const binaryString = atob(base64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      return bytes.buffer;
+    },
+  } as Blob;
+
+  return blobLike;
 }
 
 /**
@@ -145,17 +163,19 @@ export function useAudioRecorder(config?: AudioCaptureConfig) {
   // Monitor audio levels if metering is enabled
   // Use configRef to access the latest callback without recreating the effect
   useEffect(() => {
-    if (!configRef.current?.onAudioLevel || !recorderState.isRecording) {
-      return undefined;
-    }
+    const currentConfig = configRef.current;
+    if (!currentConfig?.onAudioLevel || !recorderState.isRecording) return;
 
     const interval = setInterval(() => {
       const metering = recorderState.metering;
       if (metering !== undefined && metering !== null) {
+        // Normalize metering value (typically ranges from -160 to 0 dB)
+        // Convert to 0-1 range where 0 is silence and 1 is loud
+        // We'll use -40 dB as the threshold for "loud"
         const normalized = Math.max(0, Math.min(1, (metering + 40) / 40));
         configRef.current?.onAudioLevel?.(normalized);
       }
-    }, 100);
+    }, 100); // Check every 100ms
 
     return () => clearInterval(interval);
   }, [recorderState.metering, recorderState.isRecording]);
@@ -197,20 +217,19 @@ export function useAudioRecorder(config?: AudioCaptureConfig) {
       await recorder.prepareToRecordAsync();
       attemptGuardRef.current.assertCurrent(attemptId);
 
-      recorder.record();
+      await recorder.record();
       attemptGuardRef.current.assertCurrent(attemptId);
-    } catch (error) {
+    } catch (error: any) {
       setRecordingStartTime(null);
       if (error instanceof AttemptCancelledError) {
         return;
       }
-      const message = error instanceof Error ? error.message : String(error);
-      if (message !== "Recording cancelled") {
+      if (error?.message !== "Recording cancelled") {
         console.error("[AudioRecorder] Failed to start recording:", error);
       }
-      throw new Error(`Failed to start audio recording: ${message}`, { cause: error });
+      throw new Error(`Failed to start audio recording: ${error.message}`);
     }
-  }, []);
+  }, [recordingOptions.sampleRate, recordingOptions.numberOfChannels, recordingOptions.bitRate]);
 
   const stop = useCallback(async (): Promise<Blob> => {
     const recorder = recorderRef.current;
@@ -271,11 +290,10 @@ export function useAudioRecorder(config?: AudioCaptureConfig) {
       })();
       startStopMutexRef.current = stopPromise;
       return await stopPromise;
-    } catch (error) {
+    } catch (error: any) {
       setRecordingStartTime(null);
       console.error("[AudioRecorder] Failed to stop recording:", error);
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to stop audio recording: ${message}`, { cause: error });
+      throw new Error(`Failed to stop audio recording: ${error.message}`);
     } finally {
       startStopMutexRef.current = null;
     }
@@ -288,7 +306,7 @@ export function useAudioRecorder(config?: AudioCaptureConfig) {
   }, []);
 
   const isRecording = useCallback(() => {
-    return recorderState.isRecording;
+    return Boolean(recorderState.isRecording);
   }, [recorderState.isRecording]);
 
   // Return stable object using useMemo

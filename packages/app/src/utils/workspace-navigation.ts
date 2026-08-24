@@ -1,21 +1,42 @@
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import { generateDraftId } from "@/stores/draft-keys";
 import {
-  prepareWorkspaceTab as prepareWorkspaceTabPure,
-  type PrepareWorkspaceTabInput,
-} from "./prepare-workspace-tab";
-import type { WorkspaceTabTarget } from "@/workspace-tabs/model";
+  buildWorkspaceTabPersistenceKey,
+  type WorkspaceTabTarget,
+} from "@/stores/workspace-tabs-store";
+import { buildHostWorkspaceRoute } from "@/utils/host-routes";
 
-export type { PrepareWorkspaceTabInput } from "./prepare-workspace-tab";
-
-function layoutStoreDeps() {
-  const store = useWorkspaceLayoutStore.getState();
-  return {
-    openTab: (input: { workspaceKey: string; target: WorkspaceTabTarget; intent: "reveal" }) =>
-      store.openTab(input),
-    pinAgent: store.pinAgent,
-  };
+interface PrepareWorkspaceTabInput {
+  serverId: string;
+  workspaceId: string;
+  target: WorkspaceTabTarget;
+  pin?: boolean;
 }
 
-export function prepareWorkspaceTab(input: PrepareWorkspaceTabInput): void {
-  prepareWorkspaceTabPure(input, layoutStoreDeps());
+function getPreparedTarget(target: WorkspaceTabTarget): WorkspaceTabTarget {
+  if (target.kind !== "draft" || target.draftId.trim() !== "new") {
+    return target;
+  }
+  return { kind: "draft", draftId: generateDraftId() };
+}
+
+export function prepareWorkspaceTab(input: PrepareWorkspaceTabInput): string {
+  const target = getPreparedTarget(input.target);
+  const key =
+    buildWorkspaceTabPersistenceKey({
+      serverId: input.serverId,
+      workspaceId: input.workspaceId,
+    }) ?? "";
+
+  const tabId = useWorkspaceLayoutStore.getState().openTab(key, target);
+
+  if (tabId) {
+    useWorkspaceLayoutStore.getState().focusTab(key, tabId);
+  }
+
+  if (input.pin && target.kind === "agent") {
+    useWorkspaceLayoutStore.getState().pinAgent(key, target.agentId);
+  }
+
+  return buildHostWorkspaceRoute(input.serverId, input.workspaceId);
 }

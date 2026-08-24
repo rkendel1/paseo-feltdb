@@ -1,31 +1,26 @@
-import { useCallback, useMemo, useRef, useState } from "react";
-import { useTranslation } from "react-i18next";
+import { useCallback, useState } from "react";
 import { Alert, Text, View } from "react-native";
-import { StyleSheet, useUnistyles } from "react-native-unistyles";
-import { useIsCompactFormFactor } from "@/constants/layout";
+import { StyleSheet, UnistylesRuntime, useUnistyles } from "react-native-unistyles";
 import { Link } from "lucide-react-native";
 import type { HostProfile } from "@/types/host-connection";
 import { useHosts, useHostMutations } from "@/runtime/host-runtime";
 import { decodeOfferFragmentPayload, normalizeHostPort } from "@/utils/daemon-endpoints";
 import { connectToDaemon } from "@/utils/test-daemon-connection";
-import { ConnectionOfferSchema } from "@getpaseo/protocol/connection-offer";
-import { AdaptiveModalSheet, AdaptiveTextInput, type SheetHeader } from "./adaptive-modal-sheet";
+import { ConnectionOfferSchema } from "@server/shared/connection-offer";
+import { AdaptiveModalSheet, AdaptiveTextInput } from "./adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
-import type { EditingTextInputHandle } from "@/components/ui/text-input";
-
-const FLEX_ONE_STYLE = { flex: 1 } as const;
 
 const styles = StyleSheet.create((theme) => ({
   helper: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.sm,
   },
   field: {
     gap: theme.spacing[2],
   },
   label: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.medium,
   },
   input: {
@@ -39,7 +34,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   error: {
     color: theme.colors.destructive,
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.sm,
   },
   actions: {
     flexDirection: "row",
@@ -51,6 +46,7 @@ const styles = StyleSheet.create((theme) => ({
 export interface PairLinkModalProps {
   visible: boolean;
   onClose: () => void;
+  targetServerId?: string;
   onCancel?: () => void;
   onSaved?: (result: {
     profile: HostProfile;
@@ -60,51 +56,45 @@ export interface PairLinkModalProps {
   }) => void;
 }
 
-export function PairLinkModal({ visible, onClose, onCancel, onSaved }: PairLinkModalProps) {
+export function PairLinkModal({
+  visible,
+  onClose,
+  onCancel,
+  onSaved,
+  targetServerId,
+}: PairLinkModalProps) {
   const { theme } = useUnistyles();
-  const { t } = useTranslation();
   const daemons = useHosts();
   const { upsertConnectionFromOfferUrl: upsertDaemonFromOfferUrl } = useHostMutations();
-  const isMobile = useIsCompactFormFactor();
+  const isMobile = UnistylesRuntime.breakpoint === "xs" || UnistylesRuntime.breakpoint === "sm";
 
-  const offerUrlRef = useRef("");
-  const inputRef = useRef<EditingTextInputHandle>(null);
+  const [offerUrl, setOfferUrl] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
 
-  const clearInput = useCallback(() => {
-    offerUrlRef.current = "";
-    inputRef.current?.replaceText("");
-  }, []);
-
-  const pairIcon = useMemo(
-    () => <Link size={16} color={theme.colors.accentForeground} />,
-    [theme.colors.accentForeground],
-  );
-
   const handleClose = useCallback(() => {
     if (isSaving) return;
-    clearInput();
+    setOfferUrl("");
     setErrorMessage("");
     onClose();
-  }, [isSaving, clearInput, onClose]);
+  }, [isSaving, onClose]);
 
   const handleCancel = useCallback(() => {
     if (isSaving) return;
-    clearInput();
+    setOfferUrl("");
     setErrorMessage("");
     (onCancel ?? onClose)();
-  }, [isSaving, clearInput, onCancel, onClose]);
+  }, [isSaving, onCancel, onClose]);
 
   const handleSave = useCallback(async () => {
     if (isSaving) return;
-    const raw = offerUrlRef.current.trim();
+    const raw = offerUrl.trim();
     if (!raw) {
-      setErrorMessage(t("pairing.link.errors.required"));
+      setErrorMessage("Paste a pairing link (…/#offer=...)");
       return;
     }
     if (!raw.includes("#offer=")) {
-      setErrorMessage(t("pairing.link.errors.missingOffer"));
+      setErrorMessage("Link must include #offer=...");
       return;
     }
 
@@ -113,21 +103,30 @@ export function PairLinkModal({ visible, onClose, onCancel, onSaved }: PairLinkM
         const idx = raw.indexOf("#offer=");
         const encoded = raw.slice(idx + "#offer=".length).trim();
         if (!encoded) {
-          throw new Error(t("pairing.link.errors.emptyOffer"));
+          throw new Error("Offer payload is empty");
         }
         const payload = decodeOfferFragmentPayload(encoded);
         return ConnectionOfferSchema.parse(payload);
       } catch (error) {
-        const message = error instanceof Error ? error.message : t("pairing.link.errors.invalid");
+        const message = error instanceof Error ? error.message : "Invalid pairing link";
         setErrorMessage(message);
         if (!isMobile) {
-          Alert.alert(t("pairing.link.alert.failedTitle"), message);
+          Alert.alert("Pairing failed", message);
         }
         return null;
       }
     })();
 
     if (!parsedOffer) {
+      return;
+    }
+
+    if (targetServerId && parsedOffer.serverId !== targetServerId) {
+      const message = `That pairing link belongs to ${parsedOffer.serverId}, not ${targetServerId}.`;
+      setErrorMessage(message);
+      if (!isMobile) {
+        Alert.alert("Wrong daemon", message);
+      }
       return;
     }
 
@@ -140,7 +139,6 @@ export function PairLinkModal({ visible, onClose, onCancel, onSaved }: PairLinkM
           id: "probe",
           type: "relay",
           relayEndpoint: normalizeHostPort(parsedOffer.relay.endpoint),
-          useTls: parsedOffer.relay.useTls,
           daemonPublicKeyB64: parsedOffer.daemonPublicKeyB64,
         },
         { serverId: parsedOffer.serverId },
@@ -148,48 +146,46 @@ export function PairLinkModal({ visible, onClose, onCancel, onSaved }: PairLinkM
       await client.close().catch(() => undefined);
 
       const isNewHost = !daemons.some((daemon) => daemon.serverId === parsedOffer.serverId);
-      const profile = await upsertDaemonFromOfferUrl(raw, hostname ?? undefined);
+      const profile = await upsertDaemonFromOfferUrl(raw);
       onSaved?.({ profile, serverId: parsedOffer.serverId, hostname, isNewHost });
       handleClose();
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : t("pairing.link.errors.unableToPair");
+      const message = error instanceof Error ? error.message : "Unable to pair host";
       setErrorMessage(message);
       if (!isMobile) {
-        Alert.alert(t("pairing.link.alert.failedTitle"), message);
+        Alert.alert("Pairing failed", message);
       }
     } finally {
       setIsSaving(false);
     }
-  }, [daemons, handleClose, isMobile, isSaving, onSaved, t, upsertDaemonFromOfferUrl]);
-
-  const handleChangeOfferUrl = useCallback((next: string) => {
-    offerUrlRef.current = next;
-  }, []);
-
-  const handleSavePress = useCallback(() => {
-    void handleSave();
-  }, [handleSave]);
-
-  const header = useMemo<SheetHeader>(() => ({ title: t("pairing.link.title") }), [t]);
+  }, [
+    daemons,
+    handleClose,
+    isMobile,
+    isSaving,
+    offerUrl,
+    onSaved,
+    targetServerId,
+    upsertDaemonFromOfferUrl,
+  ]);
 
   return (
     <AdaptiveModalSheet
-      header={header}
+      title="Paste pairing link"
       visible={visible}
       onClose={handleClose}
       testID="pair-link-modal"
     >
-      <Text style={styles.helper}>{t("pairing.link.helper")}</Text>
+      <Text style={styles.helper}>Paste the pairing link from your server.</Text>
 
       <View style={styles.field}>
-        <Text style={styles.label}>{t("pairing.link.label")}</Text>
+        <Text style={styles.label}>Pairing link</Text>
         <AdaptiveTextInput
-          ref={inputRef}
           testID="pair-link-input"
           nativeID="pair-link-input"
-          accessibilityLabel={t("pairing.link.label")}
-          onChangeText={handleChangeOfferUrl}
+          accessibilityLabel="pair-link-input"
+          value={offerUrl}
+          onChangeText={setOfferUrl}
           placeholder="https://app.paseo.sh/#offer=..."
           placeholderTextColor={theme.colors.foregroundMuted}
           style={styles.input}
@@ -203,27 +199,27 @@ export function PairLinkModal({ visible, onClose, onCancel, onSaved }: PairLinkM
 
       <View style={styles.actions}>
         <Button
-          style={FLEX_ONE_STYLE}
+          style={{ flex: 1 }}
           variant="secondary"
           onPress={handleCancel}
           disabled={isSaving}
           testID="pair-link-cancel"
           accessibilityRole="button"
-          accessibilityLabel={t("pairing.link.actions.cancel")}
+          accessibilityLabel="Cancel"
         >
-          {t("pairing.link.actions.cancel")}
+          Cancel
         </Button>
         <Button
-          style={FLEX_ONE_STYLE}
+          style={{ flex: 1 }}
           variant="default"
-          onPress={handleSavePress}
+          onPress={() => void handleSave()}
           disabled={isSaving}
           testID="pair-link-submit"
           accessibilityRole="button"
-          accessibilityLabel={t("pairing.link.actions.pair")}
-          leftIcon={pairIcon}
+          accessibilityLabel="Pair"
+          leftIcon={<Link size={16} color={theme.colors.palette.white} />}
         >
-          {isSaving ? t("pairing.link.actions.pairing") : t("pairing.link.actions.pair")}
+          {isSaving ? "Pairing..." : "Pair"}
         </Button>
       </View>
     </AdaptiveModalSheet>

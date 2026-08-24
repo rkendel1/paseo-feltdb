@@ -6,7 +6,6 @@ build/
 dist/
 .next/
 out/
-result
 
 # Environment variables
 .env
@@ -14,8 +13,6 @@ result
 .env.local
 .env.test.local
 .env*.local
-.dev.vars
-**/.dev.vars
 
 # Logs
 *.log
@@ -64,11 +61,9 @@ CLAUDE.local.md
 
 .debug.conversations/
 .debug/
-.dev/
 .paseo/
 .wrangler/
 **/.wrangler/
-**/.tanstack/
 
 # Local agent/tooling artifacts (do not commit)
 PLAN.md
@@ -84,9 +79,7 @@ valknut-report.json/
 .plans/
 packages/server/src/server/fixtures/dictation/dictation-debug-largest.wav
 packages/server/src/server/fixtures/dictation/dictation-debug-largest.transcript.txt
-packages/protocol/src/generated/validation/*.aot.ts
 
 /artifacts
 packages/desktop/.cache/
 packages/desktop/src-tauri/resources/managed-runtime/
-app.json

@@ -1,6 +1,5 @@
 import path from "path";
 import type { Command } from "commander";
-import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
 import type {
   CommandOptions,
@@ -40,14 +39,6 @@ export async function runArchiveCommand(
   options: WorktreeArchiveOptions,
   _command: Command,
 ): Promise<WorktreeArchiveCommandResult> {
-  return runArchiveCommandWithDeps(nameArg, options, { connectToDaemon });
-}
-
-export async function runArchiveCommandWithDeps(
-  nameArg: string,
-  options: WorktreeArchiveOptions,
-  deps: { connectToDaemon: typeof connectToDaemon },
-): Promise<WorktreeArchiveCommandResult> {
   const host = getDaemonHost({ host: options.host });
 
   // Validate arguments
@@ -60,9 +51,9 @@ export async function runArchiveCommandWithDeps(
     throw error;
   }
 
-  let client: DaemonClient;
+  let client;
   try {
-    client = await deps.connectToDaemon({ host: options.host });
+    client = await connectToDaemon({ host: options.host });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const error: CommandError = {
@@ -100,11 +91,9 @@ export async function runArchiveCommandWithDeps(
       throw error;
     }
 
-    // Archive the worktree. scope:"worktree" archives every active workspace on
-    // the directory and then removes the directory (Paseo-owned gated).
+    // Archive the worktree
     const response = await client.archivePaseoWorktree({
       worktreePath: worktree.worktreePath,
-      scope: "worktree",
     });
 
     await client.close();

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createNodeEntrypointInvocation,
+  parseCliPassthroughArgsFromArgv,
   type NodeEntrypointSpec,
 } from "./node-entrypoint-launcher";
 
@@ -10,25 +11,85 @@ const CLI_ENTRYPOINT: NodeEntrypointSpec = {
 };
 
 describe("node-entrypoint-launcher", () => {
+  describe("parseCliPassthroughArgsFromArgv", () => {
+    it("returns null when no CLI args are provided", () => {
+      expect(
+        parseCliPassthroughArgsFromArgv({
+          argv: ["/Applications/Paseo.app/Contents/MacOS/Paseo"],
+          isDefaultApp: false,
+          forceCli: false,
+        }),
+      ).toBeNull();
+    });
+
+    it("ignores macOS GUI launch arguments", () => {
+      expect(
+        parseCliPassthroughArgsFromArgv({
+          argv: ["/Applications/Paseo.app/Contents/MacOS/Paseo", "-psn_0_12345"],
+          isDefaultApp: false,
+          forceCli: false,
+        }),
+      ).toBeNull();
+    });
+
+    it("ignores --no-sandbox injected by Linux wrapper", () => {
+      expect(
+        parseCliPassthroughArgsFromArgv({
+          argv: ["/usr/bin/Paseo", "--no-sandbox", "status"],
+          isDefaultApp: false,
+          forceCli: false,
+        }),
+      ).toEqual(["status"]);
+    });
+
+    it("returns null when only --no-sandbox is present", () => {
+      expect(
+        parseCliPassthroughArgsFromArgv({
+          argv: ["/usr/bin/Paseo", "--no-sandbox"],
+          isDefaultApp: false,
+          forceCli: false,
+        }),
+      ).toBeNull();
+    });
+
+    it("preserves CLI flags for direct app invocations", () => {
+      expect(
+        parseCliPassthroughArgsFromArgv({
+          argv: ["/Applications/Paseo.app/Contents/MacOS/Paseo", "--version"],
+          isDefaultApp: false,
+          forceCli: false,
+        }),
+      ).toEqual(["--version"]);
+    });
+
+    it("forces CLI mode for shim launches even without args", () => {
+      expect(
+        parseCliPassthroughArgsFromArgv({
+          argv: ["/Applications/Paseo.app/Contents/MacOS/Paseo"],
+          isDefaultApp: false,
+          forceCli: true,
+        }),
+      ).toEqual([]);
+    });
+  });
+
   describe("createNodeEntrypointInvocation", () => {
     it("uses the packaged runner when the desktop app is packaged", () => {
       expect(
         createNodeEntrypointInvocation({
           execPath: "/Applications/Paseo.app/Contents/MacOS/Paseo",
           isPackaged: true,
-          packagedRunnerPath:
-            "/Applications/Paseo.app/Contents/Resources/app.asar/dist/daemon/node-entrypoint-runner.js",
+          packagedRunnerPath: "/Applications/Paseo.app/Contents/Resources/app.asar/dist/daemon/node-entrypoint-runner.js",
           entrypoint: CLI_ENTRYPOINT,
-          argvMode: "node-script",
+          argvMode: "bare",
           args: ["ls", "--json"],
           baseEnv: { PATH: "/usr/bin" },
         }),
       ).toEqual({
         command: "/Applications/Paseo.app/Contents/MacOS/Paseo",
         args: [
-          "--disable-warning=DEP0040",
           "/Applications/Paseo.app/Contents/Resources/app.asar/dist/daemon/node-entrypoint-runner.js",
-          "node-script",
+          "bare",
           "/tmp/paseo-cli.js",
           "ls",
           "--json",
@@ -36,7 +97,6 @@ describe("node-entrypoint-launcher", () => {
         env: {
           PATH: "/usr/bin",
           ELECTRON_RUN_AS_NODE: "1",
-          PASEO_NODE_ENV: "production",
         },
       });
     });
@@ -48,9 +108,9 @@ describe("node-entrypoint-launcher", () => {
           isPackaged: false,
           packagedRunnerPath: null,
           entrypoint: CLI_ENTRYPOINT,
-          argvMode: "node-script",
+          argvMode: "bare",
           args: ["ls"],
-          baseEnv: { PATH: "/usr/bin", PASEO_NODE_ENV: "production" },
+          baseEnv: { PATH: "/usr/bin" },
         }),
       ).toEqual({
         command: "/opt/homebrew/bin/electron",
@@ -58,28 +118,7 @@ describe("node-entrypoint-launcher", () => {
         env: {
           PATH: "/usr/bin",
           ELECTRON_RUN_AS_NODE: "1",
-          PASEO_NODE_ENV: "development",
         },
-      });
-    });
-
-    it("forces packaged launches to production even when NODE_ENV is inherited as development", () => {
-      expect(
-        createNodeEntrypointInvocation({
-          execPath: "/Applications/Paseo.app/Contents/MacOS/Paseo",
-          isPackaged: true,
-          packagedRunnerPath:
-            "/Applications/Paseo.app/Contents/Resources/app.asar/dist/daemon/node-entrypoint-runner.js",
-          entrypoint: CLI_ENTRYPOINT,
-          argvMode: "node-script",
-          args: [],
-          baseEnv: { PATH: "/usr/bin", NODE_ENV: "development" },
-        }).env,
-      ).toMatchObject({
-        PATH: "/usr/bin",
-        ELECTRON_RUN_AS_NODE: "1",
-        NODE_ENV: "development",
-        PASEO_NODE_ENV: "production",
       });
     });
 
@@ -88,8 +127,7 @@ describe("node-entrypoint-launcher", () => {
         createNodeEntrypointInvocation({
           execPath: "/Applications/Paseo.app/Contents/MacOS/Paseo",
           isPackaged: true,
-          packagedRunnerPath:
-            "/Applications/Paseo.app/Contents/Resources/app.asar/dist/daemon/node-entrypoint-runner.js",
+          packagedRunnerPath: "/Applications/Paseo.app/Contents/Resources/app.asar/dist/daemon/node-entrypoint-runner.js",
           entrypoint: CLI_ENTRYPOINT,
           argvMode: "node-script",
           args: ["--dev"],
@@ -98,7 +136,6 @@ describe("node-entrypoint-launcher", () => {
       ).toEqual({
         command: "/Applications/Paseo.app/Contents/MacOS/Paseo",
         args: [
-          "--disable-warning=DEP0040",
           "/Applications/Paseo.app/Contents/Resources/app.asar/dist/daemon/node-entrypoint-runner.js",
           "node-script",
           "/tmp/paseo-cli.js",
@@ -107,7 +144,6 @@ describe("node-entrypoint-launcher", () => {
         env: {
           PATH: "/usr/bin",
           ELECTRON_RUN_AS_NODE: "1",
-          PASEO_NODE_ENV: "production",
         },
       });
     });

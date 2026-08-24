@@ -1,23 +1,39 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useTranslation } from "react-i18next";
-import { Alert, Pressable, Text, View } from "react-native";
-import { useLocalSearchParams, useRouter, type Href } from "expo-router";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Alert, Platform, Pressable, Text, View } from "react-native";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import type { BarcodeScanningResult, BarcodeSettings } from "expo-camera";
-import { useHostMutations } from "@/runtime/host-runtime";
+import type { BarcodeScanningResult } from "expo-camera";
+import { useHosts, useHostMutations } from "@/runtime/host-runtime";
+import { useSessionStore } from "@/stores/session-store";
+import { NameHostModal } from "@/components/name-host-modal";
 import { decodeOfferFragmentPayload, normalizeHostPort } from "@/utils/daemon-endpoints";
 import { connectToDaemon } from "@/utils/test-daemon-connection";
-import { ConnectionOfferSchema } from "@getpaseo/protocol/connection-offer";
-import { buildHostRootRoute, buildSettingsHostRoute } from "@/utils/host-routes";
-import { isWeb } from "@/constants/platform";
-import { BackHeader } from "@/components/headers/back-header";
+import { ConnectionOfferSchema } from "@server/shared/connection-offer";
+import { buildHostRootRoute, buildHostSettingsRoute } from "@/utils/host-routes";
 
 const styles = StyleSheet.create((theme) => ({
   container: {
     flex: 1,
     backgroundColor: theme.colors.surface0,
+  },
+  header: {
+    paddingHorizontal: theme.spacing[6],
+    paddingBottom: theme.spacing[4],
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  headerTitle: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.lg,
+    fontWeight: theme.fontWeight.semibold,
+  },
+  headerButtonText: {
+    color: theme.colors.palette.blue[400],
+    fontSize: theme.fontSize.base,
+    fontWeight: theme.fontWeight.medium,
   },
   body: {
     flex: 1,
@@ -45,7 +61,7 @@ const styles = StyleSheet.create((theme) => ({
     position: "absolute",
     width: 36,
     height: 36,
-    borderColor: theme.colors.accent,
+    borderColor: theme.colors.palette.blue[400],
   },
   cornerTL: {
     left: 0,
@@ -90,7 +106,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   permissionTitle: {
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.lg,
     fontWeight: theme.fontWeight.semibold,
   },
   permissionBody: {
@@ -121,46 +137,94 @@ function extractOfferUrlFromScan(result: BarcodeScanningResult): string | null {
 
 export default function PairScanScreen() {
   const { theme } = useUnistyles();
-  const { t } = useTranslation();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const params = useLocalSearchParams<{
     source?: string;
+    sourceServerId?: string;
+    targetServerId?: string;
   }>();
   const source = typeof params.source === "string" ? params.source : "settings";
-  const { upsertConnectionFromOfferUrl: upsertDaemonFromOfferUrl } = useHostMutations();
+  const sourceServerId = typeof params.sourceServerId === "string" ? params.sourceServerId : null;
+  const targetServerId = typeof params.targetServerId === "string" ? params.targetServerId : null;
+  const daemons = useHosts();
+  const { upsertConnectionFromOfferUrl: upsertDaemonFromOfferUrl, renameHost } = useHostMutations();
 
   const [permission, requestPermission] = useCameraPermissions();
   const [isPairing, setIsPairing] = useState(false);
   const lastScannedRef = useRef<string | null>(null);
+  const [pendingNameHost, setPendingNameHost] = useState<{
+    serverId: string;
+    hostname: string | null;
+  } | null>(null);
+  const pendingNameHostname = useSessionStore(
+    useCallback(
+      (state) => {
+        if (!pendingNameHost) return null;
+        return (
+          state.sessions[pendingNameHost.serverId]?.serverInfo?.hostname ??
+          pendingNameHost.hostname ??
+          null
+        );
+      },
+      [pendingNameHost],
+    ),
+  );
 
-  const navigateToPairedHost = useCallback(
+  const returnToSource = useCallback(
     (serverId: string) => {
       if (source === "onboarding") {
-        router.replace(buildHostRootRoute(serverId));
+        router.replace(buildHostRootRoute(serverId) as any);
         return;
       }
-      router.replace(buildSettingsHostRoute(serverId));
+      if (source === "editHost" && targetServerId) {
+        const settingsServerId = sourceServerId ?? targetServerId;
+        router.replace({
+          pathname: buildHostSettingsRoute(settingsServerId),
+          params: { editHost: targetServerId },
+        } as any);
+        return;
+      }
+      // settings (default): return to previous screen
+      try {
+        router.back();
+      } catch {
+        const settingsServerId = sourceServerId ?? serverId;
+        router.replace(buildHostSettingsRoute(settingsServerId) as any);
+      }
     },
-    [router, source],
+    [router, source, sourceServerId, targetServerId],
   );
 
   const closeToSource = useCallback(() => {
+    if (source === "editHost" && targetServerId) {
+      const settingsServerId = sourceServerId ?? targetServerId;
+      router.replace({
+        pathname: buildHostSettingsRoute(settingsServerId),
+        params: { editHost: targetServerId },
+      } as any);
+      return;
+    }
     try {
       router.back();
     } catch {
-      router.replace("/" as Href);
+      if (sourceServerId) {
+        router.replace(buildHostSettingsRoute(sourceServerId) as any);
+        return;
+      }
+      router.replace("/" as any);
     }
-  }, [router]);
+  }, [router, source, sourceServerId, targetServerId]);
 
   useEffect(() => {
-    if (isWeb) return;
+    if (Platform.OS === "web") return;
     if (permission && permission.granted) return;
     void requestPermission().catch(() => undefined);
   }, [permission, requestPermission]);
 
   const handleScan = useCallback(
     async (result: BarcodeScanningResult) => {
+      if (pendingNameHost) return;
       if (isPairing) return;
       const offerUrl = extractOfferUrlFromScan(result);
       if (!offerUrl) return;
@@ -175,56 +239,63 @@ export default function PairScanScreen() {
         const offerPayload = decodeOfferFragmentPayload(encoded);
         const offer = ConnectionOfferSchema.parse(offerPayload);
 
-        const { client, hostname } = await connectToDaemon(
+        if (targetServerId && offer.serverId !== targetServerId) {
+          lastScannedRef.current = null;
+          Alert.alert(
+            "Wrong daemon",
+            `That QR code belongs to ${offer.serverId}, not ${targetServerId}.`,
+          );
+          return;
+        }
+
+        const { client } = await connectToDaemon(
           {
             id: "probe",
             type: "relay",
             relayEndpoint: normalizeHostPort(offer.relay.endpoint),
-            useTls: offer.relay.useTls,
             daemonPublicKeyB64: offer.daemonPublicKeyB64,
           },
           { serverId: offer.serverId },
         );
         await client.close().catch(() => undefined);
 
-        const profile = await upsertDaemonFromOfferUrl(offerUrl, hostname ?? undefined);
+        const isNewHost = !daemons.some((daemon) => daemon.serverId === offer.serverId);
+        const profile = await upsertDaemonFromOfferUrl(offerUrl);
 
-        navigateToPairedHost(profile.serverId);
+        if (isNewHost) {
+          setPendingNameHost({ serverId: profile.serverId, hostname: null });
+          return;
+        }
+
+        returnToSource(profile.serverId);
       } catch (error) {
         lastScannedRef.current = null;
-        const message = error instanceof Error ? error.message : t("pairing.scan.unableToPair");
-        Alert.alert(t("pairing.scan.errorTitle"), message);
+        const message = error instanceof Error ? error.message : "Unable to pair host";
+        Alert.alert("Error", message);
       } finally {
         setIsPairing(false);
       }
     },
-    [isPairing, navigateToPairedHost, t, upsertDaemonFromOfferUrl],
+    [daemons, isPairing, pendingNameHost, returnToSource, targetServerId, upsertDaemonFromOfferUrl],
   );
 
-  const handleRouterBack = useCallback(() => router.back(), [router]);
-  const handleRequestPermission = useCallback(() => {
-    void requestPermission();
-  }, [requestPermission]);
-
-  const bodyStyle = useMemo(
-    () => [styles.body, { paddingBottom: insets.bottom + theme.spacing[6] }],
-    [insets.bottom, theme.spacing],
-  );
-  const helperTextStyle = useMemo(
-    () => [styles.helperText, { color: theme.colors.foreground }],
-    [theme.colors.foreground],
-  );
-
-  if (isWeb) {
+  if (Platform.OS === "web") {
     return (
       <View style={styles.container}>
-        <BackHeader title={t("pairing.scan.title")} onBack={handleRouterBack} />
-        <View style={bodyStyle}>
+        <View style={[styles.header, { paddingTop: insets.top + theme.spacing[2] }]}>
+          <Text style={styles.headerTitle}>Scan QR</Text>
+          <Pressable onPress={() => router.back()}>
+            <Text style={styles.headerButtonText}>Close</Text>
+          </Pressable>
+        </View>
+        <View style={[styles.body, { paddingBottom: insets.bottom + theme.spacing[6] }]}>
           <View style={styles.permissionCard}>
-            <Text style={styles.permissionTitle}>{t("pairing.scan.webUnavailableTitle")}</Text>
-            <Text style={styles.permissionBody}>{t("pairing.scan.webUnavailableBody")}</Text>
+            <Text style={styles.permissionTitle}>Not available on web</Text>
+            <Text style={styles.permissionBody}>
+              QR scanning isn't supported in the web build. Use "Paste link" instead.
+            </Text>
             <Pressable style={styles.permissionButton} onPress={closeToSource}>
-              <Text style={styles.permissionButtonText}>{t("pairing.scan.backToSettings")}</Text>
+              <Text style={styles.permissionButtonText}>Back to Settings</Text>
             </Pressable>
           </View>
         </View>
@@ -236,15 +307,41 @@ export default function PairScanScreen() {
 
   return (
     <View style={styles.container}>
-      <BackHeader title={t("pairing.scan.title")} onBack={closeToSource} />
+      {pendingNameHost ? (
+        <NameHostModal
+          visible
+          serverId={pendingNameHost.serverId}
+          hostname={pendingNameHostname}
+          onSkip={() => {
+            const serverId = pendingNameHost.serverId;
+            setPendingNameHost(null);
+            returnToSource(serverId);
+          }}
+          onSave={(label) => {
+            const serverId = pendingNameHost.serverId;
+            void renameHost(serverId, label).finally(() => {
+              setPendingNameHost(null);
+              returnToSource(serverId);
+            });
+          }}
+        />
+      ) : null}
+      <View style={[styles.header, { paddingTop: insets.top + theme.spacing[2] }]}>
+        <Text style={styles.headerTitle}>Scan QR</Text>
+        <Pressable onPress={closeToSource}>
+          <Text style={styles.headerButtonText}>Close</Text>
+        </Pressable>
+      </View>
 
-      <View style={bodyStyle}>
+      <View style={[styles.body, { paddingBottom: insets.bottom + theme.spacing[6] }]}>
         {!granted ? (
           <View style={styles.permissionCard}>
-            <Text style={styles.permissionTitle}>{t("pairing.scan.cameraPermissionTitle")}</Text>
-            <Text style={styles.permissionBody}>{t("pairing.scan.cameraPermissionBody")}</Text>
-            <Pressable style={styles.permissionButton} onPress={handleRequestPermission}>
-              <Text style={styles.permissionButtonText}>{t("pairing.scan.grantPermission")}</Text>
+            <Text style={styles.permissionTitle}>Camera permission</Text>
+            <Text style={styles.permissionBody}>
+              Allow camera access to scan the pairing QR code from your daemon.
+            </Text>
+            <Pressable style={styles.permissionButton} onPress={() => void requestPermission()}>
+              <Text style={styles.permissionButtonText}>Grant permission</Text>
             </Pressable>
           </View>
         ) : (
@@ -252,7 +349,7 @@ export default function PairScanScreen() {
             <CameraView
               style={styles.camera}
               facing="back"
-              barcodeScannerSettings={BARCODE_SCANNER_SETTINGS}
+              barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
               onBarcodeScanned={handleScan}
             />
             <View style={styles.overlay} pointerEvents="none">
@@ -262,7 +359,12 @@ export default function PairScanScreen() {
                 <View style={[styles.corner, styles.cornerBL]} />
                 <View style={[styles.corner, styles.cornerBR]} />
               </View>
-              {isPairing ? <Text style={helperTextStyle}>{t("pairing.scan.pairing")}</Text> : null}
+              <Text style={styles.helperText}>Point your camera at the pairing QR code.</Text>
+              {isPairing ? (
+                <Text style={[styles.helperText, { color: theme.colors.foreground }]}>
+                  Pairing…
+                </Text>
+              ) : null}
             </View>
           </View>
         )}
@@ -270,5 +372,3 @@ export default function PairScanScreen() {
     </View>
   );
 }
-
-const BARCODE_SCANNER_SETTINGS: BarcodeSettings = { barcodeTypes: ["qr"] };

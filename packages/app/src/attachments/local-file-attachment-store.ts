@@ -1,4 +1,4 @@
-import type { AttachmentFileSystem } from "@/attachments/attachment-file-system";
+import * as FileSystem from "expo-file-system/legacy";
 import {
   type AttachmentStore,
   type AttachmentStorageType,
@@ -6,6 +6,7 @@ import {
   type SaveAttachmentInput,
 } from "@/attachments/types";
 import {
+  blobToBase64,
   fileUriToPath,
   generateAttachmentId,
   getFileExtensionFromName,
@@ -36,25 +37,15 @@ function extensionForAttachment(params: { fileName?: string | null; mimeType: st
   return IMAGE_EXTENSION_BY_MIME_TYPE[params.mimeType] ?? ".img";
 }
 
-async function ensureDirectory(fileSystem: AttachmentFileSystem, uri: string): Promise<void> {
-  const info = await fileSystem.getInfo(uri);
+async function ensureDirectory(uri: string): Promise<void> {
+  const info = await FileSystem.getInfoAsync(uri);
   if (info.exists && info.isDirectory) {
     return;
   }
-  await fileSystem.makeDirectory(uri, { intermediates: true });
-}
-
-async function dataUrlToBytes(dataUrl: string): Promise<Uint8Array> {
-  const response = await fetch(dataUrl);
-  return new Uint8Array(await response.arrayBuffer());
-}
-
-async function blobToBytes(blob: Blob): Promise<Uint8Array> {
-  return new Uint8Array(await blob.arrayBuffer());
+  await FileSystem.makeDirectoryAsync(uri, { intermediates: true });
 }
 
 async function writeFromSource(input: {
-  fileSystem: AttachmentFileSystem;
   source: SaveAttachmentInput["source"];
   targetUri: string;
   mimeType: string;
@@ -64,20 +55,27 @@ async function writeFromSource(input: {
     if (from === input.targetUri) {
       return;
     }
-    await input.fileSystem.copy({ from, to: input.targetUri });
+    await FileSystem.copyAsync({ from, to: input.targetUri });
     return;
   }
 
-  let bytes: Uint8Array;
   if (input.source.kind === "data_url") {
-    bytes = await dataUrlToBytes(input.source.dataUrl);
-  } else if (input.source.kind === "blob") {
-    bytes = await blobToBytes(input.source.blob);
-  } else {
-    bytes = input.source.bytes;
+    const parsed = parseDataUrl(input.source.dataUrl);
+    const mimeType = normalizeMimeType(parsed.mimeType || input.mimeType);
+    const base64 = parsed.base64;
+    await FileSystem.writeAsStringAsync(input.targetUri, base64, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    if (mimeType !== input.mimeType) {
+      return;
+    }
+    return;
   }
 
-  await input.fileSystem.writeBytes(input.targetUri, bytes);
+  const base64 = await blobToBase64(input.source.blob);
+  await FileSystem.writeAsStringAsync(input.targetUri, base64, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
 }
 
 function attachmentUri(metadata: AttachmentMetadata): string {
@@ -87,13 +85,11 @@ function attachmentUri(metadata: AttachmentMetadata): string {
 export function createLocalFileAttachmentStore(params: {
   storageType: Extract<AttachmentStorageType, "desktop-file" | "native-file">;
   baseDirectoryName: string;
-  fileSystem: AttachmentFileSystem;
   resolvePreviewUrl: (attachment: AttachmentMetadata) => Promise<string>;
   releasePreviewUrl?: (input: { attachment: AttachmentMetadata; url: string }) => Promise<void>;
 }): AttachmentStore {
-  const { fileSystem } = params;
-  const baseDirectory = fileSystem.cacheDirectory
-    ? `${fileSystem.cacheDirectory}${params.baseDirectoryName}/`
+  const baseDirectory = FileSystem.cacheDirectory
+    ? `${FileSystem.cacheDirectory}${params.baseDirectoryName}/`
     : null;
 
   async function resolveTarget(input: SaveAttachmentInput): Promise<{
@@ -105,20 +101,18 @@ export function createLocalFileAttachmentStore(params: {
     storageKey: string;
   }> {
     if (!baseDirectory) {
-      throw new Error("Attachment file-system cacheDirectory is unavailable.");
+      throw new Error("expo-file-system cacheDirectory is unavailable.");
     }
 
-    await ensureDirectory(fileSystem, baseDirectory);
+    await ensureDirectory(baseDirectory);
 
     const id = input.id ?? generateAttachmentId();
-    let mimeTypeFromSource: string | undefined;
-    if (input.source.kind === "data_url") {
-      mimeTypeFromSource = parseDataUrl(input.source.dataUrl).mimeType;
-    } else if (input.source.kind === "blob") {
-      mimeTypeFromSource = input.source.blob.type;
-    } else {
-      mimeTypeFromSource = undefined;
-    }
+    const mimeTypeFromSource =
+      input.source.kind === "data_url"
+        ? parseDataUrl(input.source.dataUrl).mimeType
+        : input.source.kind === "blob"
+          ? input.source.blob.type
+          : undefined;
     const mimeType = normalizeMimeType(input.mimeType ?? mimeTypeFromSource);
     const fileName = input.fileName ?? null;
     const extension = extensionForAttachment({ fileName, mimeType });
@@ -142,14 +136,16 @@ export function createLocalFileAttachmentStore(params: {
     async save(input): Promise<AttachmentMetadata> {
       const target = await resolveTarget(input);
       await writeFromSource({
-        fileSystem,
         source: input.source,
         targetUri: target.targetUri,
         mimeType: target.mimeType,
       });
 
-      const info = await fileSystem.getInfo(target.targetUri);
-      const byteSize = info.exists ? info.size : null;
+      const info = await FileSystem.getInfoAsync(target.targetUri);
+      const byteSize =
+        info.exists && typeof (info as { size?: number }).size === "number"
+          ? (info as { size: number }).size
+          : null;
       return {
         id: target.id,
         mimeType: target.mimeType,
@@ -162,7 +158,10 @@ export function createLocalFileAttachmentStore(params: {
     },
 
     async encodeBase64({ attachment }): Promise<string> {
-      return await fileSystem.readAsBase64(attachmentUri(attachment));
+      const uri = attachmentUri(attachment);
+      return await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
     },
 
     async resolvePreviewUrl({ attachment }): Promise<string> {
@@ -181,22 +180,22 @@ export function createLocalFileAttachmentStore(params: {
       : {}),
 
     async delete({ attachment }): Promise<void> {
-      await fileSystem.delete(attachmentUri(attachment), { idempotent: true });
+      await FileSystem.deleteAsync(attachmentUri(attachment), { idempotent: true });
     },
 
     async garbageCollect({ referencedIds }): Promise<void> {
       if (!baseDirectory) {
         return;
       }
-      await ensureDirectory(fileSystem, baseDirectory);
-      const entries = await fileSystem.listDirectory(baseDirectory);
+      await ensureDirectory(baseDirectory);
+      const entries = await FileSystem.readDirectoryAsync(baseDirectory);
       await Promise.all(
         entries.map(async (entryName) => {
           const id = entryName.split(".", 1)[0] ?? "";
           if (!id || referencedIds.has(id)) {
             return;
           }
-          await fileSystem.delete(`${baseDirectory}${entryName}`, {
+          await FileSystem.deleteAsync(`${baseDirectory}${entryName}`, {
             idempotent: true,
           });
         }),

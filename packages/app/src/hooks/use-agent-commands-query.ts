@@ -1,41 +1,34 @@
 import { useQuery } from "@tanstack/react-query";
-import { useTranslation } from "react-i18next";
-import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { useRetainedPanelActive } from "@/components/retained-panel";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
-import { agentCommandsQueryKey, type AgentCommandsDraftConfig } from "@/hooks/agent-commands-query";
+import type { AgentProvider } from "@server/server/agent/agent-sdk-types";
 
-const DRAFT_COMMANDS_STALE_TIME = Number.POSITIVE_INFINITY;
-const SESSION_COMMANDS_STALE_TIME = 60_000;
+const COMMANDS_STALE_TIME = 60_000; // Commands rarely change, cache for 1 minute
 
-export interface AgentSlashCommand {
+interface AgentSlashCommand {
   name: string;
   description: string;
   argumentHint: string;
-  kind?: string;
 }
 
-export type DraftCommandConfig = AgentCommandsDraftConfig;
-
-interface ListAgentCommandsOptions {
-  agentId: string;
-  draftConfig?: DraftCommandConfig;
+export interface DraftCommandConfig {
+  provider: AgentProvider;
+  cwd: string;
+  modeId?: string;
+  model?: string;
+  thinkingOptionId?: string;
 }
 
-export interface AgentCommandsClient {
-  listCommands(options: ListAgentCommandsOptions): ReturnType<DaemonClient["listCommands"]>;
-}
-
-export async function fetchAgentCommands(input: {
-  client: AgentCommandsClient;
-  agentId: string;
-  draftConfig?: DraftCommandConfig;
-}): Promise<AgentSlashCommand[]> {
-  const response = await input.client.listCommands({
-    agentId: input.agentId,
-    draftConfig: input.draftConfig,
-  });
-  return response.commands as AgentSlashCommand[];
+function commandsQueryKey(serverId: string, agentId: string, draftConfig?: DraftCommandConfig) {
+  return [
+    "agentCommands",
+    serverId,
+    agentId,
+    draftConfig?.provider ?? null,
+    draftConfig?.cwd ?? null,
+    draftConfig?.modeId ?? null,
+    draftConfig?.model ?? null,
+    draftConfig?.thinkingOptionId ?? null,
+  ] as const;
 }
 
 interface UseAgentCommandsQueryOptions {
@@ -51,22 +44,20 @@ export function useAgentCommandsQuery({
   enabled = true,
   draftConfig,
 }: UseAgentCommandsQueryOptions) {
-  const { t } = useTranslation();
-  const retainedPanelActive = useRetainedPanelActive();
-  const queryEnabled = enabled && retainedPanelActive;
   const client = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
 
   const query = useQuery({
-    queryKey: agentCommandsQueryKey({ serverId, agentId, draftConfig }),
+    queryKey: commandsQueryKey(serverId, agentId, draftConfig),
     queryFn: async () => {
       if (!client) {
-        throw new Error(t("common.errors.daemonClientUnavailable"));
+        throw new Error("Daemon client not available");
       }
-      return fetchAgentCommands({ client, agentId, draftConfig });
+      const response = await client.listCommands(agentId, { draftConfig });
+      return response.commands as AgentSlashCommand[];
     },
-    enabled: queryEnabled && !!client && isConnected && (!!agentId || !!draftConfig),
-    staleTime: draftConfig ? DRAFT_COMMANDS_STALE_TIME : SESSION_COMMANDS_STALE_TIME,
+    enabled: enabled && !!client && isConnected && !!agentId,
+    staleTime: COMMANDS_STALE_TIME,
     retry: 3,
     retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 5000),
   });

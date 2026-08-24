@@ -1,26 +1,23 @@
-import { describe, expect, it } from "vitest";
-import type { DesktopDialogBridge, DesktopDialogOpenOptions } from "@/desktop/host";
-import { normalizePickedImageAssets, pickImagesWithDesktopDialog } from "./image-attachment-picker";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 
-function fakeDialogReturning(selection: string | string[] | null): {
-  dialog: DesktopDialogBridge;
-  recordedOptions: DesktopDialogOpenOptions[];
-} {
-  const recordedOptions: DesktopDialogOpenOptions[] = [];
-  return {
-    dialog: {
-      open: async (options?: DesktopDialogOpenOptions) => {
-        if (options) {
-          recordedOptions.push(options);
-        }
-        return selection;
-      },
-    },
-    recordedOptions,
-  };
-}
+const desktopHostState = vi.hoisted(() => ({
+  api: null as any,
+}));
+
+vi.mock("@/desktop/host", () => ({
+  getDesktopHost: () => desktopHostState.api,
+}));
+
+import {
+  normalizePickedImageAssets,
+  openImagePathsWithDesktopDialog,
+} from "./image-attachment-picker";
 
 describe("image-attachment-picker", () => {
+  beforeEach(() => {
+    desktopHostState.api = null;
+  });
+
   it("normalizes a picked File into a blob source", async () => {
     const file = new File(["hello"], "picked.png", { type: "image/png" });
 
@@ -37,27 +34,6 @@ describe("image-attachment-picker", () => {
     expect(result[0]?.source.kind).toBe("blob");
     expect(result[0]?.fileName).toBe("picked.png");
     expect(result[0]?.mimeType).toBe("image/png");
-  });
-
-  it("derives the type of a type-less picked File from its name", async () => {
-    const file = new File(["image"], "picked.png");
-
-    const result = await normalizePickedImageAssets([
-      {
-        uri: "blob:test",
-        mimeType: null,
-        fileName: null,
-        file,
-      },
-    ]);
-
-    expect(result).toEqual([
-      {
-        source: { kind: "blob", blob: file },
-        mimeType: "image/png",
-        fileName: "picked.png",
-      },
-    ]);
   });
 
   it("keeps filesystem picker results as file uris", async () => {
@@ -94,35 +70,27 @@ describe("image-attachment-picker", () => {
   });
 
   it("uses the desktop dialog api when available", async () => {
-    const { dialog, recordedOptions } = fakeDialogReturning(["/tmp/one.png", "/tmp/two.jpg"]);
+    const open = vi.fn().mockResolvedValue(["/tmp/one.png", "/tmp/two.jpg"]);
+    desktopHostState.api = {
+      dialog: { open },
+    };
 
-    const result = await pickImagesWithDesktopDialog(dialog);
+    const result = await openImagePathsWithDesktopDialog();
 
-    expect(recordedOptions).toHaveLength(1);
-    expect(recordedOptions[0]).toMatchObject({
-      multiple: true,
-      directory: false,
-      title: "Attach images",
-    });
-    expect(result).toEqual([
-      {
-        source: { kind: "file_uri", uri: "/tmp/one.png" },
-        mimeType: "image/png",
-        fileName: "one.png",
-      },
-      {
-        source: { kind: "file_uri", uri: "/tmp/two.jpg" },
-        mimeType: "image/jpeg",
-        fileName: "two.jpg",
-      },
-    ]);
+    expect(open).toHaveBeenCalledWith(
+      expect.objectContaining({
+        multiple: true,
+        directory: false,
+        title: "Attach images",
+      }),
+    );
+    expect(result).toEqual(["/tmp/one.png", "/tmp/two.jpg"]);
   });
 
   it("throws when desktop dialog API is not available", async () => {
-    await expect(pickImagesWithDesktopDialog(null)).rejects.toThrow(
-      "Desktop dialog API is not available.",
-    );
-    await expect(pickImagesWithDesktopDialog({})).rejects.toThrow(
+    desktopHostState.api = {};
+
+    await expect(openImagePathsWithDesktopDialog()).rejects.toThrow(
       "Desktop dialog API is not available.",
     );
   });

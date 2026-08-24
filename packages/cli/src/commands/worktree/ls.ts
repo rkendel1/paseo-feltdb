@@ -1,7 +1,6 @@
 import type { Command } from "commander";
 import { homedir } from "node:os";
 import { basename, join, sep } from "node:path";
-import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
 import type { CommandOptions, ListResult, OutputSchema, CommandError } from "../../output/index.js";
 
@@ -63,7 +62,7 @@ export async function runLsCommand(
 ): Promise<WorktreeLsResult> {
   const host = getDaemonHost({ host: options.host });
 
-  let client: DaemonClient;
+  let client;
   try {
     client = await connectToDaemon({ host: options.host });
   } catch (err) {

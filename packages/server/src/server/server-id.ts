@@ -1,14 +1,12 @@
 import path from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 
-import { ensurePrivateFile, writePrivateFileAtomicSync } from "./private-files.js";
-
-interface LoggerLike {
+type LoggerLike = {
   child(bindings: Record<string, unknown>): LoggerLike;
-  info(...args: unknown[]): void;
-  warn(...args: unknown[]): void;
-}
+  info(...args: any[]): void;
+  warn(...args: any[]): void;
+};
 
 const SERVER_ID_FILENAME = "server-id";
 
@@ -49,20 +47,17 @@ export function getOrCreateServerId(
     // Persist the override for consistent identity across restarts.
     if (!existsSync(serverIdPath)) {
       try {
-        writePrivateFileAtomicSync(serverIdPath, `${envOverride}\n`);
+        writeFileSync(serverIdPath, `${envOverride}\n`, "utf8");
         log?.info({ serverId: envOverride }, "Persisted PASEO_SERVER_ID override");
       } catch (error) {
         log?.warn({ error }, "Failed to persist PASEO_SERVER_ID override");
       }
-    } else {
-      ensurePrivateFile(serverIdPath);
     }
     return envOverride;
   }
 
   if (existsSync(serverIdPath)) {
     try {
-      ensurePrivateFile(serverIdPath);
       const raw = readFileSync(serverIdPath, "utf8");
       const parsed = raw.trim();
       if (parsed.length > 0) {
@@ -75,7 +70,7 @@ export function getOrCreateServerId(
 
   const created = generateServerId();
   try {
-    writePrivateFileAtomicSync(serverIdPath, `${created}\n`);
+    writeFileSync(serverIdPath, `${created}\n`, "utf8");
   } catch (error) {
     log?.warn({ error }, "Failed to persist serverId (continuing with in-memory id)");
   }

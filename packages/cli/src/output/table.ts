@@ -137,7 +137,7 @@ export function renderTable<T>(result: AnyCommandResult<T>, options: OutputOptio
     return "";
   }
 
-  const columns = schema.columns;
+  const columns = schema.columns as ColumnDef<T>[];
   const includeHeaders = !options.noHeaders;
   const widths = calculateWidths(data, columns, includeHeaders);
 

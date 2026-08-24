@@ -1,17 +1,11 @@
 import type { AgentManager } from "./agent/agent-manager.js";
-import { stripInternalPaseoMcpServer } from "./agent/runtime-mcp-config.js";
-import type {
-  AgentPersistenceHandle,
-  AgentProvider,
-  AgentSessionConfig,
-} from "./agent/agent-sdk-types.js";
+import type { AgentProvider, AgentSessionConfig } from "./agent/agent-sdk-types.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 
-interface LoggerLike {
+type LoggerLike = {
   child(bindings: Record<string, unknown>): LoggerLike;
-  error(...args: unknown[]): void;
-  warn(...args: unknown[]): void;
-}
+  error(...args: any[]): void;
+};
 
 function getLogger(logger: LoggerLike): LoggerLike {
   return logger.child({ module: "persistence" });
@@ -20,21 +14,8 @@ function getLogger(logger: LoggerLike): LoggerLike {
 type AgentStoragePersistence = Pick<AgentStorage, "applySnapshot" | "list">;
 type AgentManagerStateSource = Pick<AgentManager, "subscribe">;
 
-interface BuildSessionConfigOptions {
-  validProviders?: Iterable<AgentProvider>;
-}
-
-function isProviderRegistered(
-  validProviders: Iterable<AgentProvider> | undefined,
-  provider: AgentProvider,
-): boolean {
-  if (!validProviders) {
-    return true;
-  }
-  if (validProviders instanceof Set) {
-    return validProviders.has(provider);
-  }
-  return new Set(validProviders).has(provider);
+function isKnownProvider(provider: string): provider is AgentProvider {
+  return provider === "claude" || provider === "codex" || provider === "opencode";
 }
 
 /**
@@ -51,9 +32,6 @@ export function attachAgentStoragePersistence(
     if (event.type !== "agent_state") {
       return;
     }
-    if (event.agent.lifecycle === "closed") {
-      return;
-    }
     void storage.applySnapshot(event.agent).catch((error) => {
       log.error({ err: error, agentId: event.agent.id }, "Failed to persist agent snapshot");
     });
@@ -63,47 +41,34 @@ export function attachAgentStoragePersistence(
 }
 
 export function buildConfigOverrides(record: StoredAgentRecord): Partial<AgentSessionConfig> {
-  return stripInternalPaseoMcpServer({
-    provider: record.provider,
+  return {
     cwd: record.cwd,
-    modeId: record.config?.modeId ?? undefined,
+    modeId: record.lastModeId ?? record.config?.modeId ?? undefined,
     model: record.config?.model ?? undefined,
     thinkingOptionId: record.config?.thinkingOptionId ?? undefined,
-    featureValues: record.config?.featureValues ?? undefined,
-    providerOptions: record.config?.providerOptions ?? undefined,
-    toolPolicy: record.config?.toolPolicy ?? undefined,
+    title: record.config?.title ?? undefined,
+    extra: record.config?.extra ?? undefined,
     systemPrompt: record.config?.systemPrompt ?? undefined,
     mcpServers: record.config?.mcpServers ?? undefined,
-  });
+  };
 }
 
-export function buildSessionConfig(
-  record: StoredAgentRecord,
-  options?: BuildSessionConfigOptions,
-): AgentSessionConfig | null {
-  if (!isProviderRegistered(options?.validProviders, record.provider)) {
-    return null;
+export function buildSessionConfig(record: StoredAgentRecord): AgentSessionConfig {
+  if (!isKnownProvider(record.provider)) {
+    throw new Error(`Unknown provider '${record.provider}'`);
   }
   const overrides = buildConfigOverrides(record);
-  return stripInternalPaseoMcpServer({
+  return {
     provider: record.provider,
     cwd: record.cwd,
     modeId: overrides.modeId,
     model: overrides.model,
     thinkingOptionId: overrides.thinkingOptionId,
-    featureValues: overrides.featureValues,
-    providerOptions: overrides.providerOptions,
-    toolPolicy: overrides.toolPolicy,
+    title: overrides.title,
+    extra: overrides.extra,
     systemPrompt: overrides.systemPrompt,
     mcpServers: overrides.mcpServers,
-  });
-}
-
-export function isStoredAgentProviderAvailable(
-  record: StoredAgentRecord,
-  validProviders?: Iterable<AgentProvider>,
-): boolean {
-  return isProviderRegistered(validProviders, record.provider);
+  };
 }
 
 export function extractTimestamps(record: StoredAgentRecord): {
@@ -111,37 +76,11 @@ export function extractTimestamps(record: StoredAgentRecord): {
   updatedAt: Date;
   lastUserMessageAt: Date | null;
   labels?: Record<string, string>;
-  workspaceId?: string;
-  owner?: StoredAgentRecord["owner"];
 } {
   return {
     createdAt: new Date(record.createdAt),
     updatedAt: new Date(record.lastActivityAt ?? record.updatedAt),
     lastUserMessageAt: record.lastUserMessageAt ? new Date(record.lastUserMessageAt) : null,
     labels: record.labels,
-    workspaceId: record.workspaceId,
-    owner: record.owner,
   };
-}
-
-export function toAgentPersistenceHandle(
-  registeredProviders: Iterable<AgentProvider>,
-  handle: StoredAgentRecord["persistence"],
-): AgentPersistenceHandle | null {
-  if (!handle) {
-    return null;
-  }
-  const provider = handle.provider;
-  if (!isProviderRegistered(registeredProviders, provider)) {
-    return null;
-  }
-  if (!handle.sessionId) {
-    return null;
-  }
-  return {
-    provider,
-    sessionId: handle.sessionId,
-    ...(handle.nativeHandle !== undefined ? { nativeHandle: handle.nativeHandle } : {}),
-    ...(handle.metadata !== undefined ? { metadata: handle.metadata } : {}),
-  } satisfies AgentPersistenceHandle;
 }

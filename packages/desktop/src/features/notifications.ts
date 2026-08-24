@@ -1,17 +1,16 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { app, BrowserWindow, Notification, ipcMain, nativeImage } from "electron";
-import { getDesktopSettingsStore } from "../settings/desktop-settings-electron.js";
 
-interface NotificationInput {
+type NotificationInput = {
   title?: unknown;
   body?: unknown;
   data?: unknown;
-}
+};
 
-interface NotificationClickPayload {
+type NotificationClickPayload = {
   data?: Record<string, unknown>;
-}
+};
 
 const activeNotifications = new Set<Notification>();
 
@@ -96,12 +95,11 @@ export function registerNotificationHandlers(): void {
     const body = toTrimmedString(rawInput?.body) ?? undefined;
     const data = toRecord(rawInput?.data);
     const icon = getNotificationIcon();
-    const settings = await getDesktopSettingsStore().get();
     const notification = new Notification({
       title,
       ...(body ? { body } : {}),
       ...(icon ? { icon } : {}),
-      silent: !settings.notifications.playSound,
+      silent: true,
     });
 
     activeNotifications.add(notification);

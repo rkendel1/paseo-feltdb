@@ -12,18 +12,6 @@ export interface ModelListItem {
   thinkingOptions: string;
 }
 
-interface ProviderModelOption {
-  id: string;
-}
-
-interface ProviderModel {
-  id: string;
-  label: string;
-  description?: string;
-  thinkingOptions?: ProviderModelOption[];
-  defaultThinkingOptionId?: string | null;
-}
-
 /** Schema for provider models output */
 export const providerModelsSchema: OutputSchema<ModelListItem> = {
   idField: "id",
@@ -73,7 +61,7 @@ export async function runModelsCommand(
       };
     }
 
-    const models: ModelListItem[] = (result.models ?? []).map((m: ProviderModel) => ({
+    const models: ModelListItem[] = (result.models ?? []).map((m) => ({
       model: m.label,
       id: m.id,
       description: m.description ?? "",

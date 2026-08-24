@@ -10,13 +10,24 @@ import {
   SquareTerminal,
   Wrench,
 } from "lucide-react-native";
-import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
-import { PaseoLogo } from "@/components/icons/paseo-logo";
-import { resolveToolCallIconName, type ToolCallIcon } from "./tool-call-icon-name";
+import type { ToolCallDetail, ToolCallIconName } from "@server/server/agent/agent-sdk-types";
 
 export type ToolCallIconComponent = ComponentType<{ size?: number; color?: string }>;
 
-const ICON_COMPONENTS: Record<ToolCallIcon, ToolCallIconComponent> = {
+const TOOL_DETAIL_ICONS: Record<ToolCallDetail["type"], ToolCallIconComponent> = {
+  shell: SquareTerminal,
+  read: Eye,
+  edit: Pencil,
+  write: Pencil,
+  search: Search,
+  fetch: Search,
+  worktree_setup: SquareTerminal,
+  sub_agent: Bot,
+  plain_text: Wrench,
+  unknown: Wrench,
+};
+
+const TOOL_ICON_BY_NAME: Record<ToolCallIconName, ToolCallIconComponent> = {
   wrench: Wrench,
   square_terminal: SquareTerminal,
   eye: Eye,
@@ -26,16 +37,31 @@ const ICON_COMPONENTS: Record<ToolCallIcon, ToolCallIconComponent> = {
   sparkles: Sparkles,
   brain: Brain,
   mic_vocal: MicVocal,
-  paseo: PaseoLogo,
 };
-
-export function componentForToolCallIcon(name: ToolCallIcon): ToolCallIconComponent {
-  return ICON_COMPONENTS[name];
-}
 
 export function resolveToolCallIcon(
   toolName: string,
   detail?: ToolCallDetail,
 ): ToolCallIconComponent {
-  return componentForToolCallIcon(resolveToolCallIconName(toolName, detail));
+  const lowerName = toolName.trim().toLowerCase();
+
+  if (detail?.type === "plain_text" && detail.icon) {
+    return TOOL_ICON_BY_NAME[detail.icon];
+  }
+
+  // Thoughts are rendered through ToolCall with unknown detail payloads.
+  if (lowerName === "thinking" && (!detail || detail.type === "unknown")) {
+    return Brain;
+  }
+  if (lowerName === "speak") {
+    return MicVocal;
+  }
+  if (lowerName === "task") {
+    return Bot;
+  }
+
+  if (detail) {
+    return TOOL_DETAIL_ICONS[detail.type];
+  }
+  return Wrench;
 }

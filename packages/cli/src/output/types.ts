@@ -40,8 +40,6 @@ export interface OutputSchema<T> {
   idField: keyof T | ((item: T) => string);
   /** Column definitions for table output */
   columns: ColumnDef<T>[];
-  /** Optional: custom renderer for human/table output */
-  renderHuman?: (result: AnyCommandResult<T>, options: OutputOptions) => string;
   /** Optional: transform data before JSON/YAML output */
   serialize?: (data: T) => unknown;
 }
@@ -65,7 +63,7 @@ export interface ListResult<T> {
 }
 
 /** Union type for all command results */
-export type AnyCommandResult<T> = T extends unknown ? SingleResult<T> | ListResult<T> : never;
+export type AnyCommandResult<T> = SingleResult<T> | ListResult<T>;
 
 /** Base interface for command results (deprecated, use SingleResult or ListResult) */
 export type CommandResult<T> = SingleResult<T> | ListResult<T>;

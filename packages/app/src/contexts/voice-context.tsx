@@ -2,7 +2,6 @@ import {
   createContext,
   useContext,
   useEffect,
-  useMemo,
   useRef,
   useSyncExternalStore,
   type ReactNode,
@@ -63,22 +62,17 @@ export function useVoiceOptional(): VoiceContextValue | null {
     runtime ? runtime.getSnapshot : getEmptySnapshot,
   );
 
-  // Methods on the runtime object literal close over factory-local state; they
-  // don't use `this`, so no binding is needed. Memoising on [snapshot, runtime]
-  // keeps the returned object reference stable across re-renders that don't
-  // change either, preventing downstream memo/useMemo misses.
-  return useMemo(() => {
-    if (!runtime) {
-      return null;
-    }
-    return {
-      ...snapshot,
-      startVoice: runtime.startVoice,
-      stopVoice: runtime.stopVoice,
-      isVoiceModeForAgent: runtime.isVoiceModeForAgent,
-      toggleMute: runtime.toggleMute,
-    };
-  }, [snapshot, runtime]);
+  if (!runtime) {
+    return null;
+  }
+
+  return {
+    ...snapshot,
+    startVoice: runtime.startVoice,
+    stopVoice: runtime.stopVoice,
+    isVoiceModeForAgent: runtime.isVoiceModeForAgent,
+    toggleMute: runtime.toggleMute,
+  };
 }
 
 export function useVoiceTelemetry() {
@@ -92,9 +86,9 @@ export function useVoiceTelemetry() {
 export function useVoiceTelemetryOptional(): VoiceRuntimeTelemetrySnapshot | null {
   const runtime = useContext(VoiceRuntimeContext);
   const snapshot = useSyncExternalStore(
-    runtime ? runtime.subscribeTelemetry.bind(runtime) : noopSubscribe,
-    runtime ? runtime.getTelemetrySnapshot.bind(runtime) : getEmptyTelemetry,
-    runtime ? runtime.getTelemetrySnapshot.bind(runtime) : getEmptyTelemetry,
+    runtime ? runtime.subscribeTelemetry : noopSubscribe,
+    runtime ? runtime.getTelemetrySnapshot : getEmptyTelemetry,
+    runtime ? runtime.getTelemetrySnapshot : getEmptyTelemetry,
   );
 
   return runtime ? snapshot : null;
@@ -125,11 +119,6 @@ export function VoiceProvider({ children }: VoiceProviderProps) {
       onVolumeLevel: (level) => {
         runtime?.handleCaptureVolume(level);
       },
-      onInterruption: () => {
-        void runtime?.stopVoice().catch((error) => {
-          console.error("[VoiceEngine] Failed to stop after audio interruption:", error);
-        });
-      },
       onError: (error) => {
         console.error("[VoiceEngine] Capture error:", error);
       },
@@ -151,7 +140,7 @@ export function VoiceProvider({ children }: VoiceProviderProps) {
     runtimeRef.current = runtime;
   }
 
-  const engine = engineRef.current;
+  const engine = engineRef.current!;
   const runtime = runtimeRef.current!;
 
   useEffect(() => {

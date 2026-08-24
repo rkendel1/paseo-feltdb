@@ -1,12 +1,7 @@
-import { execFileSync as nodeExecFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import {
-  getReleaseInfoFromSourceTag,
-  normalizeReleaseTag,
-  parseReleaseVersion,
-} from "./release-version-utils.mjs";
 
 const headingPattern = /^##\s+\[?([^\]\s]+)\]?\s*-\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*$/;
 
@@ -18,6 +13,7 @@ Options:
   --repo <owner/repo>       Repository slug. Defaults to $GITHUB_REPOSITORY.
   --tag <tag>               Release tag (e.g. v0.1.14). Defaults to latest changelog entry.
   --create-if-missing       Create release if it does not already exist.
+  --draft                   Create missing release as draft.
 `;
   process.stderr.write(usage.trimStart());
   process.stderr.write("\n");
@@ -29,6 +25,7 @@ function parseArgs(argv) {
     repo: process.env.GITHUB_REPOSITORY || "",
     tag: "",
     createIfMissing: false,
+    draft: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -57,6 +54,12 @@ function parseArgs(argv) {
       args.createIfMissing = true;
       continue;
     }
+
+    if (arg === "--draft") {
+      args.draft = true;
+      continue;
+    }
+
     usageAndExit();
   }
 
@@ -65,6 +68,11 @@ function parseArgs(argv) {
   }
 
   return args;
+}
+
+function normalizeTag(rawTag) {
+  const trimmed = rawTag.trim().replace(/^refs\/tags\//, "");
+  return trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
 }
 
 function parseChangelog(changelogText) {
@@ -109,90 +117,50 @@ function parseChangelog(changelogText) {
       notesParts.push("", ...bodyLines);
     }
 
-    return Object.assign({}, heading, {
+    return {
+      ...heading,
       tag: `v${heading.version}`,
       notes: `${notesParts.join("\n").trim()}\n`,
-    });
+    };
   });
 }
 
-function getRelease(tag, repo, execFileSync = nodeExecFileSync) {
+function hasRelease(tag, repo) {
   try {
-    const output = execFileSync("gh", ["api", `repos/${repo}/releases/tags/${tag}`], {
-      encoding: "utf8",
+    execFileSync("gh", ["release", "view", tag, "--repo", repo], {
+      stdio: "ignore",
     });
-    return JSON.parse(output);
+    return true;
   } catch {
-    return null;
+    return false;
   }
 }
 
-function runGh(args, execFileSync = nodeExecFileSync) {
+function runGh(args) {
   execFileSync("gh", args, { stdio: "inherit" });
 }
 
-function updateReleaseNotes({ releaseId, repo, notesPath }, execFileSync = nodeExecFileSync) {
-  runGh(
-    ["api", "-X", "PATCH", `repos/${repo}/releases/${releaseId}`, "-F", `body=@${notesPath}`],
-    execFileSync,
-  );
-}
-
-function exposeGitHubContributorMentions(notes) {
-  return notes.replace(
-    /\[@([A-Za-z0-9-]+)\]\(https:\/\/github\.com\/([A-Za-z0-9-]+)\/?\)/g,
-    (match, labelLogin, profileLogin) => {
-      if (labelLogin.toLowerCase() !== profileLogin.toLowerCase()) {
-        return match;
-      }
-
-      return `@${profileLogin}`;
-    },
-  );
-}
-
-export function syncReleaseNotes(argv = process.argv.slice(2), deps = {}) {
-  const execFileSync = deps.execFileSync ?? nodeExecFileSync;
-  const args = parseArgs(argv);
+function main() {
+  const args = parseArgs(process.argv.slice(2));
   const changelogPath = path.resolve("CHANGELOG.md");
   const changelogText = readFileSync(changelogPath, "utf8");
   const entries = parseChangelog(changelogText);
 
-  const targetTag = args.tag ? normalizeReleaseTag(args.tag) : entries[0].tag;
-  const releaseInfo = getReleaseInfoFromSourceTag(targetTag);
+  const targetTag = args.tag ? normalizeTag(args.tag) : entries[0].tag;
   const targetEntry = entries.find((entry) => entry.tag === targetTag);
 
-  let notes = targetEntry?.notes ?? null;
-
-  if (!notes) {
+  if (!targetEntry) {
     console.log(`No matching changelog section found for ${targetTag}. Skipping.`);
     return;
   }
 
-  notes = exposeGitHubContributorMentions(notes);
-
   const tempDir = mkdtempSync(path.join(tmpdir(), "paseo-release-notes-"));
   const notesPath = path.join(tempDir, `${targetTag}-notes.md`);
-  writeFileSync(notesPath, notes);
-
-  const createArgs = [
-    "release",
-    "create",
-    targetTag,
-    "--repo",
-    args.repo,
-    "--title",
-    `Paseo ${targetTag}`,
-    "--notes-file",
-    notesPath,
-    "--verify-tag",
-    ...(parseReleaseVersion(releaseInfo.version).isPrerelease ? ["--prerelease"] : []),
-  ];
+  writeFileSync(notesPath, targetEntry.notes);
 
   try {
-    const release = getRelease(targetTag, args.repo, execFileSync);
-    if (release) {
-      updateReleaseNotes({ releaseId: release.id, repo: args.repo, notesPath }, execFileSync);
+    if (hasRelease(targetTag, args.repo)) {
+      runGh(["release", "edit", targetTag, "--repo", args.repo, "--notes-file", notesPath]);
       console.log(`Updated release notes for ${targetTag}.`);
       return;
     }
@@ -205,17 +173,25 @@ export function syncReleaseNotes(argv = process.argv.slice(2), deps = {}) {
     }
 
     try {
-      runGh(createArgs, execFileSync);
+      runGh([
+        "release",
+        "create",
+        targetTag,
+        "--repo",
+        args.repo,
+        "--title",
+        `Paseo ${targetTag}`,
+        "--notes-file",
+        notesPath,
+        "--verify-tag",
+        ...(args.draft ? ["--draft"] : []),
+      ]);
       console.log(`Created release ${targetTag} with changelog notes.`);
     } catch (createError) {
       console.warn(
         `Release creation failed for ${targetTag}; attempting edit in case another workflow created it concurrently.`,
       );
-      const raceRelease = getRelease(targetTag, args.repo, execFileSync);
-      if (!raceRelease) {
-        throw createError;
-      }
-      updateReleaseNotes({ releaseId: raceRelease.id, repo: args.repo, notesPath }, execFileSync);
+      runGh(["release", "edit", targetTag, "--repo", args.repo, "--notes-file", notesPath]);
       console.log(`Updated release notes for ${targetTag} after create race.`);
 
       if (createError instanceof Error) {
@@ -227,6 +203,4 @@ export function syncReleaseNotes(argv = process.argv.slice(2), deps = {}) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  syncReleaseNotes();
-}
+main();

@@ -24,3 +24,4 @@ appId: sh.paseo
     commands:
       - tapOn:
           point: "50%,20%"
+

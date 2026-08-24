@@ -1,6 +1,3 @@
-import { defineLanguageFacet, Language, StreamLanguage } from "@codemirror/language";
-import { dart } from "@codemirror/legacy-modes/mode/clike";
-import { swift } from "@codemirror/legacy-modes/mode/swift";
 import { parser as jsParser } from "@lezer/javascript";
 import { parser as jsonParser } from "@lezer/json";
 import { parser as cssParser } from "@lezer/css";
@@ -16,82 +13,60 @@ import { parser as xmlParser } from "@lezer/xml";
 import { parser as yamlParser } from "@lezer/yaml";
 import { parser as elixirParser } from "lezer-elixir";
 import type { Parser } from "@lezer/common";
-import { csharpLanguage } from "./csharp/language.js";
-import { nixLanguage } from "./nix/language.js";
-import { parser as svelteBaseParser } from "./svelte/parser.js";
-import { configureNesting, defaultNesting } from "./svelte/nesting.js";
 
-function language(parser: Parser): Language {
-  return new Language(defineLanguageFacet(), parser);
-}
-
-const languagesByExtension: Record<string, Language> = {
+const parsersByExtension: Record<string, Parser> = {
   // JavaScript/TypeScript
-  js: language(jsParser),
-  jsx: language(jsParser.configure({ dialect: "jsx" })),
-  ts: language(jsParser.configure({ dialect: "ts" })),
-  tsx: language(jsParser.configure({ dialect: "ts jsx" })),
-  mjs: language(jsParser),
-  cjs: language(jsParser),
+  js: jsParser,
+  jsx: jsParser.configure({ dialect: "jsx" }),
+  ts: jsParser.configure({ dialect: "ts" }),
+  tsx: jsParser.configure({ dialect: "ts jsx" }),
+  mjs: jsParser,
+  cjs: jsParser,
   // C / C++ / Objective-C
-  c: language(cppParser),
-  h: language(cppParser),
-  cc: language(cppParser),
-  cpp: language(cppParser),
-  cxx: language(cppParser),
-  hpp: language(cppParser),
-  hxx: language(cppParser),
-  m: language(cppParser),
-  mm: language(cppParser),
+  c: cppParser,
+  h: cppParser,
+  cc: cppParser,
+  cpp: cppParser,
+  cxx: cppParser,
+  hpp: cppParser,
+  hxx: cppParser,
+  m: cppParser,
+  mm: cppParser,
   // JSON
-  json: language(jsonParser),
+  json: jsonParser,
   // CSS
-  css: language(cssParser),
-  scss: language(cssParser),
+  css: cssParser,
+  scss: cssParser,
   // HTML
-  html: language(htmlParser),
-  htm: language(htmlParser),
-  // Svelte
-  svelte: language(svelteBaseParser.configure({ wrap: configureNesting(defaultNesting) })),
+  html: htmlParser,
+  htm: htmlParser,
   // XML
-  xml: language(xmlParser),
+  xml: xmlParser,
   // Java
-  java: language(javaParser),
+  java: javaParser,
   // Python
-  py: language(pythonParser),
+  py: pythonParser,
   // Go
-  go: language(goParser),
+  go: goParser,
   // PHP
-  php: language(phpParser),
+  php: phpParser,
   // YAML
-  yaml: language(yamlParser),
-  yml: language(yamlParser),
+  yaml: yamlParser,
+  yml: yamlParser,
   // Rust
-  rs: language(rustParser),
-  // Swift
-  swift: StreamLanguage.define(swift),
-  // Dart
-  dart: StreamLanguage.define(dart),
-  // C#
-  cs: csharpLanguage,
-  // Nix
-  nix: nixLanguage,
+  rs: rustParser,
   // Elixir
-  ex: language(elixirParser),
-  exs: language(elixirParser),
+  ex: elixirParser,
+  exs: elixirParser,
   // Markdown
-  md: language(markdownParser),
-  mdx: language(markdownParser),
+  md: markdownParser,
+  mdx: markdownParser,
 };
 
-export function getLanguageForFile(filename: string): Language | null {
+export function getParserForFile(filename: string): Parser | null {
   const ext = filename.split(".").pop()?.toLowerCase();
   if (!ext) return null;
-  return languagesByExtension[ext] ?? null;
-}
-
-export function getParserForFile(filename: string): Parser | null {
-  return getLanguageForFile(filename)?.parser ?? null;
+  return parsersByExtension[ext] ?? null;
 }
 
 export function isLanguageSupported(filename: string): boolean {
@@ -99,5 +74,5 @@ export function isLanguageSupported(filename: string): boolean {
 }
 
 export function getSupportedExtensions(): string[] {
-  return Object.keys(languagesByExtension);
+  return Object.keys(parsersByExtension);
 }

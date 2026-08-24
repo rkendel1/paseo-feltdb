@@ -1,25 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { AGENT_PROVIDER_IDS } from "./agent/provider-manifest.js";
+import { AgentProviderRuntimeSettingsMapSchema } from "./agent/provider-launch-config.js";
 
-import {
-  AgentProviderRuntimeSettingsMapSchema,
-  migrateProviderSettings,
-  ProviderOverridesSchema,
-} from "./agent/provider-launch-config.js";
-import type { AgentProviderRuntimeSettingsMap } from "./agent/provider-launch-config.js";
-import { ensurePrivateFile, writePrivateFileAtomicSync } from "./private-files.js";
-import {
-  AgentProfileSchema,
-  AgentSkillSelectionSchema,
-  PluginIdSchema,
-  PluginSourceSchema,
-  TerminalProfileSchema,
-} from "@getpaseo/protocol/messages";
-import { PaseoServicePortAllocationSchema } from "@getpaseo/protocol/paseo-config-schema";
-
-export const LogLevelSchema = z.enum(["trace", "debug", "info", "warn", "error", "fatal"]);
-export const LogFormatSchema = z.enum(["pretty", "json"]);
+const LogLevelSchema = z.enum(["trace", "debug", "info", "warn", "error", "fatal"]);
+const LogFormatSchema = z.enum(["pretty", "json"]);
 
 const LogConfigSchema = z
   .object({
@@ -52,19 +38,9 @@ const LogConfigSchema = z
   })
   .strict();
 
-const OpenAiSpeechEndpointSchema = z
-  .object({
-    apiKey: z.string().trim().min(1).optional(),
-    baseUrl: z.string().trim().min(1).optional(),
-  })
-  .strict();
-
-const OpenAiProviderSchema = z
+const ProviderCredentialsSchema = z
   .object({
     apiKey: z.string().min(1).optional(),
-    baseUrl: z.string().trim().min(1).optional(),
-    stt: OpenAiSpeechEndpointSchema.optional(),
-    tts: OpenAiSpeechEndpointSchema.optional(),
   })
   .strict();
 
@@ -76,25 +52,8 @@ const LocalSpeechProviderSchema = z
 
 const ProvidersSchema = z
   .object({
-    openai: OpenAiProviderSchema.optional(),
+    openai: ProviderCredentialsSchema.optional(),
     local: LocalSpeechProviderSchema.optional(),
-  })
-  .strict();
-
-const WorktreesConfigSchema = z
-  .object({
-    root: z.string().min(1).optional(),
-    servicePorts: PaseoServicePortAllocationSchema.optional(),
-  })
-  .strict();
-
-const BcryptHashSchema = z.string().regex(/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/, {
-  message: "Expected a bcrypt hash",
-});
-
-const DaemonAuthSchema = z
-  .object({
-    password: BcryptHashSchema.optional(),
   })
   .strict();
 
@@ -111,7 +70,6 @@ const FeatureDictationSchema = z
       .object({
         provider: SpeechProviderIdSchema.optional(),
         model: z.string().min(1).optional(),
-        language: z.string().trim().min(1).optional(),
         confidenceThreshold: z.number().optional(),
       })
       .strict()
@@ -124,7 +82,7 @@ const FeatureVoiceModeSchema = z
     enabled: z.boolean().optional(),
     llm: z
       .object({
-        provider: z.string().optional(),
+        provider: z.enum(AGENT_PROVIDER_IDS as [string, ...string[]]).optional(),
         model: z.string().min(1).optional(),
       })
       .strict()
@@ -133,7 +91,6 @@ const FeatureVoiceModeSchema = z
       .object({
         provider: SpeechProviderIdSchema.optional(),
         model: z.string().min(1).optional(),
-        language: z.string().trim().min(1).optional(),
       })
       .strict()
       .optional(),
@@ -156,81 +113,8 @@ const FeatureVoiceModeSchema = z
   })
   .strict();
 
-const FeatureWebUiSchema = z
-  .object({
-    enabled: z.boolean().optional(),
-    distDir: z.string().min(1).optional(),
-  })
-  .strict();
-
-const StructuredGenerationProviderConfigSchema = z
-  .object({
-    provider: z.string().min(1),
-    model: z.string().min(1).optional(),
-    thinkingOptionId: z.string().min(1).optional(),
-  })
-  .strict();
-
-const AgentMetadataGenerationSchema = z
-  .object({
-    providers: z.array(StructuredGenerationProviderConfigSchema).optional(),
-  })
-  .strict();
-
-const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
-
-function isLegacyProviderEntry(value: unknown): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-
-  const command = (value as Record<string, unknown>).command;
-  if (!command || typeof command !== "object" || Array.isArray(command)) {
-    return false;
-  }
-
-  return typeof (command as Record<string, unknown>).mode === "string";
-}
-
-function normalizeAgentProviders(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return value;
-  }
-
-  const rawProviders = value as Record<string, unknown>;
-  const hasLegacyEntries = Object.values(rawProviders).some((entry) =>
-    isLegacyProviderEntry(entry),
-  );
-  if (!hasLegacyEntries) {
-    return value;
-  }
-
-  const legacyEntries: Record<string, unknown> = {};
-  const normalizedEntries: Record<string, unknown> = {};
-
-  for (const [providerId, providerValue] of Object.entries(rawProviders)) {
-    if (isLegacyProviderEntry(providerValue)) {
-      legacyEntries[providerId] = providerValue;
-      continue;
-    }
-    normalizedEntries[providerId] = providerValue;
-  }
-
-  const parsedLegacyEntries = AgentProviderRuntimeSettingsMapSchema.safeParse(legacyEntries);
-  if (!parsedLegacyEntries.success) {
-    return value;
-  }
-
-  return {
-    ...normalizedEntries,
-    ...migrateProviderSettings(parsedLegacyEntries.data, [...BUILTIN_PROVIDER_IDS]),
-  };
-}
-
 export const PersistedConfigSchema = z
   .object({
-    $schema: z.string().optional(),
-
     // v1 schema marker
     version: z.literal(1).optional(),
 
@@ -238,34 +122,13 @@ export const PersistedConfigSchema = z
     daemon: z
       .object({
         listen: z.string().optional(),
-        hostnames: z.union([z.literal(true), z.array(z.string())]).optional(),
         allowedHosts: z.union([z.literal(true), z.array(z.string())]).optional(),
-        trustedProxies: z.union([z.literal(true), z.array(z.string())]).optional(),
         mcp: z
           .object({
             enabled: z.boolean().optional(),
-            injectIntoAgents: z.boolean().optional(),
-          })
-          .passthrough()
-          .optional(),
-        browserTools: z
-          .object({
-            enabled: z.boolean().optional(),
-          })
-          .passthrough()
-          .optional(),
-        git: z
-          .object({
-            maxProcessesPerSecond: z.number().int().positive().optional(),
-            maxProcessConcurrency: z.number().int().positive().optional(),
           })
           .strict()
           .optional(),
-        autoArchiveAfterMerge: z.boolean().optional(),
-        enableTerminalAgentHooks: z.boolean().optional(),
-        appendSystemPrompt: z.string().optional(),
-        terminalProfiles: z.array(TerminalProfileSchema).optional(),
-        agentProfiles: z.array(AgentProfileSchema).optional(),
         cors: z
           .object({
             allowedOrigins: z.array(z.string()).optional(),
@@ -277,29 +140,11 @@ export const PersistedConfigSchema = z
             enabled: z.boolean().optional(),
             endpoint: z.string().optional(),
             publicEndpoint: z.string().optional(),
-            useTls: z.boolean().optional(),
-            publicUseTls: z.boolean().optional(),
           })
           .strict()
           .optional(),
-        serviceProxy: z
-          .object({
-            // COMPAT(serviceProxyEnabled): added 2026-06-02, remove after 2026-12-02.
-            // Parsed only to suppress optional public/listen layers for old configs;
-            // localhost service proxying remains always enabled.
-            enabled: z.boolean().optional(),
-            listen: z.string().optional(),
-            publicBaseUrl: z.url().optional(),
-          })
-          .strict()
-          .optional(),
-        auth: DaemonAuthSchema.optional(),
       })
       .strict()
-      .transform(({ allowedHosts, ...daemon }) => {
-        const hostnames = daemon.hostnames ?? allowedHosts;
-        return hostnames === undefined ? daemon : { ...daemon, hostnames };
-      })
       .optional(),
 
     app: z
@@ -310,15 +155,9 @@ export const PersistedConfigSchema = z
       .optional(),
 
     providers: ProvidersSchema.optional(),
-    pluginsEnabled: z.boolean().optional(),
-    plugins: z.record(PluginIdSchema, PluginSourceSchema).optional(),
-    worktrees: WorktreesConfigSchema.optional(),
     agents: z
       .object({
-        providers: z.preprocess(normalizeAgentProviders, ProviderOverridesSchema).optional(),
-        catalogRefreshTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
-        metadataGeneration: AgentMetadataGenerationSchema.optional(),
-        skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
+        providers: AgentProviderRuntimeSettingsMapSchema.optional(),
       })
       .strict()
       .optional(),
@@ -326,7 +165,6 @@ export const PersistedConfigSchema = z
       .object({
         dictation: FeatureDictationSchema.optional(),
         voiceMode: FeatureVoiceModeSchema.optional(),
-        webUi: FeatureWebUiSchema.optional(),
       })
       .strict()
       .optional(),
@@ -335,16 +173,10 @@ export const PersistedConfigSchema = z
   })
   .strict();
 
-type PersistedConfigSchemaOutput = z.infer<typeof PersistedConfigSchema>;
-
-export type PersistedConfig = Omit<PersistedConfigSchemaOutput, "agents"> & {
-  agents?: Omit<NonNullable<PersistedConfigSchemaOutput["agents"]>, "providers"> & {
-    providers?: AgentProviderRuntimeSettingsMap;
-  };
-};
+export type PersistedConfig = z.infer<typeof PersistedConfigSchema>;
 
 const CONFIG_FILENAME = "config.json";
-const DEFAULT_PERSISTED_CONFIG = PersistedConfigSchema.parse({
+const DEFAULT_PERSISTED_CONFIG: PersistedConfig = PersistedConfigSchema.parse({
   version: 1,
   daemon: {
     listen: "127.0.0.1:6767",
@@ -352,18 +184,18 @@ const DEFAULT_PERSISTED_CONFIG = PersistedConfigSchema.parse({
       allowedOrigins: ["https://app.paseo.sh"],
     },
     relay: {
-      enabled: false,
+      enabled: true,
     },
   },
   app: {
     baseUrl: "https://app.paseo.sh",
   },
-}) as PersistedConfig;
+});
 
-interface LoggerLike {
+type LoggerLike = {
   child(bindings: Record<string, unknown>): LoggerLike;
-  info(...args: unknown[]): void;
-}
+  info(...args: any[]): void;
+};
 
 function getConfigPath(paseoHome: string): string {
   return path.join(paseoHome, CONFIG_FILENAME);
@@ -373,11 +205,7 @@ function getLogger(logger: LoggerLike | undefined): LoggerLike | undefined {
   return logger?.child({ module: "config" });
 }
 
-// Removed config fields are stripped before parsing so the strict schema does not
-// reject a config written by an older release. The stripped values are discarded,
-// not migrated — there is no back-compat for the removed `providers.openai.voice`
-// block (use `providers.openai.stt` / `providers.openai.tts`).
-function stripRemovedConfigFields(parsed: unknown): unknown {
+function stripDeprecatedLocalSpeechConfigFields(parsed: unknown): unknown {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return parsed;
   }
@@ -389,25 +217,18 @@ function stripRemovedConfigFields(parsed: unknown): unknown {
   }
 
   const providersRecord = { ...(providers as Record<string, unknown>) };
-
   const local = providersRecord.local;
-  if (local && typeof local === "object" && !Array.isArray(local)) {
-    const localRecord = { ...(local as Record<string, unknown>) };
+  if (!local || typeof local !== "object" || Array.isArray(local)) {
+    root.providers = providersRecord;
+    return root;
+  }
+
+  const localRecord = { ...(local as Record<string, unknown>) };
+  if ("autoDownload" in localRecord) {
     delete localRecord.autoDownload;
-    providersRecord.local = localRecord;
   }
 
-  const openai = providersRecord.openai;
-  if (openai && typeof openai === "object" && !Array.isArray(openai)) {
-    const openaiRecord = { ...(openai as Record<string, unknown>) };
-    // COMPAT(openaiVoiceConfig): added 2026-06-30, remove after 2026-12-30.
-    // Drop a `providers.openai.voice` block left by an older release so the strict
-    // schema doesn't reject it. The value is discarded, not migrated — there is no
-    // back-compat; configure `providers.openai.stt` / `providers.openai.tts` instead.
-    delete openaiRecord.voice;
-    providersRecord.openai = openaiRecord;
-  }
-
+  providersRecord.local = localRecord;
   root.providers = providersRecord;
   return root;
 }
@@ -418,26 +239,21 @@ export function loadPersistedConfig(paseoHome: string, logger?: LoggerLike): Per
 
   if (!existsSync(configPath)) {
     try {
-      writePrivateFileAtomicSync(
-        configPath,
-        JSON.stringify(DEFAULT_PERSISTED_CONFIG, null, 2) + "\n",
-      );
+      mkdirSync(path.dirname(configPath), { recursive: true });
+      writeFileSync(configPath, JSON.stringify(DEFAULT_PERSISTED_CONFIG, null, 2) + "\n");
       log?.info(`Initialized config file at ${configPath}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      throw new Error(`[Config] Failed to initialize ${configPath}: ${message}`, { cause: err });
+      throw new Error(`[Config] Failed to initialize ${configPath}: ${message}`);
     }
   }
 
   let raw: string;
   try {
-    ensurePrivateFile(configPath);
     raw = readFileSync(configPath, "utf-8");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`[Config] Failed to read ${configPath}: ${message}`, {
-      cause: err,
-    });
+    throw new Error(`[Config] Failed to read ${configPath}: ${message}`);
   }
 
   let parsed: unknown;
@@ -445,12 +261,10 @@ export function loadPersistedConfig(paseoHome: string, logger?: LoggerLike): Per
     parsed = JSON.parse(raw);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`[Config] Invalid JSON in ${configPath}: ${message}`, {
-      cause: err,
-    });
+    throw new Error(`[Config] Invalid JSON in ${configPath}: ${message}`);
   }
 
-  const migrated = stripRemovedConfigFields(parsed);
+  const migrated = stripDeprecatedLocalSpeechConfigFields(parsed);
   const result = PersistedConfigSchema.safeParse(migrated);
   if (!result.success) {
     const issues = result.error.issues
@@ -460,7 +274,7 @@ export function loadPersistedConfig(paseoHome: string, logger?: LoggerLike): Per
   }
 
   log?.info(`Loaded from ${configPath}`);
-  return result.data as PersistedConfig;
+  return result.data;
 }
 
 export function savePersistedConfig(
@@ -480,12 +294,10 @@ export function savePersistedConfig(
   }
 
   try {
-    writePrivateFileAtomicSync(configPath, JSON.stringify(result.data, null, 2) + "\n");
+    writeFileSync(configPath, JSON.stringify(result.data, null, 2) + "\n");
     log?.info(`Saved to ${configPath}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`[Config] Failed to write ${configPath}: ${message}`, {
-      cause: err,
-    });
+    throw new Error(`[Config] Failed to write ${configPath}: ${message}`);
   }
 }

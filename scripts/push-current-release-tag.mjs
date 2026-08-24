@@ -8,7 +8,7 @@ const rootDir = path.resolve(__dirname, "..");
 const rootPackagePath = path.join(rootDir, "package.json");
 
 function usageAndExit(code = 0) {
-  process.stderr.write(`Usage: node scripts/push-current-release-tag.mjs [--branch <name>]\n`);
+  process.stderr.write(`Usage: node scripts/push-current-release-tag.mjs [--draft-release]\n`);
   process.exit(code);
 }
 
@@ -20,32 +20,12 @@ function runQuiet(cmd, args) {
   return execFileSync(cmd, args, { cwd: rootDir, encoding: "utf8" }).trim();
 }
 
-function getRemoteTagCommit(tag) {
-  try {
-    return runQuiet("git", ["ls-remote", "--exit-code", "--refs", "origin", `refs/tags/${tag}^{}`])
-      .split(/\s+/)[0]
-      .trim();
-  } catch {
-    try {
-      return runQuiet("git", ["ls-remote", "--exit-code", "--refs", "origin", `refs/tags/${tag}`])
-        .split(/\s+/)[0]
-        .trim();
-    } catch {
-      return "";
-    }
-  }
-}
-
 function parseArgs(argv) {
-  const args = {
-    branch: "",
-  };
+  const args = { draftRelease: false };
 
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--branch") {
-      args.branch = argv[index + 1] ?? "";
-      index += 1;
+  for (const arg of argv) {
+    if (arg === "--draft-release") {
+      args.draftRelease = true;
       continue;
     }
     if (arg === "--help" || arg === "-h") {
@@ -57,13 +37,22 @@ function parseArgs(argv) {
   return args;
 }
 
-const args = parseArgs(process.argv.slice(2));
+function parseRepoSlug(remoteUrl) {
+  const trimmed = remoteUrl.trim().replace(/\.git$/, "");
+  const httpsMatch = trimmed.match(/github\.com[/:]([^/]+\/[^/]+)$/);
+  if (httpsMatch) {
+    return httpsMatch[1];
+  }
+  throw new Error(`Could not determine GitHub repo from origin URL: ${remoteUrl}`);
+}
+
 const rootPackage = JSON.parse(readFileSync(rootPackagePath, "utf8"));
 const version = typeof rootPackage.version === "string" ? rootPackage.version.trim() : "";
 if (!version) {
   throw new Error('Root package.json must contain a valid "version"');
 }
 
+const args = parseArgs(process.argv.slice(2));
 const tag = `v${version}`;
 const headCommit = runQuiet("git", ["rev-parse", "HEAD"]);
 
@@ -82,25 +71,33 @@ if (localTagCommit !== headCommit) {
   );
 }
 
-const currentBranch = runQuiet("git", ["branch", "--show-current"]);
-const branchRef = args.branch || currentBranch;
-if (!branchRef) {
-  throw new Error("Cannot determine branch to push. Pass --branch <name>.");
+run("git", ["push", "origin", "HEAD"]);
+
+let remoteTagExists = false;
+try {
+  runQuiet("git", ["ls-remote", "--exit-code", "--tags", "origin", `refs/tags/${tag}`]);
+  remoteTagExists = true;
+} catch {
+  remoteTagExists = false;
 }
-run("git", ["push", "origin", `HEAD:${branchRef}`]);
 
-const remoteTagCommit = getRemoteTagCommit(tag);
-
-if (remoteTagCommit) {
-  if (remoteTagCommit !== localTagCommit) {
-    throw new Error(
-      `Remote tag ${tag} points to ${remoteTagCommit}, but local tag points to ${localTagCommit}. ` +
-        "Refusing to reuse an existing release tag for a different commit.",
-    );
-  }
+if (remoteTagExists) {
   console.log(`Tag ${tag} already exists on origin`);
 } else {
   run("git", ["push", "origin", tag]);
+}
+
+if (args.draftRelease) {
+  const repo = parseRepoSlug(runQuiet("git", ["remote", "get-url", "origin"]));
+  run("node", [
+    path.join("scripts", "sync-release-notes-from-changelog.mjs"),
+    "--repo",
+    repo,
+    "--tag",
+    tag,
+    "--create-if-missing",
+    "--draft",
+  ]);
 }
 
 console.log(`Release push complete: branch HEAD and tag ${tag}`);

@@ -67,7 +67,7 @@ function convertPCMToWavBuffer(
   return wavBuffer;
 }
 
-interface DictationStreamState {
+type DictationStreamState = {
   dictationId: string;
   sessionId: string;
   inputFormat: string;
@@ -92,7 +92,7 @@ interface DictationStreamState {
   finishSealed: boolean;
   finalSeq: number | null;
   finalTimeout: ReturnType<typeof setTimeout> | null;
-}
+};
 
 export type DictationStreamOutboundMessage =
   | { type: "dictation_stream_ack"; payload: { dictationId: string; ackSeq: number } }
@@ -130,7 +130,6 @@ export class DictationStreamManager {
   private readonly emit: (msg: DictationStreamOutboundMessage) => void;
   private readonly sessionId: string;
   private readonly resolveStt: () => SpeechToTextProvider | null;
-  private readonly language: string;
   private readonly finalTimeoutMs: number;
   private readonly autoCommitSeconds: number;
   private readonly streams = new Map<string, DictationStreamState>();
@@ -140,7 +139,6 @@ export class DictationStreamManager {
     emit: (msg: DictationStreamOutboundMessage) => void;
     sessionId: string;
     stt: Resolvable<SpeechToTextProvider | null>;
-    language?: string;
     finalTimeoutMs?: number;
     autoCommitSeconds?: number;
   }) {
@@ -148,7 +146,6 @@ export class DictationStreamManager {
     this.emit = params.emit;
     this.sessionId = params.sessionId;
     this.resolveStt = toResolver(params.stt);
-    this.language = params.language ?? "en";
     this.finalTimeoutMs = params.finalTimeoutMs ?? DEFAULT_DICTATION_FINAL_TIMEOUT_MS;
     this.autoCommitSeconds =
       params.autoCommitSeconds ??
@@ -179,7 +176,7 @@ export class DictationStreamManager {
     try {
       stt = sttProvider.createSession({
         logger: this.logger.child({ dictationId }),
-        language: this.language,
+        language: "en",
         prompt: transcriptionPrompt,
       });
     } catch (error) {

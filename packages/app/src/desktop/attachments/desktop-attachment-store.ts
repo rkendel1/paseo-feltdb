@@ -7,7 +7,17 @@ import {
   normalizeMimeType,
   parseDataUrl,
 } from "@/attachments/utils";
-import type { DesktopAttachmentBridge } from "./desktop-attachment-bridge";
+import {
+  copyDesktopAttachmentFile,
+  deleteDesktopAttachmentFile,
+  garbageCollectDesktopAttachmentFiles,
+  writeDesktopAttachmentBase64,
+} from "@/desktop/attachments/desktop-file-commands";
+import {
+  readDesktopFileBase64,
+  releaseDesktopPreviewUrl,
+  resolveDesktopPreviewUrl,
+} from "@/desktop/attachments/desktop-preview-url";
 
 const IMAGE_EXTENSION_BY_MIME_TYPE: Record<string, string> = {
   "image/png": ".png",
@@ -66,15 +76,12 @@ function toDesktopMetadata(input: {
   };
 }
 
-async function saveDesktopAttachmentFromFileUri(
-  bridge: DesktopAttachmentBridge,
-  input: {
-    id: string;
-    uri: string;
-    mimeType?: string;
-    fileName?: string | null;
-  },
-): Promise<AttachmentMetadata> {
+async function saveDesktopAttachmentFromFileUri(input: {
+  id: string;
+  uri: string;
+  mimeType?: string;
+  fileName?: string | null;
+}): Promise<AttachmentMetadata> {
   const sourcePath = fileUriToPath(input.uri);
   const fileName = input.fileName ?? inferFileNameFromPath(sourcePath);
   const mimeType = normalizeMimeType(input.mimeType);
@@ -84,7 +91,7 @@ async function saveDesktopAttachmentFromFileUri(
     mimeType,
   });
 
-  const result = await bridge.copyFile({
+  const result = await copyDesktopAttachmentFile({
     attachmentId: input.id,
     sourcePath,
     extension,
@@ -99,52 +106,20 @@ async function saveDesktopAttachmentFromFileUri(
   });
 }
 
-async function saveDesktopAttachmentFromBase64(
-  bridge: DesktopAttachmentBridge,
-  input: {
-    id: string;
-    base64: string;
-    mimeType: string;
-    fileName?: string | null;
-  },
-): Promise<AttachmentMetadata> {
+async function saveDesktopAttachmentFromBase64(input: {
+  id: string;
+  base64: string;
+  mimeType: string;
+  fileName?: string | null;
+}): Promise<AttachmentMetadata> {
   const extension = extensionForAttachment({
     fileName: input.fileName,
     mimeType: input.mimeType,
   });
 
-  const result = await bridge.writeBase64({
+  const result = await writeDesktopAttachmentBase64({
     attachmentId: input.id,
     base64: input.base64,
-    extension,
-  });
-
-  return toDesktopMetadata({
-    id: input.id,
-    mimeType: input.mimeType,
-    storagePath: result.path,
-    byteSize: result.byteSize,
-    fileName: input.fileName,
-  });
-}
-
-async function saveDesktopAttachmentFromBytes(
-  bridge: DesktopAttachmentBridge,
-  input: {
-    id: string;
-    bytes: Uint8Array;
-    mimeType: string;
-    fileName?: string | null;
-  },
-): Promise<AttachmentMetadata> {
-  const extension = extensionForAttachment({
-    fileName: input.fileName,
-    mimeType: input.mimeType,
-  });
-
-  const result = await bridge.writeBytes({
-    attachmentId: input.id,
-    bytes: input.bytes,
     extension,
   });
 
@@ -163,7 +138,7 @@ function assertDesktopAttachment(attachment: AttachmentMetadata): void {
   }
 }
 
-export function createDesktopAttachmentStore(bridge: DesktopAttachmentBridge): AttachmentStore {
+export function createDesktopAttachmentStore(): AttachmentStore {
   return {
     storageType: "desktop-file",
 
@@ -172,7 +147,7 @@ export function createDesktopAttachmentStore(bridge: DesktopAttachmentBridge): A
       const fileName = input.fileName ?? null;
 
       if (input.source.kind === "file_uri") {
-        return await saveDesktopAttachmentFromFileUri(bridge, {
+        return await saveDesktopAttachmentFromFileUri({
           id,
           uri: input.source.uri,
           mimeType: input.mimeType,
@@ -183,7 +158,7 @@ export function createDesktopAttachmentStore(bridge: DesktopAttachmentBridge): A
       if (input.source.kind === "data_url") {
         const parsed = parseDataUrl(input.source.dataUrl);
         const mimeType = normalizeMimeType(input.mimeType ?? parsed.mimeType);
-        return await saveDesktopAttachmentFromBase64(bridge, {
+        return await saveDesktopAttachmentFromBase64({
           id,
           base64: parsed.base64,
           mimeType,
@@ -191,19 +166,9 @@ export function createDesktopAttachmentStore(bridge: DesktopAttachmentBridge): A
         });
       }
 
-      if (input.source.kind === "bytes") {
-        const mimeType = normalizeMimeType(input.mimeType);
-        return await saveDesktopAttachmentFromBytes(bridge, {
-          id,
-          bytes: input.source.bytes,
-          mimeType,
-          fileName,
-        });
-      }
-
       const mimeType = normalizeMimeType(input.mimeType ?? input.source.blob.type);
       const base64 = await blobToBase64(input.source.blob);
-      return await saveDesktopAttachmentFromBase64(bridge, {
+      return await saveDesktopAttachmentFromBase64({
         id,
         base64,
         mimeType,
@@ -213,26 +178,26 @@ export function createDesktopAttachmentStore(bridge: DesktopAttachmentBridge): A
 
     async encodeBase64({ attachment }): Promise<string> {
       assertDesktopAttachment(attachment);
-      return await bridge.readFileBase64(attachment.storageKey);
+      return await readDesktopFileBase64(attachment.storageKey);
     },
 
     async resolvePreviewUrl({ attachment }): Promise<string> {
       assertDesktopAttachment(attachment);
-      return await bridge.resolvePreviewUrl(attachment);
+      return await resolveDesktopPreviewUrl(attachment);
     },
 
     async releasePreviewUrl({ attachment, url }): Promise<void> {
       assertDesktopAttachment(attachment);
-      await bridge.releasePreviewUrl({ url });
+      await releaseDesktopPreviewUrl({ url });
     },
 
     async delete({ attachment }): Promise<void> {
       assertDesktopAttachment(attachment);
-      await bridge.deleteFile({ path: attachment.storageKey });
+      await deleteDesktopAttachmentFile({ path: attachment.storageKey });
     },
 
     async garbageCollect({ referencedIds }): Promise<void> {
-      await bridge.garbageCollect({
+      await garbageCollectDesktopAttachmentFiles({
         referencedIds: Array.from(referencedIds),
       });
     },

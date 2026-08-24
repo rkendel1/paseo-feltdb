@@ -6,11 +6,9 @@ import { promises as fs } from "node:fs";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { AgentStorage } from "./agent-storage.js";
-import { buildConfigOverrides, buildSessionConfig } from "../persistence-hooks.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type {
   AgentPermissionRequest,
-  AgentProvider,
   AgentSession,
   AgentSessionConfig,
 } from "./agent-sdk-types.js";
@@ -27,109 +25,65 @@ type ManagedAgentOverrides = Omit<
   attention?: ManagedAgent["attention"];
 };
 
-function buildManagedAgentConfig(
-  provider: AgentProvider,
-  cwd: string,
-  configOverrides: Partial<AgentSessionConfig>,
-): AgentSessionConfig {
+function createManagedAgent(overrides: ManagedAgentOverrides = {}): ManagedAgent {
+  const now = overrides.updatedAt ?? new Date("2025-01-01T00:00:00.000Z");
+  const provider = overrides.provider ?? "claude";
+  const cwd = overrides.cwd ?? "/tmp/project";
+  const lifecycle = overrides.lifecycle ?? "idle";
+  const configOverrides = overrides.config ?? {};
   const config: AgentSessionConfig = {
     provider,
     cwd,
     title: configOverrides.title,
     modeId: configOverrides.modeId ?? "plan",
     model: configOverrides.model ?? "gpt-5.1",
-    thinkingOptionId: configOverrides.thinkingOptionId,
-    providerOptions: configOverrides.providerOptions,
-    toolPolicy: configOverrides.toolPolicy,
+    extra: configOverrides.extra ?? { claude: { maxThinkingTokens: 1024 } },
     systemPrompt: configOverrides.systemPrompt,
     mcpServers: configOverrides.mcpServers,
   };
-  if (Object.prototype.hasOwnProperty.call(configOverrides, "featureValues")) {
-    config.featureValues = configOverrides.featureValues;
-  }
-  return config;
-}
-
-function buildDefaultCapabilities() {
-  return {
-    supportsStreaming: true,
-    supportsSessionPersistence: true,
-    supportsDynamicModes: true,
-    supportsMcpServers: true,
-    supportsReasoningStream: true,
-    supportsToolInvocations: true,
-  };
-}
-
-function buildDefaultRuntimeInfo(params: {
-  provider: AgentProvider;
-  config: AgentSessionConfig;
-  sessionId: string;
-}) {
-  return {
-    provider: params.provider,
-    sessionId: params.sessionId,
-    model: params.config.model ?? null,
-    modeId: params.config.modeId ?? null,
-  };
-}
-
-interface ManagedAgentCore {
-  provider: AgentProvider;
-  cwd: string;
-  lifecycle: ManagedAgent["lifecycle"];
-  config: AgentSessionConfig;
-  session: AgentSession | null;
-  activeForegroundTurnId: string | null;
-  now: Date;
-}
-
-function resolveManagedAgentCore(overrides: ManagedAgentOverrides): ManagedAgentCore {
-  const now = overrides.updatedAt ?? new Date("2025-01-01T00:00:00.000Z");
-  const provider = overrides.provider ?? "claude";
-  const cwd = overrides.cwd ?? "/tmp/project";
-  const lifecycle = overrides.lifecycle ?? "idle";
-  const config = buildManagedAgentConfig(provider, cwd, overrides.config ?? {});
   const session = lifecycle === "closed" ? null : (overrides.session ?? ({} as AgentSession));
   const activeForegroundTurnId =
     overrides.activeForegroundTurnId ?? (lifecycle === "running" ? "test-turn-id" : null);
-  return { provider, cwd, lifecycle, config, session, activeForegroundTurnId, now };
-}
 
-function createManagedAgent(overrides: ManagedAgentOverrides = {}): ManagedAgent {
-  const core = resolveManagedAgentCore(overrides);
-  return {
+  const agent: ManagedAgent = {
     id: overrides.id ?? "agent-test",
-    provider: core.provider,
-    cwd: core.cwd,
-    workspaceId: overrides.workspaceId,
-    session: core.session,
-    capabilities: overrides.capabilities ?? buildDefaultCapabilities(),
-    config: core.config,
-    lifecycle: core.lifecycle,
-    createdAt: overrides.createdAt ?? core.now,
-    updatedAt: overrides.updatedAt ?? core.now,
+    provider,
+    cwd,
+    session,
+    capabilities: overrides.capabilities ?? {
+      supportsStreaming: true,
+      supportsSessionPersistence: true,
+      supportsDynamicModes: true,
+      supportsMcpServers: true,
+      supportsReasoningStream: true,
+      supportsToolInvocations: true,
+    },
+    config,
+    lifecycle,
+    createdAt: overrides.createdAt ?? now,
+    updatedAt: overrides.updatedAt ?? now,
     availableModes: overrides.availableModes ?? [],
-    currentModeId: overrides.currentModeId ?? core.config.modeId ?? null,
+    currentModeId: overrides.currentModeId ?? config.modeId ?? null,
     pendingPermissions: overrides.pendingPermissions ?? new Map<string, AgentPermissionRequest>(),
-    activeForegroundTurnId: core.activeForegroundTurnId,
+    activeForegroundTurnId,
     foregroundTurnWaiters: new Set(),
     unsubscribeSession: null,
     timeline: overrides.timeline ?? [],
     attention: overrides.attention ?? { requiresAttention: false },
-    runtimeInfo:
-      overrides.runtimeInfo ??
-      buildDefaultRuntimeInfo({
-        provider: core.provider,
-        config: core.config,
-        sessionId: overrides.sessionId ?? "session-123",
-      }),
+    runtimeInfo: overrides.runtimeInfo ?? {
+      provider,
+      sessionId: overrides.sessionId ?? "session-123",
+      model: config.model ?? null,
+      modeId: config.modeId ?? null,
+    },
     persistence: overrides.persistence ?? null,
     historyPrimed: overrides.historyPrimed ?? true,
-    lastUserMessageAt: overrides.lastUserMessageAt ?? core.now,
+    lastUserMessageAt: overrides.lastUserMessageAt ?? now,
     lastUsage: overrides.lastUsage,
     lastError: overrides.lastError,
   };
+
+  return agent;
 }
 
 describe("AgentStorage", () => {
@@ -160,7 +114,7 @@ describe("AgentStorage", () => {
           modeId: "coding",
           model: "gpt-5.1",
           systemPrompt: "Be terse and explicit.",
-          providerOptions: { allowedTools: ["Read"] },
+          extra: { claude: { maxThinkingTokens: 1024 } },
           mcpServers: {
             paseo: {
               type: "stdio",
@@ -176,6 +130,7 @@ describe("AgentStorage", () => {
     expect(records).toHaveLength(1);
     const [record] = records;
     expect(record.provider).toBe("claude");
+    expect(record.config?.title).toBe("Initial title");
     expect(record.config?.modeId).toBe("coding");
     expect(record.config?.model).toBe("gpt-5.1");
     expect(record.config?.systemPrompt).toBe("Be terse and explicit.");
@@ -192,63 +147,7 @@ describe("AgentStorage", () => {
     const reloaded = new AgentStorage(storagePath, logger);
     const [persisted] = await reloaded.list();
     expect(persisted.cwd).toBe("/tmp/project");
-    expect(persisted.config?.providerOptions).toEqual({ allowedTools: ["Read"] });
-  });
-
-  test("applySnapshot stores and reloads featureValues when present", async () => {
-    await storage.applySnapshot(
-      createManagedAgent({
-        id: "agent-feature-values",
-        config: {
-          featureValues: {
-            fast_mode: true,
-          },
-        },
-      }),
-    );
-
-    const record = await storage.get("agent-feature-values");
-    expect(record?.config?.featureValues).toEqual({ fast_mode: true });
-
-    const reloaded = new AgentStorage(storagePath, logger);
-    const persisted = await reloaded.get("agent-feature-values");
-    expect(persisted?.config?.featureValues).toEqual({ fast_mode: true });
-    expect(buildSessionConfig(persisted!).featureValues).toEqual({ fast_mode: true });
-  });
-
-  test("applySnapshot keeps featureValues absent when they were never set", async () => {
-    await storage.applySnapshot(
-      createManagedAgent({
-        id: "agent-no-feature-values",
-      }),
-    );
-
-    const reloaded = new AgentStorage(storagePath, logger);
-    const persisted = await reloaded.get("agent-no-feature-values");
-    expect(persisted?.config?.featureValues).toBeUndefined();
-    expect(buildSessionConfig(persisted!).featureValues).toBeUndefined();
-  });
-
-  test("buildConfigOverrides includes featureValues when present in stored config", async () => {
-    await storage.applySnapshot(
-      createManagedAgent({
-        id: "agent-resume-overrides",
-        config: {
-          featureValues: {
-            fast_mode: true,
-          },
-        },
-      }),
-    );
-
-    const record = await storage.get("agent-resume-overrides");
-    expect(record).not.toBeNull();
-    expect(buildConfigOverrides(record!)).toMatchObject({
-      cwd: "/tmp/project",
-      featureValues: {
-        fast_mode: true,
-      },
-    });
+    expect(persisted.config?.extra?.claude).toMatchObject({ maxThinkingTokens: 1024 });
   });
 
   test("applySnapshot preserves original createdAt timestamp", async () => {
@@ -357,7 +256,7 @@ describe("AgentStorage", () => {
     expect(record?.lastStatus).toBe("running");
   });
 
-  test("applySnapshot projects metadata after in-flight archival writes", async () => {
+  test("applySnapshot waits for in-flight writes before reading existing title", async () => {
     const agentId = "agent-pending-write";
     await storage.applySnapshot(createManagedAgent({ id: agentId }));
     const initialRecord = await storage.get(agentId);
@@ -370,7 +269,7 @@ describe("AgentStorage", () => {
 
     const storageInternals = storage as unknown as {
       pendingWrites: Map<string, Promise<void>>;
-      cache: Map<string, unknown>;
+      cache: Map<string, any>;
     };
     storageInternals.pendingWrites.set(agentId, pendingWrite);
 
@@ -385,14 +284,12 @@ describe("AgentStorage", () => {
     storageInternals.cache.set(agentId, {
       ...initialRecord!,
       title: "Generated title",
-      archivedAt: "2025-01-03T00:00:00.000Z",
     });
     releasePendingWrite?.();
 
     await applySnapshotPromise;
     const record = await storage.get(agentId);
     expect(record?.title).toBe("Generated title");
-    expect(record?.archivedAt).toBe("2025-01-03T00:00:00.000Z");
   });
 
   test("list returns all agents including internal ones", async () => {
@@ -432,47 +329,6 @@ describe("AgentStorage", () => {
     const record = await storage.get("internal-agent");
     expect(record).not.toBeNull();
     expect(record?.internal).toBe(true);
-  });
-
-  test("queries agents by provider session and native handle", async () => {
-    await storage.applySnapshot(
-      createManagedAgent({
-        id: "matching-session",
-        provider: "codex",
-        persistence: {
-          provider: "codex",
-          sessionId: "session-1",
-          nativeHandle: "thread-1",
-        },
-      }),
-    );
-    await storage.applySnapshot(
-      createManagedAgent({
-        id: "other-session",
-        provider: "codex",
-        persistence: { provider: "codex", sessionId: "session-2" },
-      }),
-    );
-
-    await expect(storage.listByProviderSession("codex", "session-1")).resolves.toMatchObject([
-      { id: "matching-session" },
-    ]);
-    await expect(storage.listByProviderSession("codex", "thread-1")).resolves.toMatchObject([
-      { id: "matching-session" },
-    ]);
-  });
-
-  test("queries agents by workspace", async () => {
-    await storage.applySnapshot(
-      createManagedAgent({ id: "workspace-agent", workspaceId: "workspace-1" }),
-    );
-    await storage.applySnapshot(
-      createManagedAgent({ id: "other-workspace-agent", workspaceId: "workspace-2" }),
-    );
-
-    await expect(storage.listByWorkspace("workspace-1")).resolves.toMatchObject([
-      { id: "workspace-agent" },
-    ]);
   });
 
   test("internal flag is persisted and reloaded", async () => {
@@ -550,23 +406,24 @@ describe("AgentStorage", () => {
     await reloaded.remove(agentId);
 
     const hasAnyRecordFile = async () => {
-      const projects = await fs
-        .readdir(storagePath, { withFileTypes: true })
-        .catch(() => [] as Awaited<ReturnType<typeof fs.readdir>>);
-      const exists = await Promise.all(
-        projects
-          .filter((project) => project.isDirectory())
-          .map(async (project) => {
-            const candidate = path.join(storagePath, project.name, `${agentId}.json`);
-            try {
-              await fs.access(candidate);
-              return true;
-            } catch {
-              return false;
-            }
-          }),
-      );
-      return exists.some((present) => present);
+      try {
+        const projects = await fs.readdir(storagePath, { withFileTypes: true });
+        for (const project of projects) {
+          if (!project.isDirectory()) {
+            continue;
+          }
+          const candidate = path.join(storagePath, project.name, `${agentId}.json`);
+          try {
+            await fs.access(candidate);
+            return true;
+          } catch {
+            // not here
+          }
+        }
+      } catch {
+        // ignore
+      }
+      return false;
     };
 
     expect(await hasAnyRecordFile()).toBe(false);

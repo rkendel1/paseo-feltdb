@@ -31,16 +31,16 @@ export type SpeechReadinessReasonCode =
   | "stt_unavailable"
   | "tts_unavailable";
 
-export interface SpeechReadinessState {
+export type SpeechReadinessState = {
   enabled: boolean;
   available: boolean;
   reasonCode: SpeechReadinessReasonCode;
   message: string;
   retryable: boolean;
   missingModelIds: LocalSpeechModelId[];
-}
+};
 
-export interface SpeechReadinessSnapshot {
+export type SpeechReadinessSnapshot = {
   generatedAt: string;
   requiredLocalModelIds: LocalSpeechModelId[];
   missingLocalModelIds: LocalSpeechModelId[];
@@ -51,7 +51,7 @@ export interface SpeechReadinessSnapshot {
   realtimeVoice: SpeechReadinessState;
   dictation: SpeechReadinessState;
   voiceFeature: SpeechReadinessState;
-}
+};
 
 function resolveRequestedSpeechProviders(
   speechConfig: PaseoSpeechConfig | null,
@@ -100,19 +100,20 @@ async function findMissingRequiredLocalModels(params: {
   const specsById = new Map(listLocalSpeechModels().map((model) => [model.id, model]));
   const missing = new Set<LocalSpeechModelId>();
 
-  const checks = await Promise.all(
-    requiredModelIds.map(async (modelId) => {
-      const spec = specsById.get(modelId);
-      if (!spec) return { modelId, missing: true };
-      const modelDir = getLocalSpeechModelDir(modelsDir, modelId);
-      const filePresence = await Promise.all(
-        spec.requiredFiles.map((relPath) => hasRequiredLocalModelFile(join(modelDir, relPath))),
-      );
-      return { modelId, missing: !filePresence.every((present) => present) };
-    }),
-  );
-  for (const check of checks) {
-    if (check.missing) missing.add(check.modelId);
+  for (const modelId of requiredModelIds) {
+    const spec = specsById.get(modelId);
+    if (!spec) {
+      missing.add(modelId);
+      continue;
+    }
+    const modelDir = getLocalSpeechModelDir(modelsDir, modelId);
+    for (const relPath of spec.requiredFiles) {
+      const filePath = join(modelDir, relPath);
+      if (!(await hasRequiredLocalModelFile(filePath))) {
+        missing.add(modelId);
+        break;
+      }
+    }
   }
 
   return Array.from(missing);
@@ -311,15 +312,6 @@ function describeRequestedProviders(providers: RequestedSpeechProviders): {
   };
 }
 
-function resolveVoiceTtsLabel(
-  ttsService: TextToSpeechProvider | null,
-  localVoiceTtsProvider: TextToSpeechProvider | null,
-): "unavailable" | "local" | "openai" {
-  if (!ttsService) return "unavailable";
-  if (ttsService === localVoiceTtsProvider) return "local";
-  return "openai";
-}
-
 function resolveEffectiveProviderIds(params: {
   turnDetectionService: TurnDetectionProvider | null;
   sttService: SpeechToTextProvider | null;
@@ -336,29 +328,33 @@ function resolveEffectiveProviderIds(params: {
     dictationStt: params.dictationSttService?.id ?? "unavailable",
     voiceTurnDetection: params.turnDetectionService?.id ?? "unavailable",
     voiceStt: params.sttService?.id ?? "unavailable",
-    voiceTts: resolveVoiceTtsLabel(params.ttsService, params.localVoiceTtsProvider),
+    voiceTts: !params.ttsService
+      ? "unavailable"
+      : params.ttsService === params.localVoiceTtsProvider
+        ? "local"
+        : "openai",
   };
 }
 
-export interface SpeechService {
-  resolveStt: () => SpeechToTextProvider | null;
-  resolveSttLanguage: () => string;
-  resolveTts: () => TextToSpeechProvider | null;
-  resolveTurnDetection: () => TurnDetectionProvider | null;
+export type InitializedSpeechRuntime = {
+  resolveVoiceTurnDetection: () => TurnDetectionProvider | null;
+  resolveVoiceStt: () => SpeechToTextProvider | null;
+  resolveVoiceTts: () => TextToSpeechProvider | null;
   resolveDictationStt: () => SpeechToTextProvider | null;
-  resolveDictationSttLanguage: () => string;
-  getReadiness: () => SpeechReadinessSnapshot;
-  onReadinessChange: (listener: (snapshot: SpeechReadinessSnapshot) => void) => () => void;
-  start: () => void;
-  stop: () => Promise<void>;
-  ready: Promise<void>;
-}
+  getSpeechReadiness: () => SpeechReadinessSnapshot;
+  subscribeSpeechReadiness: (listener: (snapshot: SpeechReadinessSnapshot) => void) => () => void;
+  cleanup: () => void;
+  localModelConfig: {
+    modelsDir: string;
+    defaultModelIds: LocalSpeechModelId[];
+  } | null;
+};
 
-export function createSpeechService(params: {
+export async function initializeSpeechRuntime(params: {
   logger: Logger;
   openaiConfig?: PaseoOpenAIConfig;
   speechConfig?: PaseoSpeechConfig;
-}): SpeechService {
+}): Promise<InitializedSpeechRuntime> {
   const logger = params.logger.child({ module: "speech-runtime" });
   const speechConfig = params.speechConfig ?? null;
   const openaiConfig = params.openaiConfig;
@@ -394,8 +390,6 @@ export function createSpeechService(params: {
 
   let missingLocalModelIds: LocalSpeechModelId[] = [];
   let backgroundDownloadInProgress = false;
-  let backgroundDownloadAbortController: AbortController | null = null;
-  let backgroundDownloadPromise: Promise<void> | null = null;
   let backgroundDownloadError: string | null = null;
   let stopped = false;
   let monitorTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -403,14 +397,6 @@ export function createSpeechService(params: {
   const readinessListeners = new Set<(snapshot: SpeechReadinessSnapshot) => void>();
   let lastReadinessFingerprint: string | null = null;
   let lastPublishedReadinessSnapshot: SpeechReadinessSnapshot | null = null;
-  let started = false;
-  let readySettled = false;
-  let resolveReady!: () => void;
-  let rejectReady!: (error: unknown) => void;
-  const ready = new Promise<void>((resolve, reject) => {
-    resolveReady = resolve;
-    rejectReady = reject;
-  });
 
   const computeReadinessSnapshot = (): SpeechReadinessSnapshot => {
     const realtimeVoice = buildRealtimeVoiceReadiness({
@@ -611,15 +597,12 @@ export function createSpeechService(params: {
       "Starting background download for missing local speech models",
     );
 
-    const abortController = new AbortController();
-    backgroundDownloadAbortController = abortController;
-    backgroundDownloadPromise = (async () => {
+    void (async () => {
       try {
         await ensureLocalSpeechModels({
           modelsDir,
           modelIds,
           logger,
-          signal: abortController.signal,
         });
         await runReconcile();
         backgroundDownloadError = null;
@@ -634,7 +617,6 @@ export function createSpeechService(params: {
           "Background local speech model download failed",
         );
       } finally {
-        backgroundDownloadAbortController = null;
         backgroundDownloadInProgress = false;
         await refreshMissingLocalModels().catch((error) => {
           logger.warn({ err: error }, "Failed to refresh local speech model status after download");
@@ -676,58 +658,32 @@ export function createSpeechService(params: {
     }
   };
 
-  const start = (): void => {
-    if (started || stopped) {
-      return;
+  await runReconcile();
+  const snapshot = computeReadinessSnapshot();
+  if (snapshot.voiceFeature.enabled && !snapshot.voiceFeature.available) {
+    if (missingLocalModelIds.length > 0) {
+      startBackgroundDownload();
     }
-    started = true;
-    void (async () => {
-      try {
-        await runReconcile();
-        const snapshot = computeReadinessSnapshot();
-        if (snapshot.voiceFeature.enabled && !snapshot.voiceFeature.available) {
-          if (missingLocalModelIds.length > 0) {
-            startBackgroundDownload();
-          }
-          scheduleMonitor();
-        }
-        if (!readySettled) {
-          readySettled = true;
-          resolveReady();
-        }
-      } catch (error) {
-        if (!readySettled) {
-          readySettled = true;
-          rejectReady(error);
-        }
-        logger.error({ err: error }, "Speech runtime failed during initial reconcile");
-      }
-    })();
-  };
+    scheduleMonitor();
+  }
 
-  const stop = async (): Promise<void> => {
+  const cleanup = (): void => {
     stopped = true;
     if (monitorTimeout) {
       clearTimeout(monitorTimeout);
       monitorTimeout = null;
     }
     localCleanup();
-    backgroundDownloadAbortController?.abort();
-    await backgroundDownloadPromise?.catch(() => undefined);
-    backgroundDownloadPromise = null;
   };
 
   return {
-    resolveTurnDetection: () => turnDetectionService,
-    resolveStt: () => sttService,
-    resolveSttLanguage: () => speechConfig?.sttLanguages?.voice ?? "en",
-    resolveTts: () => ttsService,
+    resolveVoiceTurnDetection: () => turnDetectionService,
+    resolveVoiceStt: () => sttService,
+    resolveVoiceTts: () => ttsService,
     resolveDictationStt: () => dictationSttService,
-    resolveDictationSttLanguage: () => speechConfig?.sttLanguages?.dictation ?? "en",
-    getReadiness: () => lastPublishedReadinessSnapshot ?? computeReadinessSnapshot(),
-    onReadinessChange: subscribeSpeechReadiness,
-    start,
-    stop,
-    ready,
+    getSpeechReadiness: () => lastPublishedReadinessSnapshot ?? computeReadinessSnapshot(),
+    subscribeSpeechReadiness,
+    cleanup,
+    localModelConfig,
   };
 }

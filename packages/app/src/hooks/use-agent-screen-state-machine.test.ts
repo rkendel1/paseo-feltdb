@@ -9,6 +9,7 @@ import {
 
 type ReadyState = Extract<AgentScreenViewState, { tag: "ready" }>;
 type CatchingUpSyncState = Extract<ReadyState["sync"], { status: "catching_up" }>;
+type SyncErrorSyncState = Extract<ReadyState["sync"], { status: "sync_error" }>;
 
 function createAgent(id: string): Agent {
   const now = new Date("2026-02-19T00:00:00.000Z");
@@ -17,7 +18,6 @@ function createAgent(id: string): Agent {
     id,
     provider: "claude",
     status: "running",
-    activeTurn: { turnId: "turn-1", startedAt: now },
     createdAt: now,
     updatedAt: now,
     lastUserMessageAt: now,
@@ -43,7 +43,6 @@ function createAgent(id: string): Agent {
     title: "Agent",
     cwd: "/repo",
     model: null,
-    parentAgentId: null,
     labels: {},
   };
 }
@@ -58,14 +57,13 @@ function createAgentWithStatus({ id, status }: { id: string; status: Agent["stat
 function createBaseInput(): AgentScreenMachineInput {
   return {
     agent: null,
-    isArchived: false,
-    continuity: { kind: "none" },
+    placeholderAgent: null,
     missingAgentState: { kind: "idle" },
     isConnected: true,
     isArchivingCurrentAgent: false,
     isHistorySyncing: false,
     needsAuthoritativeSync: false,
-    visibilityCatchUpStatus: "ready",
+    shouldUseOptimisticStream: false,
     hasHydratedHistoryBefore: false,
   };
 }
@@ -76,6 +74,7 @@ function createBaseMemory(
   return {
     hasRenderedReady: false,
     lastReadyAgent: null,
+    activeToastLatch: "none",
     hadInitialSyncFailure: false,
     ...overrides,
   };
@@ -97,18 +96,12 @@ function expectCatchingUpSync(state: ReadyState): CatchingUpSyncState {
   return state.sync;
 }
 
-function expectSyncErrorSync(state: ReadyState): void {
+function expectSyncErrorSync(state: ReadyState): SyncErrorSyncState {
   expect(state.sync.status).toBe("sync_error");
-}
-
-function stateMachineLabel(state: AgentScreenViewState): "loading" | "resolving" | Agent["status"] {
-  if (state.tag === "boot") {
-    return state.reason;
+  if (state.sync.status !== "sync_error") {
+    throw new Error("expected sync_error sync state");
   }
-  if (state.tag === "ready") {
-    return state.agent.status;
-  }
-  return "error";
+  return state.sync;
 }
 
 describe("deriveAgentScreenViewState", () => {
@@ -172,9 +165,10 @@ describe("deriveAgentScreenViewState", () => {
     const sync = expectCatchingUpSync(ready);
 
     expect(sync.ui).toBe("overlay");
+    expect(sync.shouldEmitHistoryRefreshToast).toBe(false);
   });
 
-  it("uses silent catching-up state for already-hydrated agents", () => {
+  it("uses toast catching-up state for already-hydrated agents", () => {
     const memory = createBaseMemory({
       hasRenderedReady: true,
       lastReadyAgent: createAgent("agent-1"),
@@ -189,63 +183,8 @@ describe("deriveAgentScreenViewState", () => {
     const ready = expectReadyState(result.state);
     const sync = expectCatchingUpSync(ready);
 
-    expect(sync.ui).toBe("silent");
-  });
-
-  it("keeps hydrated history visible while reconnect revalidation and visibility catch-up overlap", () => {
-    const memory = createBaseMemory({
-      hasRenderedReady: true,
-      lastReadyAgent: createAgent("agent-1"),
-    });
-    const input: AgentScreenMachineInput = {
-      ...createBaseInput(),
-      hasHydratedHistoryBefore: true,
-      needsAuthoritativeSync: true,
-      visibilityCatchUpStatus: "pending",
-    };
-
-    const result = deriveAgentScreenViewState({ input, memory });
-    const ready = expectReadyState(result.state);
-    const sync = expectCatchingUpSync(ready);
-
-    expect(sync.ui).toBe("silent");
-  });
-
-  it("keeps already-hydrated history visible while a newly visible agent catches up", () => {
-    const memory = createBaseMemory({
-      hasRenderedReady: true,
-      lastReadyAgent: createAgent("agent-1"),
-    });
-    const input: AgentScreenMachineInput = {
-      ...createBaseInput(),
-      agent: createAgent("agent-1"),
-      hasHydratedHistoryBefore: true,
-      visibilityCatchUpStatus: "pending",
-    };
-
-    const result = deriveAgentScreenViewState({ input, memory });
-    const ready = expectReadyState(result.state);
-    const sync = expectCatchingUpSync(ready);
-
-    expect(sync.ui).toBe("silent");
-  });
-
-  it("keeps hydrated history readable after a visibility catch-up error", () => {
-    const memory = createBaseMemory({
-      hasRenderedReady: true,
-      lastReadyAgent: createAgent("agent-1"),
-    });
-    const input: AgentScreenMachineInput = {
-      ...createBaseInput(),
-      agent: createAgent("agent-1"),
-      hasHydratedHistoryBefore: true,
-      visibilityCatchUpStatus: "error",
-    };
-
-    const result = deriveAgentScreenViewState({ input, memory });
-    const ready = expectReadyState(result.state);
-
-    expectSyncErrorSync(ready);
+    expect(sync.ui).toBe("toast");
+    expect(sync.shouldEmitHistoryRefreshToast).toBe(true);
   });
 
   it("keeps sync errors non-blocking once the screen was ready", () => {
@@ -261,7 +200,9 @@ describe("deriveAgentScreenViewState", () => {
 
     const result = deriveAgentScreenViewState({ input, memory });
     const ready = expectReadyState(result.state);
-    expectSyncErrorSync(ready);
+    const sync = expectSyncErrorSync(ready);
+
+    expect(sync.shouldEmitSyncErrorToast).toBe(true);
   });
 
   it("remembers first-load sync failure and keeps catch-up overlay off after error clears", () => {
@@ -280,7 +221,9 @@ describe("deriveAgentScreenViewState", () => {
       memory: initialMemory,
     });
     const errorReady = expectReadyState(errorResult.state);
-    expectSyncErrorSync(errorReady);
+    const errorSync = expectSyncErrorSync(errorReady);
+
+    expect(errorSync.shouldEmitSyncErrorToast).toBe(true);
     expect(errorResult.memory.hadInitialSyncFailure).toBe(true);
 
     const retryInput: AgentScreenMachineInput = {
@@ -296,6 +239,7 @@ describe("deriveAgentScreenViewState", () => {
     const retrySync = expectCatchingUpSync(retryReady);
 
     expect(retrySync.ui).toBe("silent");
+    expect(retrySync.shouldEmitHistoryRefreshToast).toBe(false);
     expect(retryResult.memory.hadInitialSyncFailure).toBe(true);
   });
 
@@ -311,26 +255,35 @@ describe("deriveAgentScreenViewState", () => {
 
     const result = deriveAgentScreenViewState({ input, memory });
     const ready = expectReadyState(result.state);
-    expectSyncErrorSync(ready);
+    const sync = expectSyncErrorSync(ready);
 
     expect(ready.source).toBe("stale");
     expect(ready.agent.id).toBe("agent-1");
+    expect(sync.shouldEmitSyncErrorToast).toBe(true);
   });
 
-  it("marks the sync error as retrying while a user-requested retry is in flight", () => {
+  it("emits sync error toast only on transition into sync_error", () => {
     const memory = createBaseMemory({
       hasRenderedReady: true,
       lastReadyAgent: createAgent("agent-1"),
     });
     const input: AgentScreenMachineInput = {
       ...createBaseInput(),
-      visibilityCatchUpStatus: "retrying",
+      missingAgentState: { kind: "error", message: "network timeout" },
     };
 
-    const result = deriveAgentScreenViewState({ input, memory });
-    const ready = expectReadyState(result.state);
+    const first = deriveAgentScreenViewState({ input, memory });
+    const firstReady = expectReadyState(first.state);
+    const firstSync = expectSyncErrorSync(firstReady);
+    expect(firstSync.shouldEmitSyncErrorToast).toBe(true);
 
-    expect(ready.sync).toEqual({ status: "sync_error", isRetrying: true });
+    const second = deriveAgentScreenViewState({
+      input,
+      memory: first.memory,
+    });
+    const secondReady = expectReadyState(second.state);
+    const secondSync = expectSyncErrorSync(secondReady);
+    expect(secondSync.shouldEmitSyncErrorToast).toBe(false);
   });
 
   it("returns blocking error before first paint when refresh fails", () => {
@@ -372,7 +325,8 @@ describe("deriveAgentScreenViewState", () => {
     const memory = createBaseMemory();
     const input: AgentScreenMachineInput = {
       ...createBaseInput(),
-      continuity: { kind: "optimistic-create", agent: createAgent("draft-agent") },
+      placeholderAgent: createAgent("draft-agent"),
+      shouldUseOptimisticStream: true,
     };
 
     const result = deriveAgentScreenViewState({ input, memory });
@@ -403,31 +357,15 @@ describe("deriveAgentScreenViewState", () => {
     expect(result.memory.lastReadyAgent).toBeNull();
   });
 
-  it("renders an archived agent before provider history is initialized", () => {
-    const result = deriveAgentScreenViewState({
-      input: {
-        ...createBaseInput(),
-        agent: createAgent("agent-1"),
-        isArchived: true,
-        needsAuthoritativeSync: true,
-      },
-      memory: createBaseMemory(),
-    });
-
-    const ready = expectReadyState(result.state);
-    expect(ready.agent.id).toBe("agent-1");
-    expect(ready.sync).toEqual({ status: "idle" });
-  });
-
-  it("keeps optimistic create non-blocking while timeline and authoritative history catch up", () => {
+  it("still allows optimistic create flow to render before authoritative history arrives", () => {
     const memory = createBaseMemory();
     const input: AgentScreenMachineInput = {
       ...createBaseInput(),
       agent: createAgentWithStatus({ id: "agent-1", status: "idle" }),
-      continuity: { kind: "optimistic-create", agent: createAgent("agent-1") },
+      placeholderAgent: createAgent("agent-1"),
+      shouldUseOptimisticStream: true,
       needsAuthoritativeSync: true,
       isHistorySyncing: true,
-      visibilityCatchUpStatus: "pending",
       hasHydratedHistoryBefore: false,
     };
 
@@ -436,14 +374,14 @@ describe("deriveAgentScreenViewState", () => {
 
     expect(ready.source).toBe("optimistic");
     expect(ready.agent.status).toBe("running");
-    expect(ready.sync).toEqual({ status: "catching_up", ui: "silent" });
   });
 
   it("keeps optimistic flow non-blocking while transitioning to authoritative stream", () => {
     const initialMemory = createBaseMemory();
     const optimisticInput: AgentScreenMachineInput = {
       ...createBaseInput(),
-      continuity: { kind: "optimistic-create", agent: createAgent("draft-agent") },
+      placeholderAgent: createAgent("draft-agent"),
+      shouldUseOptimisticStream: true,
     };
 
     const optimistic = deriveAgentScreenViewState({
@@ -471,7 +409,8 @@ describe("deriveAgentScreenViewState", () => {
     const input: AgentScreenMachineInput = {
       ...createBaseInput(),
       agent: createAgentWithStatus({ id: "agent-1", status: "idle" }),
-      continuity: { kind: "optimistic-create", agent: createAgent("agent-1") },
+      placeholderAgent: createAgent("agent-1"),
+      shouldUseOptimisticStream: true,
     };
 
     const result = deriveAgentScreenViewState({ input, memory });
@@ -481,50 +420,20 @@ describe("deriveAgentScreenViewState", () => {
     expect(ready.agent.status).toBe("running");
   });
 
-  it("keeps send lifecycle transitions forward-only across optimistic and authoritative handoff", () => {
-    let memory = createBaseMemory();
-    const transitions: Array<"loading" | "resolving" | Agent["status"]> = [];
-
-    for (const input of [
-      createBaseInput(),
-      {
-        ...createBaseInput(),
-        agent: createAgentWithStatus({ id: "agent-1", status: "idle" }),
-        continuity: { kind: "optimistic-create", agent: createAgent("agent-1") },
-      },
-      {
-        ...createBaseInput(),
-        agent: createAgentWithStatus({ id: "agent-1", status: "running" }),
-        continuity: { kind: "optimistic-create", agent: createAgent("agent-1") },
-      },
-      {
-        ...createBaseInput(),
-        agent: createAgentWithStatus({ id: "agent-1", status: "idle" }),
-      },
-    ] satisfies AgentScreenMachineInput[]) {
-      const result = deriveAgentScreenViewState({ input, memory });
-      memory = result.memory;
-      transitions.push(stateMachineLabel(result.state));
-    }
-
-    expect(transitions).toEqual(["loading", "running", "running", "idle"]);
-    expect(transitions.join(" -> ")).not.toContain("running -> loading");
-    expect(transitions.join(" -> ")).not.toContain("loading -> idle");
-  });
-
-  it("uses authoritative initializing status instead of optimistic running status", () => {
+  it("keeps optimistic running status while authoritative agent is initializing", () => {
     const memory = createBaseMemory();
     const input: AgentScreenMachineInput = {
       ...createBaseInput(),
       agent: createAgentWithStatus({ id: "agent-1", status: "initializing" }),
-      continuity: { kind: "optimistic-create", agent: createAgent("agent-1") },
+      placeholderAgent: createAgent("agent-1"),
+      shouldUseOptimisticStream: true,
     };
 
     const result = deriveAgentScreenViewState({ input, memory });
     const ready = expectReadyState(result.state);
 
-    expect(ready.source).toBe("authoritative");
-    expect(ready.agent.status).toBe("initializing");
+    expect(ready.source).toBe("optimistic");
+    expect(ready.agent.status).toBe("running");
   });
 
   it("hands off to authoritative once agent reaches running", () => {
@@ -532,7 +441,8 @@ describe("deriveAgentScreenViewState", () => {
     const input: AgentScreenMachineInput = {
       ...createBaseInput(),
       agent: createAgentWithStatus({ id: "agent-1", status: "running" }),
-      continuity: { kind: "optimistic-create", agent: createAgent("agent-1") },
+      placeholderAgent: createAgent("agent-1"),
+      shouldUseOptimisticStream: true,
     };
 
     const result = deriveAgentScreenViewState({ input, memory });
@@ -547,7 +457,8 @@ describe("deriveAgentScreenViewState", () => {
     const input: AgentScreenMachineInput = {
       ...createBaseInput(),
       agent: createAgentWithStatus({ id: "agent-1", status: "error" }),
-      continuity: { kind: "optimistic-create", agent: createAgent("agent-1") },
+      placeholderAgent: createAgent("agent-1"),
+      shouldUseOptimisticStream: true,
     };
 
     const result = deriveAgentScreenViewState({ input, memory });
@@ -562,7 +473,8 @@ describe("deriveAgentScreenViewState", () => {
     const input: AgentScreenMachineInput = {
       ...createBaseInput(),
       agent: createAgentWithStatus({ id: "agent-1", status: "closed" }),
-      continuity: { kind: "optimistic-create", agent: createAgent("agent-1") },
+      placeholderAgent: createAgent("agent-1"),
+      shouldUseOptimisticStream: true,
     };
 
     const result = deriveAgentScreenViewState({ input, memory });
@@ -570,6 +482,71 @@ describe("deriveAgentScreenViewState", () => {
 
     expect(ready.source).toBe("authoritative");
     expect(ready.agent.status).toBe("closed");
+  });
+
+  it("emits history refresh toast only on transition into toast catch-up state", () => {
+    const memory = createBaseMemory({
+      hasRenderedReady: true,
+      lastReadyAgent: createAgent("agent-1"),
+    });
+    const input: AgentScreenMachineInput = {
+      ...createBaseInput(),
+      needsAuthoritativeSync: true,
+      hasHydratedHistoryBefore: true,
+    };
+
+    const first = deriveAgentScreenViewState({ input, memory });
+    const firstReady = expectReadyState(first.state);
+    const firstSync = expectCatchingUpSync(firstReady);
+
+    expect(firstSync.ui).toBe("toast");
+    expect(firstSync.shouldEmitHistoryRefreshToast).toBe(true);
+
+    const second = deriveAgentScreenViewState({
+      input,
+      memory: first.memory,
+    });
+    const secondReady = expectReadyState(second.state);
+    const secondSync = expectCatchingUpSync(secondReady);
+
+    expect(secondSync.ui).toBe("toast");
+    expect(secondSync.shouldEmitHistoryRefreshToast).toBe(false);
+  });
+
+  it("re-arms history refresh toast after leaving and re-entering catch-up", () => {
+    const baseInput: AgentScreenMachineInput = {
+      ...createBaseInput(),
+      hasHydratedHistoryBefore: true,
+    };
+    const initialMemory = createBaseMemory({
+      hasRenderedReady: true,
+      lastReadyAgent: createAgent("agent-1"),
+    });
+
+    const firstCatchingUp = deriveAgentScreenViewState({
+      input: { ...baseInput, needsAuthoritativeSync: true },
+      memory: initialMemory,
+    });
+    const firstCatchingUpReady = expectReadyState(firstCatchingUp.state);
+    const firstCatchingUpSync = expectCatchingUpSync(firstCatchingUpReady);
+    expect(firstCatchingUpSync.ui).toBe("toast");
+    expect(firstCatchingUpSync.shouldEmitHistoryRefreshToast).toBe(true);
+
+    const idle = deriveAgentScreenViewState({
+      input: { ...baseInput, needsAuthoritativeSync: false },
+      memory: firstCatchingUp.memory,
+    });
+    const idleReady = expectReadyState(idle.state);
+    expect(idleReady.sync.status).toBe("idle");
+
+    const secondCatchingUp = deriveAgentScreenViewState({
+      input: { ...baseInput, needsAuthoritativeSync: true },
+      memory: idle.memory,
+    });
+    const secondCatchingUpReady = expectReadyState(secondCatchingUp.state);
+    const secondCatchingUpSync = expectCatchingUpSync(secondCatchingUpReady);
+    expect(secondCatchingUpSync.ui).toBe("toast");
+    expect(secondCatchingUpSync.shouldEmitHistoryRefreshToast).toBe(true);
   });
 
   it("clears initial sync failure memory after history is hydrated", () => {
@@ -588,7 +565,7 @@ describe("deriveAgentScreenViewState", () => {
     const ready = expectReadyState(result.state);
     const sync = expectCatchingUpSync(ready);
 
-    expect(sync.ui).toBe("silent");
+    expect(sync.ui).toBe("toast");
     expect(result.memory.hadInitialSyncFailure).toBe(false);
   });
 });

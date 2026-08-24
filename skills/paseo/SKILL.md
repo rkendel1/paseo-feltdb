@@ -1,129 +1,145 @@
 ---
 name: paseo
-description: Paseo reference for managing projects, workspaces, workspace scripts, agents, schedules, and heartbeats.
+description: Paseo CLI reference for managing agents. Load this skill whenever you need to use paseo commands.
 ---
 
-Paseo is a remote daemon that manages coding agents, terminals. Control it through MCP tools or the CLI.
-
-## Projects
-
-Manage the daemon's project registry through the CLI:
+## CLI Commands
 
 ```bash
-paseo project create [path]
-paseo project ls
-paseo project rename <project-id> <name>
-paseo project rename <project-id> --reset
-paseo project delete <project-id>
+# List agents (directory-scoped by default)
+paseo ls                 # Only shows agents for current directory
+paseo ls -g              # All agents across all projects (global)
+paseo ls --json          # JSON output for parsing
+
+# Create and run an agent (blocks until completion by default, no timeout)
+paseo run --mode bypass "<prompt>"
+paseo run --mode bypass --name "Task Name" "<prompt>"
+paseo run --mode bypass --model opus "<prompt>"
+paseo run --mode full-access --provider codex "<prompt>"
+
+# Wait timeout - limit how long run blocks (default: no limit)
+paseo run --wait-timeout 30m "<prompt>"   # Wait up to 30 minutes
+paseo run --wait-timeout 1h "<prompt>"    # Wait up to 1 hour
+paseo run --wait-timeout 3600 "<prompt>"  # Plain number = seconds
+
+# Detached mode - runs in background, returns agent ID immediately
+paseo run --detach "<prompt>"
+paseo run -d "<prompt>"  # Short form
+
+# Structured output - agent returns only matching JSON
+paseo run --output-schema '{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}' "<prompt>"
+paseo run --output-schema schema.json "<prompt>"  # Or from a file
+# NOTE: --output-schema blocks until completion (cannot be used with --detach)
+# NOTE: --wait-timeout applies to --output-schema runs too
+
+# Worktrees - isolated git worktree for parallel feature development
+paseo run --worktree feature-x "<prompt>"
+
+# Check agent logs/output
+paseo logs <agent-id>
+paseo logs <agent-id> -f               # Follow (stream)
+paseo logs <agent-id> --tail 10        # Last 10 entries
+paseo logs <agent-id> --filter tools   # Only tool calls
+
+# Wait for agent to complete or need permission
+paseo wait <agent-id>
+paseo wait <agent-id> --timeout 60     # 60 second timeout
+
+# Send follow-up prompt to running agent
+paseo send <agent-id> "<prompt>"
+paseo send <agent-id> --image screenshot.png "<prompt>"  # With image
+paseo send <agent-id> --no-wait "<prompt>"               # Queue without waiting
+
+# Inspect agent details
+paseo inspect <agent-id>
+
+# Interrupt an agent's current run
+paseo stop <agent-id>
+
+# Hard-delete an agent (interrupts first if needed)
+paseo delete <agent-id>
+
+# Attach to agent output stream (Ctrl+C to detach without stopping)
+paseo attach <agent-id>
+
+# Permissions management
+paseo permit ls                # List pending permission requests
+paseo permit allow <agent-id>  # Allow all pending for agent
+paseo permit deny <agent-id> --all  # Deny all pending
+
+# Agent mode switching
+paseo agent mode <agent-id> --list   # Show available modes
+paseo agent mode <agent-id> bypass   # Set bypass mode
+
+# Output formats
+paseo ls --json          # JSON output
+paseo ls -q              # IDs only (quiet mode, useful for scripting)
 ```
 
-For a local daemon, `project create` defaults to the current directory and resolves relative paths on the CLI machine. With `--host` or `PASEO_HOST`, always provide a path; the target daemon interprets it on its own machine. Deleting a project archives its active workspaces and removes the project from Paseo without deleting the project directory.
+## Available Models
 
-## Workspaces
+**Claude (default provider)** — use aliases, CLI resolves to latest version:
+- `--model haiku` — Fast/cheap, ONLY for tests (not for real work)
+- `--model sonnet` — Default, good for most tasks
+- `--model opus` — For harder reasoning, complex debugging
 
-**`create_workspace`** — create a workspace independently of any agent. Required: `isolation` (`local` or `worktree`). Worktree isolation supports `mode: "branch-off" | "checkout-branch" | "checkout-pr"`: use `branchName`/`baseBranch` for a new branch, `branch` for an existing branch, or `prNumber` plus optional `forge`/`projectPath` for a change request. `worktreeSlug` controls the managed path. Returns the workspace descriptor centered on `workspaceId`.
+**Codex** (`--provider codex`):
+- `--model gpt-5.4` — Latest frontier agentic coding model (default, preferred for all engineering tasks)
+- `--model gpt-5.1-codex-mini` — Cheaper, faster, but less capable
 
-**`list_workspaces`** — list active workspaces.
+## Permissions
 
-**`archive_workspace`** — `{ workspaceId }`. Archives the workspace, its agents, and its terminals. Local directories remain; Paseo removes an owned worktree only after its final active workspace reference is archived.
+Always launch agents fully permissioned. Use `--mode bypass` for Claude and `--mode full-access` for Codex. Control behavior through **strict prompting**, not permission modes.
 
-**`rename_workspace`** — `{ workspaceId, name }`. Rename workspace.
+## Waiting for Agents
 
-## Workspace scripts
+Both `paseo run` and `paseo wait` block until the agent completes. Trust them.
 
-Configured `paseo.json` scripts use the same supervised lifecycle from tools and the CLI.
-
-**`list_workspace_scripts`** — `{ workspaceId }`. Lists configured scripts with lifecycle, service port, proxy URLs, health, exit code, and terminal ID.
-
-**`start_workspace_script`** — `{ workspaceId, scriptName }`. Starts one configured script through Paseo's managed workspace-script launcher and returns its status metadata.
-
-**`stop_workspace_script`** — `{ workspaceId, scriptName }`. Stops a running script through its supervised terminal and returns the stopped status metadata.
-
-The matching CLI surface accepts either an explicit workspace ID or resolves the current directory:
+- `paseo run` waits **forever** by default (no timeout). Use `--wait-timeout` to set a limit.
+- `paseo wait` also waits forever by default. Use `--timeout` to set a limit.
+- Agent tasks can legitimately take 10, 20, or even 30+ minutes. This is normal.
+- When a wait times out, **just re-run `paseo wait <id>`** — don't panic, don't start checking logs, don't inspect status. The agent is still working.
+- Do NOT poll with `paseo ls`, `paseo inspect`, or `paseo logs` in a loop to "check on" the agent.
+- Only check logs/inspect if you have a **specific reason** to believe something is wrong.
+- **Never launch a duplicate agent** because a wait timed out. The original is still running.
 
 ```bash
-paseo script ls [--cwd <path> | --workspace <workspace-id>]
-paseo script start <name> [--cwd <path> | --workspace <workspace-id>]
-paseo script stop <name> [--cwd <path> | --workspace <workspace-id>]
+# Correct: just keep waiting
+paseo wait <id>              # timed out? just run it again:
+paseo wait <id>              # still going? keep waiting:
+paseo wait <id> --timeout 300  # or use a longer timeout
+
+# Wrong: anxious polling loop
+paseo wait <id>    # timed out
+paseo ls           # is it still running??
+paseo inspect <id> # what's it doing??
+paseo logs <id>    # let me check the logs!!
 ```
 
-## Agents
+## Composing Agents in Bash
 
-**`create_agent`** — required: `title`, `provider` (`claude/opus`, `codex/gpt-5.4`, …), `initialPrompt`. Optional: `workspaceId`, `notifyOnFinish`, `settings`, `labels`. Returns `{ agentId, workspaceId, … }`.
+`paseo run` blocks by default and `--output-schema` returns structured JSON, making it easy to compose agents in bash loops and pipelines.
 
-Initial runtime settings live under `settings`: `modeId`, `thinkingOptionId`, and provider-specific `features`. Agent profiles are the preferred source for these values. For Codex fast mode, pass `settings: { features: { "fast_mode": true } }` when creating the agent.
-
-Agent-scoped creation always creates your subagent. Omit `workspaceId` to use your current workspace; pass a workspace returned by `create_workspace` for isolated delegation. Placement never changes parentage.
-
-Detach is an explicit user action in the subagents track, not an agent tool. A cross-workspace child remains your subagent even though it also appears as a normal tab in its workspace.
-
-Agent-scoped `create_agent` defaults `notifyOnFinish` to true. Set it to `false` only for truly fire-and-forget agents.
-
-**`send_agent_prompt`** — `{ agentId, prompt }`. Use for follow-ups to an existing agent. Agent-scoped prompt calls default to `background: true` and `notifyOnFinish: true`; top-level calls default to blocking with no callback. For a synchronous follow-up, pass `background: false` and use the returned result.
-
-**`update_agent`** — `{ agentId, name?, labels?, settings? }`. Use `settings` for runtime changes on an existing agent: `modeId`, `model`, `thinkingOptionId`, and provider-specific `features`. For Codex fast mode, pass `settings: { features: { "fast_mode": true } }`.
-
-**`list_agents`** — filter by `cwd`, `statuses`, `sinceHours`, `includeArchived`.
-
-**`archive_agent`** — `{ agentId }`. Interrupts if running, removes from active list.
-
-## Agent profiles and provider discovery
-
-**`list_profiles`** — named launch bundles configured by the human. Before choosing how to launch a delegated agent, call this tool and read every profile's `notes`. Pick a named profile the user requested, or the profile whose notes best match the work.
-
-There is no `profile` parameter on `create_agent`. Materialize the selected profile into the call:
-
-- combine `provider` and `model` as the `provider/model` value for `create_agent.provider`
-- copy `modeId` to `settings.modeId`
-- copy `thinkingOptionId` to `settings.thinkingOptionId`
-- copy `featureValues` to `settings.features`
-
-Omit absent values. Do not remember a selected profile or infer drift later; a profile is only launch configuration.
-
-If no profile fits, or no profiles are configured, use the provider discovery tools below rather than guessing. Tell the user when you fall back because no configured profile fits.
-
-**`list_providers`** — compact provider availability and modes.
-
-**`list_models`** — full model list for one provider. Use only when you need model IDs or thinking options; the list can be large.
-
-**`inspect_provider`** — compact provider capability and feature inspection. Required: `provider`; pass `cwd` when you are not in an agent-scoped session. Optional: `settings` with draft `model`, `modeId`, `thinkingOptionId`, and `features`.
-
-Only set feature IDs returned by `inspect_provider`. For Codex fast mode, look for `fast_mode` and pass `settings: { features: { "fast_mode": true } }` to `create_agent` or `update_agent`.
-
-## Schedules and heartbeats
-
-**`create_schedule`** — starts a new agent on a cron cadence. Required: `prompt`, `cron`, `provider`. Optional: `timezone`, `name`, `cwd`, `maxRuns`, `expiresIn`. Use when the recurring work should live in fresh agents.
-
-**`create_heartbeat`** — sends you a prompt on a cron cadence. Required: `prompt`, `cron`. Optional: `timezone`, `name`, `maxRuns`, `expiresIn`. Use for reminders, PR/build babysitting, and status checks that should return to this conversation.
-
-**`delete_heartbeat`** stops it. MCP intentionally exposes no heartbeat update tool; delete and recreate when its task or cadence changes.
-
-Schedules have the full list/inspect/update/pause/resume/run-once/log/delete surface. Heartbeats deliberately do not.
-
-## Waiting
-
-Agents take time — 10–30+ minutes is routine. Favor asynchronous workflows.
-
-For agent-scoped `create_agent` and background `send_agent_prompt`, leave `notifyOnFinish` omitted or set it to `true` unless the work is truly fire-and-forget. You will get notified when the target agent finishes, errors, or needs permission. Move on to other work. The notification arrives on its own.
-
-Don't poll `list_agents` or `get_agent_status` to "check on" a running agent. The notification will tell you.
-
-## CLI semantics
-
-The CLI and tools use the same ownership semantics even where their syntax differs:
-
+**Implement-and-verify loop:**
 ```bash
-paseo workspace create --isolation worktree --mode branch-off --new-branch fix-x --base main
-paseo workspace create --isolation worktree --mode checkout-branch --branch existing-work
-paseo workspace create --isolation worktree --mode checkout-pr --pr-number 42
-paseo run --provider codex/gpt-5.4 --mode full-access --workspace <workspace-id> "<prompt>"
-paseo run --provider codex/gpt-5.4 --mode full-access --new-workspace worktree --worktree-mode branch-off --new-branch fix-x --base main "<prompt>"
-paseo send <agent-id> "<follow-up>"
-paseo ls
-paseo schedule create --cron "*/15 * * * *" "ping main build"
-paseo heartbeat create --cron "*/15 * * * *" "check the build"
+while true; do
+  paseo run --provider codex "make the tests pass" >/dev/null
+
+  verdict=$(paseo run --provider claude --output-schema '{"type":"object","properties":{"criteria_met":{"type":"boolean"}},"required":["criteria_met"],"additionalProperties":false}' "ensure tests all pass")
+  if echo "$verdict" | jq -e '.criteria_met == true' >/dev/null; then
+    echo "criteria met"
+    break
+  fi
+done
 ```
 
-Discover with `paseo --help` and `paseo <cmd> --help`.
+**Detach + wait pattern for parallel work:**
+```bash
+# Kick off parallel agents
+api_id=$(paseo run -d --name "API impl" "implement the API" -q)
+ui_id=$(paseo run -d --name "UI impl" "implement the UI" -q)
 
-For product questions, setup, logs, version problems, or troubleshooting, use the **paseo-help** skill.
+# Wait for both to finish
+paseo wait "$api_id"
+paseo wait "$ui_id"
+```

@@ -1,8 +1,12 @@
-import { isAbsolutePath } from "./path";
-
 interface BuildAbsoluteExplorerPathInput {
   workspaceRoot: string;
   entryPath: string;
+}
+
+function isAbsolutePath(pathValue: string): boolean {
+  return (
+    pathValue.startsWith("/") || pathValue.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(pathValue)
+  );
 }
 
 export function buildAbsoluteExplorerPath({
@@ -31,9 +35,4 @@ export function buildAbsoluteExplorerPath({
   }
 
   return `${normalizedWorkspaceRoot}${separator}${segments.join(separator)}`;
-}
-
-export function parentExplorerPath(entryPath: string): string {
-  const separatorIndex = entryPath.lastIndexOf("/");
-  return separatorIndex > 0 ? entryPath.slice(0, separatorIndex) : ".";
 }

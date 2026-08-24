@@ -1,46 +1,41 @@
-import { getDesktopHost, isElectronRuntime } from "@/desktop/host";
+import { getDesktopHost, isDesktop } from "@/desktop/host";
 import { invokeDesktopCommand } from "@/desktop/electron/invoke";
-import type { AgentSkillSelection } from "@getpaseo/protocol/messages";
 
 export type DesktopDaemonState = "starting" | "running" | "stopped" | "errored";
-export type DesktopDaemonStopReason =
-  | "manual_ipc"
-  | "settings"
-  | "host_remove"
-  | "quit"
-  | "app_update"
-  | "version_mismatch"
-  | "restart";
 
-export interface DesktopDaemonStatus {
+export type DesktopDaemonStatus = {
   serverId: string;
   status: DesktopDaemonState;
-  listen: string | null;
+  listen: string;
   hostname: string | null;
   pid: number | null;
   home: string;
-  version: string | null;
-  desktopManaged: boolean;
   error: string | null;
-}
+};
 
-export interface DesktopDaemonLogs {
+export type DesktopDaemonLogs = {
   logPath: string;
   contents: string;
-}
+};
 
-export interface DesktopAppLogs {
-  logPath: string;
-  contents: string;
-}
+export type DesktopPairingOffer = {
+  relayEnabled: boolean;
+  url: string | null;
+  qr: string | null;
+};
 
-export interface LocalTransportTarget {
-  [key: string]: unknown;
+export type CliSymlinkInstructions = {
+  title: string;
+  detail: string;
+  commands: string;
+};
+
+export type LocalTransportTarget = {
   transportType: "socket" | "pipe";
   transportPath: string;
-}
+};
 
-interface LocalTransportEventPayload {
+type LocalTransportEventPayload = {
   sessionId: string;
   kind: "open" | "message" | "close" | "error";
   text?: string | null;
@@ -48,7 +43,7 @@ interface LocalTransportEventPayload {
   code?: number | null;
   reason?: string | null;
   error?: string | null;
-}
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -87,12 +82,10 @@ function parseDesktopDaemonStatus(raw: unknown): DesktopDaemonStatus {
   return {
     serverId: toStringOrNull(raw.serverId) ?? "",
     status: parseDesktopDaemonState(raw.status),
-    listen: toStringOrNull(raw.listen),
+    listen: toStringOrNull(raw.listen) ?? "",
     hostname: toStringOrNull(raw.hostname),
     pid: toNumberOrNull(raw.pid),
     home: toStringOrNull(raw.home) ?? "",
-    version: toStringOrNull(raw.version),
-    desktopManaged: raw.desktopManaged === true,
     error: toStringOrNull(raw.error),
   };
 }
@@ -107,8 +100,30 @@ function parseDesktopDaemonLogs(raw: unknown): DesktopDaemonLogs {
   };
 }
 
+function parseDesktopPairingOffer(raw: unknown): DesktopPairingOffer {
+  if (!isRecord(raw)) {
+    throw new Error("Unexpected desktop daemon pairing response.");
+  }
+  return {
+    relayEnabled: raw.relayEnabled === true,
+    url: toStringOrNull(raw.url),
+    qr: toStringOrNull(raw.qr),
+  };
+}
+
+function parseCliSymlinkInstructionsInternal(raw: unknown): CliSymlinkInstructions | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  return {
+    title: toStringOrNull(raw.title) ?? "",
+    detail: toStringOrNull(raw.detail) ?? "",
+    commands: toStringOrNull(raw.commands) ?? "",
+  };
+}
+
 export function shouldUseDesktopDaemon(): boolean {
-  return isElectronRuntime();
+  return isDesktop();
 }
 
 export async function getDesktopDaemonStatus(): Promise<DesktopDaemonStatus> {
@@ -119,10 +134,8 @@ export async function startDesktopDaemon(): Promise<DesktopDaemonStatus> {
   return parseDesktopDaemonStatus(await invokeDesktopCommand("start_desktop_daemon"));
 }
 
-export async function stopDesktopDaemon(
-  reason: DesktopDaemonStopReason = "manual_ipc",
-): Promise<DesktopDaemonStatus> {
-  return parseDesktopDaemonStatus(await invokeDesktopCommand("stop_desktop_daemon", { reason }));
+export async function stopDesktopDaemon(): Promise<DesktopDaemonStatus> {
+  return parseDesktopDaemonStatus(await invokeDesktopCommand("stop_desktop_daemon"));
 }
 
 export async function restartDesktopDaemon(): Promise<DesktopDaemonStatus> {
@@ -133,23 +146,20 @@ export async function getDesktopDaemonLogs(): Promise<DesktopDaemonLogs> {
   return parseDesktopDaemonLogs(await invokeDesktopCommand("desktop_daemon_logs"));
 }
 
-export async function getDesktopAppLogs(): Promise<DesktopAppLogs> {
-  const raw = await invokeDesktopCommand("desktop_app_logs");
-  if (!isRecord(raw)) {
-    throw new Error("Unexpected desktop app logs response.");
-  }
-  return {
-    logPath: toStringOrNull(raw.logPath) ?? "",
-    contents: typeof raw.contents === "string" ? raw.contents : "",
-  };
+export async function getDesktopDaemonPairing(): Promise<DesktopPairingOffer> {
+  return parseDesktopPairingOffer(await invokeDesktopCommand("desktop_daemon_pairing"));
 }
 
-export async function getCliDaemonStatus(): Promise<string> {
-  const raw = await invokeDesktopCommand<unknown>("cli_daemon_status");
-  if (typeof raw !== "string") {
-    throw new Error("Unexpected CLI daemon status response.");
+export function parseCliSymlinkInstructions(raw: unknown): CliSymlinkInstructions {
+  const instructions = parseCliSymlinkInstructionsInternal(raw);
+  if (!instructions) {
+    throw new Error("Unexpected CLI symlink instructions response.");
   }
-  return raw;
+  return instructions;
+}
+
+export async function getCliSymlinkInstructions(): Promise<CliSymlinkInstructions> {
+  return parseCliSymlinkInstructions(await invokeDesktopCommand("cli_symlink_instructions"));
 }
 
 export type LocalTransportEventUnlisten = () => void;
@@ -201,37 +211,4 @@ export async function sendLocalTransportMessage(input: {
 
 export async function closeLocalTransportSession(sessionId: string): Promise<void> {
   await invokeDesktopCommand("close_local_daemon_transport", { sessionId });
-}
-
-// ---------------------------------------------------------------------------
-// Integrations
-// ---------------------------------------------------------------------------
-
-export interface InstallStatus {
-  installed: boolean;
-}
-
-function parseInstallStatus(raw: unknown): InstallStatus {
-  if (!isRecord(raw)) {
-    throw new Error("Unexpected install status response.");
-  }
-  return { installed: raw.installed === true };
-}
-
-export async function getCliInstallStatus(): Promise<InstallStatus> {
-  return parseInstallStatus(await invokeDesktopCommand("get_cli_install_status"));
-}
-
-export async function installCli(): Promise<InstallStatus> {
-  return parseInstallStatus(await invokeDesktopCommand("install_cli"));
-}
-
-// COMPAT(desktopSkillSelectionMigration): added in v0.4.0; remove after 2027-02-16.
-export function readLegacySkillSelection(): Promise<AgentSkillSelection | null> {
-  return invokeDesktopCommand("read_legacy_skill_selection") as Promise<AgentSkillSelection | null>;
-}
-
-// COMPAT(desktopSkillSelectionMigration): added in v0.4.0; remove after 2027-02-16.
-export async function deleteLegacySkillSelection(): Promise<void> {
-  await invokeDesktopCommand("delete_legacy_skill_selection");
 }

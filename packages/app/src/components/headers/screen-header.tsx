@@ -1,66 +1,58 @@
-import { useMemo, type ReactNode } from "react";
-import type { LayoutChangeEvent } from "react-native";
+import type { ReactNode } from "react";
 import { View, type StyleProp, type ViewStyle } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { StyleSheet, UnistylesRuntime, useUnistyles } from "react-native-unistyles";
 import {
   HEADER_INNER_HEIGHT,
   HEADER_INNER_HEIGHT_MOBILE,
   HEADER_TOP_PADDING_MOBILE,
-  useIsCompactFormFactor,
 } from "@/constants/layout";
-import { WindowChromeSafeArea } from "@/utils/desktop-window";
-import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
+import { useDesktopDragHandlers, useTrafficLightPadding } from "@/utils/desktop-window";
+import { usePanelStore } from "@/stores/panel-store";
 
 interface ScreenHeaderProps {
   left?: ReactNode;
   right?: ReactNode;
   leftStyle?: StyleProp<ViewStyle>;
   rightStyle?: StyleProp<ViewStyle>;
-  borderless?: boolean;
-  onRowLayout?: (event: LayoutChangeEvent) => void;
 }
 
 /**
  * Shared frame for the home/back headers so we only maintain padding, border,
  * and safe-area logic in one place.
  */
-export function ScreenHeader({
-  left,
-  right,
-  leftStyle,
-  rightStyle,
-  borderless,
-  onRowLayout,
-}: ScreenHeaderProps) {
+export function ScreenHeader({ left, right, leftStyle, rightStyle }: ScreenHeaderProps) {
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
-  const isMobile = useIsCompactFormFactor();
+  const isMobile = UnistylesRuntime.breakpoint === "xs" || UnistylesRuntime.breakpoint === "sm";
+  const desktopAgentListOpen = usePanelStore((state) => state.desktop.agentListOpen);
+  const trafficLightPadding = useTrafficLightPadding();
   // Only add extra padding on mobile for better touch targets; on desktop, only use safe area insets
   const topPadding = isMobile ? HEADER_TOP_PADDING_MOBILE : 0;
-  const baseHorizontalPadding = isMobile ? theme.spacing[2] : theme.spacing[3];
+  const baseHorizontalPadding = theme.spacing[2];
+  const collapsedSidebarInset =
+    !isMobile && !desktopAgentListOpen && trafficLightPadding.side
+      ? trafficLightPadding
+      : { left: 0, right: 0 };
 
-  const innerStyle = useMemo(
-    () => [styles.inner, { paddingTop: insets.top + topPadding }],
-    [insets.top, topPadding],
-  );
-  const rowStyle = useMemo(() => [styles.row, borderless && styles.borderless], [borderless]);
-  const leftCombinedStyle = useMemo(() => [styles.left, leftStyle], [leftStyle]);
-  const rightCombinedStyle = useMemo(() => [styles.right, rightStyle], [rightStyle]);
+  const dragHandlers = useDesktopDragHandlers();
 
   return (
     <View style={styles.header}>
-      <View style={innerStyle}>
-        <WindowChromeSafeArea
-          placement="inline"
-          horizontalPadding={baseHorizontalPadding}
-          onLayout={onRowLayout}
-          style={rowStyle}
+      <View style={[styles.inner, { paddingTop: insets.top + topPadding }]}>
+        <View
+          style={[
+            styles.row,
+            {
+              paddingLeft: baseHorizontalPadding + collapsedSidebarInset.left,
+              paddingRight: baseHorizontalPadding + collapsedSidebarInset.right,
+            },
+          ]}
+          {...dragHandlers}
         >
-          <TitlebarDragRegion />
-          <View style={leftCombinedStyle}>{left}</View>
-          <View style={rightCombinedStyle}>{right}</View>
-        </WindowChromeSafeArea>
+          <View style={[styles.left, leftStyle]}>{left}</View>
+          <View style={[styles.right, rightStyle]}>{right}</View>
+        </View>
       </View>
     </View>
   );
@@ -72,7 +64,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   inner: {},
   row: {
-    position: "relative",
     height: {
       xs: HEADER_INNER_HEIGHT_MOBILE,
       md: HEADER_INNER_HEIGHT,
@@ -80,6 +71,7 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    paddingHorizontal: theme.spacing[2],
     borderBottomWidth: theme.borderWidth[1],
     borderBottomColor: theme.colors.border,
     userSelect: "none",
@@ -89,15 +81,10 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[2],
-    minWidth: 0,
   },
   right: {
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[2],
-    flexShrink: 0,
-  },
-  borderless: {
-    borderBottomColor: "transparent",
   },
 }));

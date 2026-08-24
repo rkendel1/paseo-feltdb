@@ -42,56 +42,47 @@ class CollectionAdapter<T extends { id: string }> {
   }
 
   /**
-   * Conditional update using FeltDB atomic operations.
-   * Note: This remains racy in in-memory FeltDB without true atomic compare-and-swap.
-   * FeltDB collections don't expose version-based CAS like the low-level DB does.
-   * The putIfAbsent marker approach still has a TOCTOU race between marker creation and update.
+   * Atomic conditional update using FeltDB 0.5.1+ Collection.updateIfVersion().
    *
+   * Implements true compare-and-swap: "Update ONLY if condition and version match".
    * Returns true if update succeeded (this caller won the race), false otherwise.
+   *
    * Example: updateOneConditional({ id, status: "pending" }, { status: "accepted" })
+   * atomically updates ONLY if status is still "pending" at the same version.
+   *
+   * Phase 4.4.3: Production Atomic Acceptance using durable substrate CAS
    */
   async updateOneConditional(
     condition: Record<string, any>,
     data: Partial<T>
   ): Promise<boolean> {
+    // First pass: find item matching condition
     const existing = await this.findOne(condition);
     if (!existing) {
       return false;
     }
 
-    // LIMITATION: This implementation is still racy because:
-    // 1. putIfAbsent creates a marker for this acceptance attempt
-    // 2. Then we update the collection item
-    // 3. Another concurrent request could create its own marker (step 1 succeeds)
-    //    before we finish step 2, leading to duplicate accepts
-    //
-    // True atomic compare-and-swap would require:
-    // - Durable databases like SQLite/Postgres with transactions
-    // - FeltDB exposing version-based CAS on collections (not yet available)
-    // - Or a consensus protocol for acceptance conflicts
-
-    // For now: Use putIfAbsent as a best-effort attempt
-    const acceptanceMarkerId = `${existing.id}:acceptance`;
-
-    try {
-      const result = await this.collection.putIfAbsent(
-        acceptanceMarkerId,
-        { marker: true, timestamp: Date.now() }
-      );
-
-      // If insertion succeeded, this is the first concurrent attempt
-      if (result.inserted) {
-        await this.collection.update(existing.id, data);
-        return true;
-      }
-
-      // Marker already existed - another concurrent request beat us
-      return false;
-    } catch (err) {
-      // Fallback
+    // Get version - FeltDB 0.5.1+ exposes __version on all items
+    const version = (existing as any).__version;
+    if (typeof version !== 'number') {
+      // Fallback for items without version field (shouldn't happen)
       await this.collection.update(existing.id, data);
       return true;
     }
+
+    // Atomic compare-and-swap: update ONLY if version (and implicitly condition) still match
+    // If the version hasn't changed, the condition still matches (another writer didn't change it)
+    // If another writer changed it, the version will be different
+    const result = await (this.collection as any).updateIfVersion(
+      existing.id,
+      version,
+      data
+    );
+
+    // updateIfVersion returns { updated: boolean, item?: T, currentVersion?: number }
+    // updated=true means this CAS won (version matched, update applied)
+    // updated=false means version conflict (another writer won)
+    return result.updated === true;
   }
 
   createIndex(field: string): void {

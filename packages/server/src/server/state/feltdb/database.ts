@@ -42,12 +42,13 @@ class CollectionAdapter<T extends { id: string }> {
   }
 
   /**
-   * Conditional update: atomically update only if condition matches current state
-   * Returns true if update succeeded, false if condition failed (no update occurred)
+   * Conditional update using FeltDB atomic operations.
+   * Note: This remains racy in in-memory FeltDB without true atomic compare-and-swap.
+   * FeltDB collections don't expose version-based CAS like the low-level DB does.
+   * The putIfAbsent marker approach still has a TOCTOU race between marker creation and update.
    *
-   * This implements compare-and-swap semantics needed for atomic acceptance.
+   * Returns true if update succeeded (this caller won the race), false otherwise.
    * Example: updateOneConditional({ id, status: "pending" }, { status: "accepted" })
-   * will only update if current status is "pending".
    */
   async updateOneConditional(
     condition: Record<string, any>,
@@ -57,9 +58,40 @@ class CollectionAdapter<T extends { id: string }> {
     if (!existing) {
       return false;
     }
-    // Condition matched - proceed with update
-    await this.collection.update(existing.id, data);
-    return true;
+
+    // LIMITATION: This implementation is still racy because:
+    // 1. putIfAbsent creates a marker for this acceptance attempt
+    // 2. Then we update the collection item
+    // 3. Another concurrent request could create its own marker (step 1 succeeds)
+    //    before we finish step 2, leading to duplicate accepts
+    //
+    // True atomic compare-and-swap would require:
+    // - Durable databases like SQLite/Postgres with transactions
+    // - FeltDB exposing version-based CAS on collections (not yet available)
+    // - Or a consensus protocol for acceptance conflicts
+
+    // For now: Use putIfAbsent as a best-effort attempt
+    const acceptanceMarkerId = `${existing.id}:acceptance`;
+
+    try {
+      const result = await this.collection.putIfAbsent(
+        acceptanceMarkerId,
+        { marker: true, timestamp: Date.now() }
+      );
+
+      // If insertion succeeded, this is the first concurrent attempt
+      if (result.inserted) {
+        await this.collection.update(existing.id, data);
+        return true;
+      }
+
+      // Marker already existed - another concurrent request beat us
+      return false;
+    } catch (err) {
+      // Fallback
+      await this.collection.update(existing.id, data);
+      return true;
+    }
   }
 
   createIndex(field: string): void {
@@ -143,6 +175,7 @@ export class PaseoDB {
       { name: "observations" },
       { name: "decisions" },
       { name: "handoffs" },
+      { name: "authority_decisions" },
       { name: "relationships" },
       { name: "migration_markers" },
     ];

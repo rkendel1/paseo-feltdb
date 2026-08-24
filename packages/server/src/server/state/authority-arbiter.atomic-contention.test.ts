@@ -1,37 +1,40 @@
 /**
  * Phase 4.4.3: Durable Atomic Contention - Competing Handoff Acceptance
  *
- * Prove that competing handoff acceptance is serialized by FeltDB's durable
- * conditional-write semantics, not by JavaScript/in-memory timing.
+ * Proves that true atomic acceptance requires durable substrate support.
+ * FeltDB 0.4.20+ provides putIfAbsent() for atomic insert-or-fail, but Collections
+ * don't expose version-based compare-and-swap needed for atomic state transitions.
  *
- * ARCHITECTURAL GAP IDENTIFIED
- * ============================
- * These tests demonstrate that the in-memory FeltDB implementation currently
- * lacks true atomic compare-and-swap semantics needed for durable atomic acceptance.
+ * ARCHITECTURAL FINDING
+ * =====================
+ * FeltDB's atomic primitives:
+ * ✓ Collection.putIfAbsent(id, data): Atomic "insert only if absent"
+ * ✓ Database.cas(key, expectedVersion, value): Low-level compare-and-swap
+ * ✗ Collection.updateIfVersion(): NOT AVAILABLE - would enable atomic transitions
  *
- * Current behavior: Both concurrent acceptance attempts succeed
- * Required behavior: Exactly one succeeds, one is rejected durably
+ * Current limitation: updateOneConditional() uses putIfAbsent to create a marker,
+ * but there's a TOCTOU race between marker creation and the actual handoff update.
+ * Both concurrent acceptances can create their markers successfully (they have
+ * different keys), then both update the handoff status (second write wins).
  *
- * Root cause: updateOneConditional() is implemented as findOne() + update(),
- * which is racy at the in-memory level. Both concurrent requests see the same
- * pending state before either transitions to accepted.
+ * True solution requires:
+ * A) Collections expose atomic update-if-version semantics (request FeltDB feature)
+ * B) Use distributed consensus (etcd, Zookeeper, etc.)
+ * C) Upgrade to durable DB with transactions (SQLite, Postgres)
+ * D) Accept best-effort semantics and resolve conflicts in arbiter
  *
- * Solution requires one of:
- * A) True transactional/locking support in FeltDB
- * B) Upgrade to a durable database with atomic operations (SQLite, Postgres, etc.)
- * C) Explicit architectural separation (durable handoff storage vs in-memory state)
- *
- * These tests FAIL with in-memory FeltDB. They would PASS with real atomic semantics.
+ * These tests DEMONSTRATE the atomic gap. Failures are CORRECT and expected
+ * with current FeltDB. They would PASS if A above were implemented.
  *
  * Tests:
- * 1. Concurrent acceptance race: H1 and H2 compete for same task
- *    CURRENTLY FAILS: Both succeed (expected: one succeeds)
- * 2. Repeated races: Verify invariant holds across many attempts
- *    CURRENTLY FAILS: Invariant violated (expected: always one winner)
- * 3. Crash/restart scenarios: Durable state must be unambiguous
- *    NOT YET TESTED: Requires implementation
- * 4. Supersession races: Multiple handoffs try to supersede simultaneously
- *    CURRENTLY FAILS: Race condition allows both to succeed
+ * 1. Concurrent acceptance race: H1 and H2 race for same task
+ *    STATUS: FAILS (expected: one succeeds, actual: both succeed)
+ * 2. Repeated races: Invariant must hold across many attempts
+ *    STATUS: FAILS (proves gap is not transient)
+ * 3. Crash recovery: Durable state survives restart
+ *    STATUS: PASS (decisions log survives restart, authority reconstructs correctly)
+ * 4. Supersession contention: H2→H1 vs H3→H1 compete
+ *    STATUS: FAILS (both transition attempts succeed, violating invariant)
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";

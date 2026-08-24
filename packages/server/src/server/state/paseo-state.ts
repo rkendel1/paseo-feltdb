@@ -10,6 +10,7 @@
 import type { Logger } from "pino";
 import type { Repositories } from "./feltdb/repositories.js";
 import type { Project, Workspace, Agent, Task, Conversation, Message, Run, Observation, Decision, Handoff, AuthorityDecision } from "./feltdb/schema.js";
+import { createAuthorityArbiter } from "./authority-arbiter.js";
 
 export interface PaseoState {
   // Project operations
@@ -209,9 +210,16 @@ export interface PaseoState {
 
 /**
  * Create a PaseoState instance from typed repositories.
+ * Phase 4.4.2: Integrates AuthorityArbiter for deterministic handoff acceptance.
  */
 export function createPaseoState(repos: Repositories, logger: Logger): PaseoState {
   const log = logger.child({ module: "paseo-state" });
+
+  // Create arbiter - Phase 4.4.2: makes atomicAccept() the ONLY acceptance path
+  const arbiter = createAuthorityArbiter({
+    repos,
+    logger,
+  });
 
   return {
     projects: {
@@ -503,7 +511,17 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
         return repos.handoffs.getActiveForTarget(targetAgentId);
       },
       async accept(id) {
-        return repos.handoffs.accept(id);
+        // Phase 4.4.2: All acceptance goes through AuthorityArbiter.atomicAccept()
+        // This is the ONLY acceptance path - guarantees deterministic arbitration
+        const result = await arbiter.atomicAccept(id);
+        if (result.success) {
+          return await repos.handoffs.getById(id);
+        }
+        throw new Error(
+          `Handoff ${id} acceptance rejected: ${result.rejection?.reason}${
+            result.rejection?.winnerId ? ` (winner: ${result.rejection.winnerId})` : ""
+          }`
+        );
       },
       async reject(id, reason) {
         const handoff = await repos.handoffs.getById(id);

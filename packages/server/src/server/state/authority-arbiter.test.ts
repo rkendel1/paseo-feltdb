@@ -87,7 +87,7 @@ describe("Phase 4.4.2: Authority Arbiter - Atomic Acceptance", () => {
   describe("Scenario 1: First-Accepted Precedence", () => {
     it("should accept first handoff on exclusive task", async () => {
       const arbiter = createAuthorityArbiter({
-        paseoState: state.state,
+        repos: state.state.repos,
         logger,
       });
 
@@ -126,7 +126,7 @@ describe("Phase 4.4.2: Authority Arbiter - Atomic Acceptance", () => {
 
     it("should reject second concurrent handoff on same task", async () => {
       const arbiter = createAuthorityArbiter({
-        paseoState: state.state,
+        repos: state.state.repos,
         logger,
       });
 
@@ -182,7 +182,7 @@ describe("Phase 4.4.2: Authority Arbiter - Atomic Acceptance", () => {
   describe("Scenario 2: Explicit Supersession", () => {
     it("should revoke existing handoff when new one supersedes it", async () => {
       const arbiter = createAuthorityArbiter({
-        paseoState: state.state,
+        repos: state.state.repos,
         logger,
       });
 
@@ -240,7 +240,7 @@ describe("Phase 4.4.2: Authority Arbiter - Atomic Acceptance", () => {
   describe("Invariant 1: Atomic Acceptance", () => {
     it("should record decision even when acceptance fails", async () => {
       const arbiter = createAuthorityArbiter({
-        paseoState: state.state,
+        repos: state.state.repos,
         logger,
       });
 
@@ -284,7 +284,7 @@ describe("Phase 4.4.2: Authority Arbiter - Atomic Acceptance", () => {
   describe("Invariant 3: Single Authority", () => {
     it("should maintain only one active authority per task", async () => {
       const arbiter = createAuthorityArbiter({
-        paseoState: state.state,
+        repos: state.state.repos,
         logger,
       });
 
@@ -333,7 +333,7 @@ describe("Phase 4.4.2: Authority Arbiter - Atomic Acceptance", () => {
   describe("Invariant 4: Deterministic Recovery", () => {
     it("should reconstruct identical authority after restart", async () => {
       const arbiter1 = createAuthorityArbiter({
-        paseoState: state.state,
+        repos: state.state.repos,
         logger,
       });
 
@@ -354,7 +354,7 @@ describe("Phase 4.4.2: Authority Arbiter - Atomic Acceptance", () => {
 
       // "Restart": Create new arbiter from same durable state
       const arbiter2 = createAuthorityArbiter({
-        paseoState: state.state,
+        repos: state.state.repos,
         logger,
       });
 
@@ -373,7 +373,7 @@ describe("Phase 4.4.2: Authority Arbiter - Atomic Acceptance", () => {
   describe("Invariant 5: Decision Immutability", () => {
     it("should not allow modification of recorded decisions", async () => {
       const arbiter = createAuthorityArbiter({
-        paseoState: state.state,
+        repos: state.state.repos,
         logger,
       });
 

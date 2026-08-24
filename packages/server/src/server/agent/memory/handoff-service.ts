@@ -17,6 +17,7 @@ import type { Logger } from "pino";
 import type { PaseoState } from "../../state/paseo-state.js";
 import type { Handoff } from "../../state/feltdb/schema.js";
 import { createAuthorityGuard } from "../../state/handoff-authority-guard.js";
+import { createAuthorityArbiter } from "../../state/authority-arbiter.js";
 
 export interface HandoffServiceOptions {
   paseoState: PaseoState;
@@ -41,6 +42,7 @@ export class HandoffService {
   private workspaceId: string;
   private projectId: string;
   private authorityGuard: ReturnType<typeof createAuthorityGuard>;
+  private arbiter: ReturnType<typeof createAuthorityArbiter>;
 
   constructor(options: HandoffServiceOptions) {
     this.paseoState = options.paseoState;
@@ -49,6 +51,10 @@ export class HandoffService {
     this.workspaceId = options.workspaceId;
     this.projectId = options.projectId;
     this.authorityGuard = createAuthorityGuard(options.paseoState, options.logger);
+    this.arbiter = createAuthorityArbiter({
+      repos: options.paseoState.repos,
+      logger: options.logger,
+    });
   }
 
   /**
@@ -133,7 +139,14 @@ export class HandoffService {
 
   /**
    * Accept a handoff (called by target agent).
-   * Authorization: Agent must be authorized for handoff operations.
+   * Phase 4.4.2: Acceptance now goes through AuthorityArbiter.atomicAccept()
+   *
+   * This is the ONLY acceptance path. All competing handoffs are arbitrated
+   * by the durable authority system, which records decisions and survives restart.
+   *
+   * Returns:
+   * - null if acceptance fails (arbitration rejected, already accepted, etc.)
+   * - Handoff if acceptance succeeds
    */
   async acceptHandoff(
     handoffId: string
@@ -150,9 +163,36 @@ export class HandoffService {
         context: { status: "accepted" },
       });
 
-      return (
-        (await this.paseoState.handoffs?.accept(handoffId)) || null
-      );
+      // Phase 4.4.2: Use AuthorityArbiter.atomicAccept() as SOLE acceptance path
+      // This ensures all competing handoffs go through deterministic arbitration
+      const result = await this.arbiter.atomicAccept(handoffId);
+
+      if (!result.success) {
+        // Acceptance rejected by arbiter (competing handoff has authority)
+        this.logger.debug(
+          {
+            handoffId,
+            rejection: result.rejection?.reason,
+            winnerId: result.rejection?.winnerId,
+          },
+          "Handoff acceptance rejected by authority arbiter"
+        );
+        return null;
+      }
+
+      // Acceptance succeeded - fetch and return the handoff
+      const handoff = await this.paseoState.handoffs?.getById(handoffId) || null;
+      if (handoff) {
+        this.logger.debug(
+          {
+            handoffId,
+            status: handoff.status,
+            decision: result.decision?.arbitrationReason,
+          },
+          "Handoff accepted via authority arbiter"
+        );
+      }
+      return handoff;
     } catch (err) {
       this.logger.debug(
         { err: err instanceof Error ? err.message : String(err) },

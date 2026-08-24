@@ -10,11 +10,11 @@
  */
 
 import type { Logger } from "pino";
-import type { PaseoState } from "./paseo-state.js";
+import type { Repositories } from "./feltdb/repositories.js";
 import type { Handoff, AuthorityDecision } from "./feltdb/schema.js";
 
 export interface AuthorityArbiterOptions {
-  paseoState: PaseoState;
+  repos: Repositories;
   logger: Logger;
 }
 
@@ -39,11 +39,11 @@ export interface AcceptanceResult {
  * Phase 4.4.2: Implement atomic acceptance logic
  */
 export class AuthorityArbiter {
-  private readonly paseoState: PaseoState;
+  private readonly repos: Repositories;
   private readonly logger: Logger;
 
   constructor(options: AuthorityArbiterOptions) {
-    this.paseoState = options.paseoState;
+    this.repos = options.repos;
     this.logger = options.logger.child({ module: "authority-arbiter" });
   }
 
@@ -73,7 +73,7 @@ export class AuthorityArbiter {
    */
   async atomicAccept(handoffId: string): Promise<AcceptanceResult> {
     // 1. Fetch handoff to accept
-    const handoff = await this.paseoState.handoffs?.getById(handoffId);
+    const handoff = await this.repos.handoffs.getById(handoffId);
     if (!handoff) {
       this.logger.error({ handoffId }, "Cannot accept: Handoff not found");
       throw new Error(`Handoff ${handoffId} not found`);
@@ -102,13 +102,13 @@ export class AuthorityArbiter {
     );
 
     // 4. Check for existing authority on this subject
-    const existingDecision = await this.paseoState.authorityDecisions?.getBySubject(
+    const existingDecision = await this.repos.authorityDecisions.getBySubject(
       subjectType,
       subjectId
     );
 
     if (existingDecision && existingDecision.winnerId) {
-      const existingWinner = await this.paseoState.handoffs?.getById(
+      const existingWinner = await this.repos.handoffs.getById(
         existingDecision.winnerId
       );
       const isExistingActive =
@@ -123,7 +123,7 @@ export class AuthorityArbiter {
             "Explicit supersession: accepting new handoff, revoking existing"
           );
 
-          const newDecision = await this.paseoState.authorityDecisions!.create({
+          const newDecision = await this.repos.authorityDecisions.create({
             subjectType,
             subjectId,
             competingHandoffIds: [existingDecision.winnerId, handoffId],
@@ -137,7 +137,7 @@ export class AuthorityArbiter {
 
           // Revoke existing handoff
           if (existingWinner) {
-            await this.paseoState.handoffs!.update(existingWinner.id, {
+            await this.repos.handoffs.update(existingWinner.id, {
               status: "revoked",
             });
             this.logger.info(
@@ -147,7 +147,7 @@ export class AuthorityArbiter {
           }
 
           // Accept new handoff
-          await this.paseoState.handoffs!.accept(handoffId);
+          await this.repos.handoffs.accept(handoffId);
           this.logger.info({ handoffId }, "Handoff accepted (supersession)");
 
           return {
@@ -162,7 +162,7 @@ export class AuthorityArbiter {
             "Existing authority active: rejection"
           );
 
-          const rejectionDecision = await this.paseoState.authorityDecisions!.create({
+          const rejectionDecision = await this.repos.authorityDecisions.create({
             subjectType,
             subjectId,
             competingHandoffIds: [existingDecision.winnerId, handoffId],
@@ -188,7 +188,7 @@ export class AuthorityArbiter {
     }
 
     // 5. No competing authority: this handoff is first
-    const decision = await this.paseoState.authorityDecisions!.create({
+    const decision = await this.repos.authorityDecisions.create({
       subjectType,
       subjectId,
       competingHandoffIds: [handoffId],
@@ -201,7 +201,7 @@ export class AuthorityArbiter {
     });
 
     // 6. Accept the handoff
-    await this.paseoState.handoffs!.accept(handoffId);
+    await this.repos.handoffs.accept(handoffId);
     this.logger.info({ handoffId }, "Handoff accepted (first_accepted)");
 
     return {
@@ -226,7 +226,7 @@ export class AuthorityArbiter {
     subjectType: "task" | "workspace" | "project",
     subjectId: string
   ): Promise<Handoff | null> {
-    const decision = await this.paseoState.authorityDecisions?.getBySubject(
+    const decision = await this.repos.authorityDecisions.getBySubject(
       subjectType,
       subjectId
     );
@@ -235,7 +235,7 @@ export class AuthorityArbiter {
       return null;
     }
 
-    const handoff = await this.paseoState.handoffs?.getById(decision.winnerId);
+    const handoff = await this.repos.handoffs.getById(decision.winnerId);
     if (!handoff) {
       this.logger.warn(
         { handoffId: decision.winnerId, subjectType, subjectId },
@@ -259,7 +259,7 @@ export class AuthorityArbiter {
    * won, or lost. Useful for debugging and audit trails.
    */
   async getDecisionsForHandoff(handoffId: string): Promise<AuthorityDecision[]> {
-    return await this.paseoState.authorityDecisions!.listByHandoff(handoffId);
+    return await this.repos.authorityDecisions.listByHandoff(handoffId);
   }
 }
 

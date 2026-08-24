@@ -279,16 +279,33 @@ export type Decision = z.infer<typeof DecisionSchema>;
 export const HandoffSchema = z.object({
   id: z.string(),
   projectId: z.string(),
+  workspaceId: z.string().optional(),
   taskId: z.string().optional(),
   sourceAgentId: z.string(),
+  sourceRunId: z.string(),
   targetAgentId: z.string().optional(),
-  sourceRunId: z.string().optional(),
-  targetRunId: z.string().optional(),
-  summary: z.string(),
-  context: z.string().optional(),
-  status: z.enum(["initiated", "in_progress", "completed", "failed"]).default("initiated"),
+  targetRunId: z.string().nullable().optional(),
+  requestId: z.string(), // For idempotent creation via F1/F2
+  requestedAction: z.string(), // What Agent B should do
+  summary: z.string(), // What Agent A learned/discovered
+  context: z.string().optional(), // Serialized bounded context
+  unresolvedQuestions: z.array(z.string()).optional(), // Questions for Agent B
+  status: z
+    .enum([
+      "pending",
+      "accepted",
+      "in_progress",
+      "completed",
+      "rejected",
+      "cancelled",
+      "failed",
+    ])
+    .default("pending"),
+  rejectionReason: z.string().optional(), // Why Agent B rejected
+  failureReason: z.string().optional(), // Why execution failed
   createdAt: z.string().datetime(),
-  completedAt: z.string().datetime().optional(),
+  acceptedAt: z.string().datetime().nullable().optional(),
+  completedAt: z.string().datetime().nullable().optional(),
   metadata: z.record(z.any()).optional(),
 });
 

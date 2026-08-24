@@ -174,6 +174,7 @@ export interface DecisionRepository {
 export interface HandoffRepository {
   create(data: Omit<Handoff, "id" | "createdAt">): Promise<Handoff>;
   getById(id: string): Promise<Handoff | null>;
+  getByRequestId(requestId: string): Promise<Handoff | null>;
   listByProject(projectId: string): Promise<Handoff[]>;
   listBySourceAgent(agentId: string): Promise<Handoff[]>;
   listByTargetAgent(agentId: string): Promise<Handoff[]>;
@@ -742,6 +743,9 @@ function createHandoffRepository(db: any): HandoffRepository {
     },
     async getById(id) {
       return await collection.findOne({ id });
+    },
+    async getByRequestId(requestId) {
+      return await collection.findOne({ requestId });
     },
     async listByProject(projectId) {
       return await collection.find({ projectId });

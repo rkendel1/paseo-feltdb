@@ -79,15 +79,58 @@ export class AuthorityArbiter {
       throw new Error(`Handoff ${handoffId} not found`);
     }
 
-    // 2. Validate pending state
+    // 2. Handle already-accepted case (idempotent)
+    if (handoff.status === "accepted") {
+      // Handoff already accepted - check if it still holds authority
+      const decision = await this.repos.authorityDecisions.getBySubject(
+        handoff.taskId ? ("task" as const) :
+        handoff.workspaceId ? ("workspace" as const) :
+        ("project" as const),
+        handoff.taskId || handoff.workspaceId || handoff.projectId
+      );
+
+      if (decision?.winnerId === handoffId) {
+        // This handoff is the current authority - idempotent success
+        this.logger.debug(
+          { handoffId },
+          "Handoff already accepted and holds authority (idempotent)"
+        );
+        return {
+          success: true,
+          handoffId,
+          decision,
+        };
+      } else {
+        // This handoff was accepted but lost authority to another
+        this.logger.warn(
+          { handoffId, winnerId: decision?.winnerId },
+          "Handoff already accepted but lost authority"
+        );
+        return {
+          success: false,
+          handoffId,
+          decision,
+          rejection: {
+            reason: "existing_authority",
+            winnerId: decision?.winnerId,
+          },
+        };
+      }
+    }
+
+    // 3. Validate pending state
     if (handoff.status !== "pending") {
       this.logger.warn(
         { handoffId, status: handoff.status },
         "Cannot accept: Handoff not in pending state"
       );
-      throw new Error(
-        `Handoff ${handoffId} is in ${handoff.status} state, expected pending`
-      );
+      return {
+        success: false,
+        handoffId,
+        rejection: {
+          reason: "invalid_state",
+        },
+      };
     }
 
     // 3. Determine subject (task is most specific, then workspace, then project)

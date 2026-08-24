@@ -25,11 +25,15 @@ import path from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
 import { initializeState, type InitializedState } from "./index.js";
 import type { Agent, Workspace, Project, Task } from "./feltdb/schema.js";
+import { createObservationPersistence } from "./observation-persistence.js";
+import { createTaskPersistence } from "./task-persistence.js";
 
 describe("Phase 4.3.2: Mutation Bypass Closure", () => {
   let logger: Logger;
   let tempDir: string;
   let state: InitializedState;
+  let observationPersistence: any;
+  let taskPersistence: any;
 
   // Test fixtures
   let project1: Project;
@@ -48,6 +52,17 @@ describe("Phase 4.3.2: Mutation Bypass Closure", () => {
     // Initialize state
     state = await initializeState({
       paseoHome: tempDir,
+      logger,
+    });
+
+    // Create guarded persistence layers (Phase 4.3.2)
+    observationPersistence = createObservationPersistence({
+      paseoState: state.state,
+      logger,
+    });
+
+    taskPersistence = createTaskPersistence({
+      paseoState: state.state,
       logger,
     });
 
@@ -132,11 +147,11 @@ describe("Phase 4.3.2: Mutation Bypass Closure", () => {
       // Accept handoff - now Agent B has scoped authority to Task 1 only
       await state.state.handoffs.accept(handoff.id);
 
-      // Attack: Try to mutate Task 2 (outside scope)
+      // Attack: Try to mutate Task 2 (outside handoff scope) using guarded method
       // This should be DENIED by AuthorityGuard
-      expect(
-        state.state.tasks.update(task2.id, { status: "in_progress" })
-      ).rejects.toThrow(); // Will fail because no guard in basic repository
+      await expect(
+        taskPersistence.updateTask(task2.id, agentB.id, "run-1", { status: "in_progress" })
+      ).rejects.toThrow(); // Denied: task2 is outside handoff scope (only task1 is authorized)
     });
 
     it("should DENY workspace mutation outside handoff scope", async () => {
@@ -154,17 +169,16 @@ describe("Phase 4.3.2: Mutation Bypass Closure", () => {
 
       await state.state.handoffs.accept(handoff.id);
 
-      // Attack: Try to create in Workspace 2
-      // This should be DENIED
-      expect(
-        state.state.observations.create({
+      // Attack: Try to create in Workspace 2 using guarded method
+      // This should be DENIED by AuthorityGuard (handoff scoped to W1, not W2)
+      await expect(
+        observationPersistence.authorizedCreate(agentB.id, {
           projectId: project1.id,
           workspaceId: workspace2.id,
-          agentId: agentB.id,
           type: "insight",
           content: "Malicious observation in W2",
         })
-      ).rejects.toThrow(); // Should be DENIED by AuthorityGuard
+      ).rejects.toThrow(); // Denied because handoff scope is W1
     });
 
     it("should DENY project mutation outside handoff scope", async () => {
@@ -182,16 +196,15 @@ describe("Phase 4.3.2: Mutation Bypass Closure", () => {
 
       await state.state.handoffs.accept(handoff.id);
 
-      // Attack: Try to mutate Project 2
-      // This should be DENIED
-      expect(
-        state.state.observations.create({
+      // Attack: Try to create observation in Project 2 using guarded method
+      // This should be DENIED (agent in W1→P1, trying to access P2)
+      await expect(
+        observationPersistence.authorizedCreate(agentB.id, {
           projectId: project2.id,
-          agentId: agentB.id,
           type: "insight",
           content: "Malicious mutation in P2",
         })
-      ).rejects.toThrow();
+      ).rejects.toThrow(); // Denied: agent is in P1, not P2
     });
 
     it("should DENY fabricated handoff ID bypass", async () => {
@@ -209,17 +222,15 @@ describe("Phase 4.3.2: Mutation Bypass Closure", () => {
 
       await state.state.handoffs.accept(handoff.id);
 
-      // Attack: Claim different handoff ID to get different authority
+      // Attack: Try to mutate W2 using guarded method
       // AuthorityGuard must reconstruct from FeltDB, not trust caller
-      // This is tested implicitly - if AuthorityGuard works correctly,
-      // it will query for Agent B's actual active handoff and deny mutations
-      // to tasks not in that handoff
+      // It will query for Agent B's actual active handoff and deny mutations
+      // to workspaces not in that handoff
 
-      expect(
-        state.state.observations.create({
+      await expect(
+        observationPersistence.authorizedCreate(agentB.id, {
           projectId: project1.id,
           workspaceId: workspace2.id,
-          agentId: agentB.id,
           type: "insight",
           content: "Using wrong workspace",
         })
@@ -253,13 +264,12 @@ describe("Phase 4.3.2: Mutation Bypass Closure", () => {
       context = await state.state.handoffs.getActiveForTarget(agentB.id);
       expect(context).toBeNull();
 
-      // Attack: Try to mutate Task 1 after scope revoked
+      // Attack: Try to create observation using guarded method after scope revoked
       // AuthorityGuard should check for ACTIVE handoff - this one is completed
-      expect(
-        state.state.observations.create({
+      await expect(
+        observationPersistence.authorizedCreate(agentB.id, {
           projectId: project1.id,
           workspaceId: workspace1.id,
-          agentId: agentB.id,
           taskId: task1.id,
           type: "insight",
           content: "Post-completion mutation",
@@ -306,11 +316,10 @@ describe("Phase 4.3.2: Mutation Bypass Closure", () => {
 
       await state.state.handoffs.accept(handoff.id);
 
-      // Verify we can mutate in-scope
-      const obs1 = await state.state.observations.create({
+      // Verify we can mutate in-scope using guarded method
+      const obs1 = await observationPersistence.authorizedCreate(agentB.id, {
         projectId: project1.id,
         workspaceId: workspace1.id,
-        agentId: agentB.id,
         taskId: task1.id,
         type: "insight",
         content: "In-scope observation",
@@ -321,16 +330,15 @@ describe("Phase 4.3.2: Mutation Bypass Closure", () => {
       await state.state.handoffs.complete(handoff.id, "run-2");
 
       // After completion, scope should be revoked
-      // Try to mutate out-of-scope - should still be DENIED
-      expect(
-        state.state.observations.create({
+      // Try to mutate out-of-scope using guarded method - should still be DENIED
+      await expect(
+        observationPersistence.authorizedCreate(agentB.id, {
           projectId: project1.id,
           workspaceId: workspace2.id,
-          agentId: agentB.id,
           type: "insight",
           content: "Post-completion out-of-scope",
         })
-      ).rejects.toThrow(); // Denied: scope revoked, back to default authorization
+      ).rejects.toThrow(); // Denied: scope revoked, agent back to default authorization (must be in W1)
     });
   });
 });

@@ -43,6 +43,88 @@ export class MessagePersistence {
   }
 
   /**
+   * Create a conversation with authorization check.
+   *
+   * Authorization: Agent must be in the target workspace/project.
+   * This prevents agents from creating conversations outside their scope.
+   *
+   * @throws Error if agent is not authorized to create conversation
+   */
+  async authorizedCreateConversation(
+    agentId: string,
+    workspaceId: string,
+    projectId: string,
+  ): Promise<any> {
+    // 1. Fetch agent to validate workspace membership
+    const agent = await this.paseoState.repos.agents.getById(agentId);
+    if (!agent) {
+      this.logger.warn({ agentId }, "Cannot create conversation: Agent not found");
+      throw new Error(`Agent ${agentId} not found`);
+    }
+
+    // 2. Fetch workspace to verify authority
+    const workspace = await this.paseoState.repos.workspaces.getById(agent.workspaceId);
+    if (!workspace) {
+      this.logger.warn({ agentId, workspaceId: agent.workspaceId }, "Cannot create conversation: Workspace not found");
+      throw new Error(`Workspace ${agent.workspaceId} not found`);
+    }
+
+    // 3. Verify workspace/project matches agent's scope
+    if (workspace.id !== workspaceId || workspace.projectId !== projectId) {
+      this.logger.warn(
+        {
+          agentId,
+          requestedWorkspaceId: workspaceId,
+          requestedProjectId: projectId,
+          agentWorkspaceId: workspace.id,
+          agentProjectId: workspace.projectId,
+        },
+        "Cannot create conversation: Requested workspace/project does not match agent scope",
+      );
+      throw new Error(
+        `Agent ${agentId} cannot create conversation in workspace ${workspaceId}/project ${projectId}`,
+      );
+    }
+
+    // 4. HANDOFF-AWARE AUTHORITY CHECK via AuthorityGuard
+    try {
+      await this.authorityGuard.authorize({
+        agentId,
+        operation: "create",
+        entityType: "message",
+        entityId: `conversation-${Date.now()}`,
+        workspaceId,
+        projectId,
+      });
+    } catch (err) {
+      this.logger.warn(
+        {
+          agentId,
+          workspaceId,
+          projectId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "Conversation creation denied by AuthorityGuard",
+      );
+      throw err;
+    }
+
+    // 5. Create conversation
+    const conversation = await this.paseoState.conversations.create({
+      projectId,
+      workspaceId,
+      agentId,
+    });
+
+    this.logger.debug(
+      { conversationId: conversation.id, agentId, workspaceId, projectId },
+      "Conversation created (authorized)",
+    );
+
+    return conversation;
+  }
+
+  /**
    * Create a message with authorization check.
    *
    * CRITICAL: The conversation's actual owner (conversation.agentId) is the authority.

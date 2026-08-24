@@ -137,6 +137,141 @@ export class ObservationPersistence {
   }
 
   /**
+   * Create an observation with authorization check.
+   *
+   * Used for agent-initiated observation creation (test/utility purposes).
+   * Authorization: Agent must be within the observation's project scope.
+   *
+   * @throws Error if agent is not authorized to create observation
+   */
+  async authorizedCreate(
+    agentId: string,
+    data: {
+      projectId: string;
+      workspaceId?: string;
+      type: string;
+      content: string;
+      repositoryId?: string;
+      taskId?: string;
+    },
+  ): Promise<any> {
+    // 1. Fetch agent to validate workspace membership
+    const agent = await this.paseoState.repos.agents.getById(agentId);
+    if (!agent) {
+      this.logger.warn({ agentId }, "Cannot create observation: Agent not found");
+      throw new Error(`Agent ${agentId} not found`);
+    }
+
+    // 2. Fetch workspace to establish project authority
+    const workspace = await this.paseoState.repos.workspaces.getById(agent.workspaceId);
+    if (!workspace) {
+      this.logger.warn(
+        { agentId, workspaceId: agent.workspaceId },
+        "Cannot create observation: Workspace not found",
+      );
+      throw new Error(`Workspace ${agent.workspaceId} not found`);
+    }
+
+    // 3. Authorization check: Agent's project must match observation's project
+    if (workspace.projectId !== data.projectId) {
+      this.logger.warn(
+        {
+          agentId,
+          agentProject: workspace.projectId,
+          observationProject: data.projectId,
+        },
+        "Cannot create observation: Agent not authorized (different project)",
+      );
+      throw new Error(
+        `Agent ${agentId} cannot create observation in project ${data.projectId} ` +
+          `(agent is in project ${workspace.projectId})`,
+      );
+    }
+
+    // 4. DEFAULT SCOPE CHECK: If no handoff, agent cannot specify task scope
+    // Agents can only mutate task-specific entities within handoff boundaries
+    const activeHandoff = this.paseoState.handoffs
+      ? await this.paseoState.handoffs.getActiveForTarget(agentId)
+      : null;
+
+    if (!activeHandoff && data.taskId) {
+      this.logger.warn(
+        {
+          agentId,
+          taskId: data.taskId,
+        },
+        "Cannot create observation: Agent cannot specify taskId without active handoff",
+      );
+      throw new Error(
+        `Agent ${agentId} cannot create task-scoped observations without an active handoff delegation`,
+      );
+    }
+
+    // 4b. If no handoff, agent can only mutate in their own workspace
+    if (!activeHandoff && data.workspaceId && data.workspaceId !== workspace.id) {
+      this.logger.warn(
+        {
+          agentId,
+          agentWorkspaceId: workspace.id,
+          requestedWorkspaceId: data.workspaceId,
+        },
+        "Cannot create observation: Agent can only mutate in their own workspace without active handoff",
+      );
+      throw new Error(
+        `Agent ${agentId} can only create observations in their own workspace (${workspace.id}) ` +
+          `without an active handoff delegation`,
+      );
+    }
+
+    // 5. HANDOFF-AWARE AUTHORITY CHECK via AuthorityGuard
+    try {
+      await this.authorityGuard.authorize({
+        agentId,
+        operation: "create",
+        entityType: "observation",
+        entityId: `observation-${Date.now()}`,
+        taskId: data.taskId,
+        workspaceId: data.workspaceId || workspace.id,
+        projectId: data.projectId,
+        context: { type: data.type },
+      });
+    } catch (err) {
+      this.logger.warn(
+        {
+          agentId,
+          projectId: data.projectId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "Observation creation denied by AuthorityGuard",
+      );
+      throw err;
+    }
+
+    // 6. Create observation
+    const observation = await this.paseoState.observations.create({
+      projectId: data.projectId,
+      repositoryId: data.repositoryId ?? workspace.repositoryId ?? undefined,
+      workspaceId: data.workspaceId || workspace.id,
+      agentId,
+      type: data.type,
+      source: "system",
+      content: data.content,
+      confidence: 0.8,
+    });
+
+    this.logger.debug(
+      {
+        observationId: observation.id,
+        agentId,
+        projectId: data.projectId,
+      },
+      "Observation created (authorized)",
+    );
+
+    return observation;
+  }
+
+  /**
    * Persist a tool execution fact.
    *
    * Creates an Observation with:
@@ -329,7 +464,32 @@ export class ObservationPersistence {
       );
     }
 
-    // 5. Perform authorized update
+    // 5. HANDOFF-AWARE AUTHORITY CHECK via AuthorityGuard
+    // Verify agent has handoff authority if delegated
+    try {
+      await this.authorityGuard.authorize({
+        agentId,
+        operation: "update",
+        entityType: "observation",
+        entityId: observationId,
+        taskId: observation.taskId,
+        workspaceId: observation.workspaceId,
+        projectId: observation.projectId,
+        context: { currentContent: observation.content },
+      });
+    } catch (err) {
+      this.logger.warn(
+        {
+          agentId,
+          observationId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "Observation update denied by AuthorityGuard",
+      );
+      throw err;
+    }
+
+    // 6. Perform authorized update
     const updated = await this.paseoState.observations.update(observationId, data);
     this.logger.debug(
       { observationId, agentId, projectId: observation.projectId },
@@ -387,7 +547,30 @@ export class ObservationPersistence {
       );
     }
 
-    // 5. Perform authorized delete
+    // 5. HANDOFF-AWARE AUTHORITY CHECK via AuthorityGuard
+    try {
+      await this.authorityGuard.authorize({
+        agentId,
+        operation: "delete",
+        entityType: "observation",
+        entityId: observationId,
+        taskId: observation.taskId,
+        workspaceId: observation.workspaceId,
+        projectId: observation.projectId,
+      });
+    } catch (err) {
+      this.logger.warn(
+        {
+          agentId,
+          observationId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "Observation delete denied by AuthorityGuard",
+      );
+      throw err;
+    }
+
+    // 6. Perform authorized delete
     await this.paseoState.observations.delete(observationId);
     this.logger.debug(
       { observationId, agentId, projectId: observation.projectId },

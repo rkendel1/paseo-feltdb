@@ -80,6 +80,7 @@ export type AgentManagerOptions = {
   contextService?: any; // AgentContextService instance for durable context injection
   executionFeedbackNormalizer?: ExecutionFeedbackNormalizer; // For Phase 3.5.1 normalization
   observationPersistence?: any; // ObservationPersistence instance for Phase 3.5.2 persistence
+  messagePersistence?: any; // MessagePersistence instance for Phase 4.3.2 authorization
   logger: Logger;
 };
 
@@ -338,6 +339,7 @@ export class AgentManager {
   private readonly contextService?: any; // AgentContextService instance
   private readonly executionFeedbackNormalizer?: ExecutionFeedbackNormalizer; // Phase 3.5.1
   private readonly observationPersistence?: any; // Phase 3.5.2: ObservationPersistence
+  private readonly messagePersistence?: any; // Phase 4.3.2: MessagePersistence for guarded message creation
   private logger: Logger;
 
   constructor(options: AgentManagerOptions) {
@@ -355,6 +357,7 @@ export class AgentManager {
     this.contextService = options?.contextService;
     this.executionFeedbackNormalizer = options?.executionFeedbackNormalizer;
     this.observationPersistence = options?.observationPersistence;
+    this.messagePersistence = options?.messagePersistence;
     this.onAgentAttention = options?.onAgentAttention;
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
     if (options?.clients) {
@@ -1194,19 +1197,29 @@ export class AgentManager {
         this.logger.debug({ agentId, projectId: workspace.projectId, workspaceId: workspace.id },
           "persistMessage: creating conversation");
 
-        // Create conversation on first message
-        const conversation = await this.paseoState.conversations.create({
-          projectId: workspace.projectId,
-          workspaceId: feltdbAgent.workspaceId,
-          agentId,
-        });
-        conversationId = conversation.id;
-        agent.conversationId = conversationId;
+        // Create conversation on first message using guarded method (Phase 4.3.2)
+        try {
+          const conversation = this.messagePersistence
+            ? await this.messagePersistence.authorizedCreateConversation(agentId, workspace.id, workspace.projectId)
+            : await this.paseoState.conversations.create({
+                projectId: workspace.projectId,
+                workspaceId: feltdbAgent.workspaceId,
+                agentId,
+              });
+          conversationId = conversation.id;
+          agent.conversationId = conversationId;
 
-        this.logger.debug({ agentId, conversationId }, "persistMessage: conversation created");
+          this.logger.debug({ agentId, conversationId }, "persistMessage: conversation created");
 
-        // Initialize sequence from durable storage (crash-safe)
-        agent.messageSequence = await this.paseoState.messages.getMaxSequenceInConversation(conversationId);
+          // Initialize sequence from durable storage (crash-safe)
+          agent.messageSequence = await this.paseoState.messages.getMaxSequenceInConversation(conversationId);
+        } catch (err) {
+          this.logger.warn(
+            { agentId, workspaceId: workspace.id, projectId: workspace.projectId, err },
+            "Failed to create conversation with AuthorityGuard check"
+          );
+          return;
+        }
       }
 
       // Map timeline item to message
@@ -1219,22 +1232,42 @@ export class AgentManager {
       this.logger.debug({ agentId, conversationId, authorType, contentLength: content.length },
         "persistMessage: creating message");
 
+      // Create message using guarded method (Phase 4.3.2)
       // CRITICAL FIX-2: Allocate sequence atomically in database layer
       // Instead of incrementing a mutable ManagedAgent field, fetch max sequence
       // from FeltDB atomically within create(). This prevents collisions under concurrent writes.
-      const message = await this.paseoState.messages.create({
-        conversationId,
-        authorType,
-        authorId: agentId,
-        content,
-        // Sequence is omitted and will be allocated atomically by repository
-        role,
-        // Use captured runId to prevent race condition during turn cleanup (CRITICAL FIX-3)
-        runId,
-      });
+      try {
+        const message = this.messagePersistence
+          ? await this.messagePersistence.authorizedCreate(
+              conversationId,
+              agentId,
+              {
+                authorType,
+                authorId: agentId,
+                content,
+                role,
+                runId,
+              }
+            )
+          : await this.paseoState.messages.create({
+              conversationId,
+              authorType,
+              authorId: agentId,
+              content,
+              // Sequence is omitted and will be allocated atomically by repository
+              role,
+              // Use captured runId to prevent race condition during turn cleanup (CRITICAL FIX-3)
+              runId,
+            });
 
-      this.logger.debug({ agentId, conversationId, messageId: message.id, sequence: message.sequence },
-        "persistMessage: message created successfully");
+        this.logger.debug({ agentId, conversationId, messageId: message.id, sequence: message.sequence },
+          "persistMessage: message created successfully");
+      } catch (err) {
+        this.logger.warn(
+          { agentId, conversationId, err },
+          "Failed to create message with AuthorityGuard check"
+        );
+      }
     } catch (err) {
       this.logger.warn(
         { agentId, itemType: item.type, err },

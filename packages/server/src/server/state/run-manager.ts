@@ -127,11 +127,35 @@ export class RunManager {
    * Update Run status when agent execution starts.
    *
    * Called after agent session successfully starts (after startTurn returns).
+   * AuthorityGuard validates agent owns this run.
    */
   async markRunStarted(agentId: string): Promise<void> {
     try {
       const tracked = this.activeRuns.get(agentId);
       if (!tracked) {
+        return;
+      }
+
+      // AUTHORITY CHECK: Verify agent has authority to update their own run
+      try {
+        await this.authorityGuard.authorize({
+          agentId,
+          operation: "update",
+          entityType: "run",
+          entityId: tracked.run.id,
+          workspaceId: tracked.run.workspaceId,
+          projectId: tracked.run.projectId,
+          context: { status: "running" },
+        });
+      } catch (err) {
+        this.logger.warn(
+          {
+            agentId,
+            runId: tracked.run.id,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "Run update denied by AuthorityGuard",
+        );
         return;
       }
 
@@ -151,6 +175,7 @@ export class RunManager {
    *
    * Called after AgentContextService.resolveForTurn() to track whether
    * context was successfully resolved, failed, or fell back to empty context.
+   * AuthorityGuard validates agent owns this run.
    */
   async recordContextResolution(
     agentId: string,
@@ -163,6 +188,29 @@ export class RunManager {
     try {
       const tracked = this.activeRuns.get(agentId);
       if (!tracked) {
+        return;
+      }
+
+      // AUTHORITY CHECK: Verify agent has authority to update their own run
+      try {
+        await this.authorityGuard.authorize({
+          agentId,
+          operation: "update",
+          entityType: "run",
+          entityId: tracked.run.id,
+          workspaceId: tracked.run.workspaceId,
+          projectId: tracked.run.projectId,
+          context: { status: "context_resolution", ...outcome },
+        });
+      } catch (err) {
+        this.logger.warn(
+          {
+            agentId,
+            runId: tracked.run.id,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "Run update denied by AuthorityGuard",
+        );
         return;
       }
 
@@ -186,6 +234,7 @@ export class RunManager {
    * Update Run when agent execution completes with success.
    *
    * Called when agent finishes normally.
+   * AuthorityGuard validates agent owns this run.
    */
   async markRunCompleted(
     agentId: string,
@@ -194,6 +243,30 @@ export class RunManager {
     try {
       const tracked = this.activeRuns.get(agentId);
       if (!tracked) {
+        return;
+      }
+
+      // AUTHORITY CHECK: Verify agent has authority to update their own run
+      try {
+        await this.authorityGuard.authorize({
+          agentId,
+          operation: "update",
+          entityType: "run",
+          entityId: tracked.run.id,
+          workspaceId: tracked.run.workspaceId,
+          projectId: tracked.run.projectId,
+          context: { status: "completed" },
+        });
+      } catch (err) {
+        this.logger.warn(
+          {
+            agentId,
+            runId: tracked.run.id,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "Run update denied by AuthorityGuard",
+        );
+        this.activeRuns.delete(agentId);
         return;
       }
 
@@ -224,11 +297,36 @@ export class RunManager {
    * Update Run when agent execution fails.
    *
    * Called when agent throws an error or turn fails.
+   * AuthorityGuard validates agent owns this run.
    */
   async markRunFailed(agentId: string, error: string): Promise<void> {
     try {
       const tracked = this.activeRuns.get(agentId);
       if (!tracked) {
+        return;
+      }
+
+      // AUTHORITY CHECK: Verify agent has authority to update their own run
+      try {
+        await this.authorityGuard.authorize({
+          agentId,
+          operation: "update",
+          entityType: "run",
+          entityId: tracked.run.id,
+          workspaceId: tracked.run.workspaceId,
+          projectId: tracked.run.projectId,
+          context: { status: "failed" },
+        });
+      } catch (err) {
+        this.logger.warn(
+          {
+            agentId,
+            runId: tracked.run.id,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "Run update denied by AuthorityGuard",
+        );
+        this.activeRuns.delete(agentId);
         return;
       }
 
@@ -258,11 +356,36 @@ export class RunManager {
    * Update Run when agent execution is interrupted.
    *
    * Called when a pending run is cancelled/replaced before completion.
+   * AuthorityGuard validates agent owns this run.
    */
   async markRunInterrupted(agentId: string): Promise<void> {
     try {
       const tracked = this.activeRuns.get(agentId);
       if (!tracked) {
+        return;
+      }
+
+      // AUTHORITY CHECK: Verify agent has authority to update their own run
+      try {
+        await this.authorityGuard.authorize({
+          agentId,
+          operation: "update",
+          entityType: "run",
+          entityId: tracked.run.id,
+          workspaceId: tracked.run.workspaceId,
+          projectId: tracked.run.projectId,
+          context: { status: "interrupted" },
+        });
+      } catch (err) {
+        this.logger.warn(
+          {
+            agentId,
+            runId: tracked.run.id,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "Run update denied by AuthorityGuard",
+        );
+        this.activeRuns.delete(agentId);
         return;
       }
 

@@ -455,13 +455,9 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
         });
       },
       async createIdempotent(requestId, data) {
-        // Try to find existing handoff with this requestId
-        const existing = await repos.handoffs.getByRequestId(requestId);
-        if (existing) {
-          return existing;
-        }
-        // Create new handoff
-        return repos.handoffs.create({
+        // F2: Delegate to repository's atomic idempotent operation
+        // Ensures concurrent requests with same requestId create exactly one handoff
+        return repos.handoffs.createIdempotent(requestId, {
           ...data,
           requestId,
           status: data.status || "pending",

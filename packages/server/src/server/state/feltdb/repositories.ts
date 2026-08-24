@@ -173,6 +173,10 @@ export interface DecisionRepository {
 
 export interface HandoffRepository {
   create(data: Omit<Handoff, "id" | "createdAt">): Promise<Handoff>;
+  createIdempotent(
+    requestId: string,
+    data: Omit<Handoff, "id" | "createdAt" | "requestId">
+  ): Promise<Handoff>;
   getById(id: string): Promise<Handoff | null>;
   getByRequestId(requestId: string): Promise<Handoff | null>;
   listByProject(projectId: string): Promise<Handoff[]>;
@@ -740,6 +744,38 @@ function createHandoffRepository(db: any): HandoffRepository {
       };
       await collection.insert(handoff);
       return handoff;
+    },
+    async createIdempotent(requestId, data) {
+      // F2: Use durable idempotent mutation
+      // Ensures that concurrent requests with same requestId create exactly one handoff
+      // First, check if one already exists
+      const existing = await collection.findOne({ requestId });
+      if (existing) {
+        return existing;
+      }
+
+      // Create new handoff - relies on FeltDB's unique index on requestId
+      // to prevent race conditions (second concurrent request will fail to insert)
+      const handoff: Handoff = {
+        id: randomUUID(),
+        requestId,
+        createdAt: new Date().toISOString(),
+        ...data,
+      };
+
+      try {
+        await collection.insert(handoff);
+        return handoff;
+      } catch (error: any) {
+        // Unique constraint violation - another process created it
+        // Retrieve and return the existing one
+        const existing = await collection.findOne({ requestId });
+        if (existing) {
+          return existing;
+        }
+        // If still not found, re-throw the original error
+        throw error;
+      }
     },
     async getById(id) {
       return await collection.findOne({ id });

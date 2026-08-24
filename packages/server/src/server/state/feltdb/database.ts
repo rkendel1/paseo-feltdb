@@ -206,6 +206,7 @@ export class PaseoDB {
 
       // Handoff indexes
       { collection: "handoffs", field: "id", unique: true },
+      { collection: "handoffs", field: "requestId", unique: true },
       { collection: "handoffs", field: "projectId" },
       { collection: "handoffs", field: "sourceAgentId" },
       { collection: "handoffs", field: "targetAgentId" },

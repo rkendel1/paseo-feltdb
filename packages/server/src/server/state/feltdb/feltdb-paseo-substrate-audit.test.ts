@@ -38,6 +38,11 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { randomUUID } from "crypto";
+import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { createDaemonTestContext, type DaemonTestContext } from "../../test-utils/index.js";
 
 describe("FeltDB/Paseo Substrate Audit", () => {
   /**
@@ -318,102 +323,320 @@ describe("FeltDB/Paseo Substrate Audit", () => {
    * - F1/F2 guarantees hold under actual network retry patterns
    */
   describe("Audit 4: Idempotency Under Retry Hammer (CRITICAL)", () => {
-    it.skip("CRITICAL: 500 requests with same requestId produce exactly one handoff", async () => {
+    it("CRITICAL: 500 requests with same requestId produce exactly one handoff", async () => {
       // THE core F1/F2 test for Paseo
       // Simulates: network retry loop with exponential backoff
       // Expected: All retries converge to single durable entity
 
-      const requestId = `idempotent-${randomUUID()}`;
-      const retryAttempts = 500;
+      const paseoHomeRoot = mkdtempSync(path.join(tmpdir(), "audit-idempotent-"));
+      let ctx: DaemonTestContext | undefined;
 
-      // CORRECTNESS (must pass): In real execution:
-      // - Fire createHandoff(requestId) 500 times sequentially
-      // - Each call with identical parameters
-      // - Collect all 500 response handoff IDs
-      // - Verify: all 500 return same handoff.id
-      // - Query database: `SELECT COUNT(*) WHERE requestId = ?`
-      // - Verify: exactly 1 record found
-      // - Verify: record has correct content/status/timestamps
-      //
-      // This is a gate. If this fails, FeltDB F1/F2 is broken.
+      try {
+        ctx = await createDaemonTestContext({ paseoHomeRoot, cleanup: false });
+        const daemon = (ctx.daemon as any).daemon;
+        const paseoState = daemon.paseoState;
 
-      // PERFORMANCE: In real execution:
-      // - p50/p95/p99 of 500 call latencies
-      // - Check if latency increases with attempt number
-      //   (later calls faster since record exists, or same speed?)
-      // - Total time for 500 calls
+        const requestId = `idempotent-${randomUUID()}`;
+        const retryAttempts = 500;
 
-      expect(retryAttempts).toBe(500);
+        // Fire createHandoff(requestId) 500 times sequentially
+        const handoffIds = new Set<string>();
+        const latencies: number[] = [];
+        const startTime = performance.now();
+
+        for (let i = 0; i < retryAttempts; i++) {
+          const callStart = performance.now();
+          const handoff = await paseoState.handoffs.createIdempotent(requestId, {
+            projectId: "test-project",
+            workspaceId: "test-workspace",
+            sourceAgentId: "agent-a",
+            sourceRunId: "run-a",
+            targetAgentId: "agent-b",
+            targetRunId: null,
+            requestId,
+            requestedAction: "Test handoff",
+            summary: "Test summary",
+            status: "pending",
+          });
+          const callEnd = performance.now();
+          latencies.push(callEnd - callStart);
+
+          if (handoff) {
+            handoffIds.add(handoff.id);
+          }
+        }
+
+        const totalTime = performance.now() - startTime;
+
+        // VERIFY: All 500 calls return the same handoff.id
+        expect(handoffIds.size).toBe(1);
+
+        // VERIFY: Database contains exactly 1 record
+        const allHandoffs = await paseoState.handoffs.listBySourceAgent("agent-a");
+        const filteredByRequestId = allHandoffs.filter((h) => h.requestId === requestId);
+        expect(filteredByRequestId).toHaveLength(1);
+
+        // VERIFY: Record has correct content/status
+        const handoff = filteredByRequestId[0];
+        expect(handoff.requestId).toBe(requestId);
+        expect(handoff.status).toBe("pending");
+        expect(handoff.sourceAgentId).toBe("agent-a");
+        expect(handoff.targetAgentId).toBe("agent-b");
+
+        // PERFORMANCE: Calculate latencies
+        latencies.sort((a, b) => a - b);
+        const p50 = latencies[Math.floor(latencies.length * 0.5)];
+        const p95 = latencies[Math.floor(latencies.length * 0.95)];
+        const p99 = latencies[Math.floor(latencies.length * 0.99)];
+
+        console.log(`\n📊 AUDIT 4.1: Idempotency Hammer (Sequential)`);
+        console.log(`   Attempts: ${retryAttempts}`);
+        console.log(`   Unique handoffs created: ${handoffIds.size} (expected: 1)`);
+        console.log(`   Database records: ${filteredByRequestId.length} (expected: 1)`);
+        console.log(`   Total time: ${totalTime.toFixed(2)}ms`);
+        console.log(`   Latency - p50: ${p50.toFixed(2)}ms, p95: ${p95.toFixed(2)}ms, p99: ${p99.toFixed(2)}ms`);
+
+        // GATE: Must have exactly one handoff
+        expect(handoffIds.size).toBe(1);
+      } finally {
+        if (ctx) await ctx.cleanup();
+      }
     });
 
-    it.skip("CRITICAL: concurrent retries (10 processes × 50 attempts) produce one handoff", async () => {
+    it("CRITICAL: concurrent retries (10 processes × 50 attempts) produce one handoff", async () => {
       // Worst case: 10 concurrent callers all retrying same requestId
       // Total: 500 concurrent requests flooding database simultaneously
 
-      const requestId = `concurrent-idempotent-${randomUUID()}`;
-      const processes = 10;
-      const attemptsPerProcess = 50;
-      const totalAttempts = processes * attemptsPerProcess;
+      const paseoHomeRoot = mkdtempSync(path.join(tmpdir(), "audit-concurrent-idempotent-"));
+      let ctx: DaemonTestContext | undefined;
 
-      // CORRECTNESS (must pass): In real execution:
-      // - Start 10 concurrent processes
-      // - Each fires createHandoff(requestId) 50 times as fast as possible
-      // - Total 500 concurrent requests hitting database
-      // - Collect all responses
-      // - Verify: all 500 calls return same handoff.id
-      // - Query database: exactly 1 record
-      // - Verify:
-      //   - No partial/torn states
-      //   - No transaction conflicts
-      //   - No lost/corrupted fields
-      //   - Timestamps accurate
-      //
-      // If this fails under concurrency, F1/F2 race condition exists.
+      try {
+        ctx = await createDaemonTestContext({ paseoHomeRoot, cleanup: false });
+        const daemon = (ctx.daemon as any).daemon;
+        const paseoState = daemon.paseoState;
 
-      // PERFORMANCE:
-      // - p50/p95/p99 latency under concurrent load
-      // - Peak memory during 500-concurrent-request burst
-      // - Contention level (do later processes wait? for how long?)
+        const requestId = `concurrent-idempotent-${randomUUID()}`;
+        const processes = 10;
+        const attemptsPerProcess = 50;
+        const totalAttempts = processes * attemptsPerProcess;
 
-      expect(totalAttempts).toBe(500);
+        const handoffIds = new Set<string>();
+        const latencies: number[] = [];
+        const startTime = performance.now();
+
+        // Start 10 concurrent processes
+        const promises = [];
+        for (let p = 0; p < processes; p++) {
+          promises.push(
+            (async () => {
+              for (let i = 0; i < attemptsPerProcess; i++) {
+                const callStart = performance.now();
+                const handoff = await paseoState.handoffs.createIdempotent(requestId, {
+                  projectId: "test-project",
+                  workspaceId: "test-workspace",
+                  sourceAgentId: "agent-c",
+                  sourceRunId: "run-c",
+                  targetAgentId: "agent-d",
+                  targetRunId: null,
+                  requestId,
+                  requestedAction: "Concurrent test",
+                  summary: "Concurrent summary",
+                  status: "pending",
+                });
+                const callEnd = performance.now();
+                latencies.push(callEnd - callStart);
+
+                if (handoff) {
+                  handoffIds.add(handoff.id);
+                }
+              }
+            })()
+          );
+        }
+
+        await Promise.all(promises);
+        const totalTime = performance.now() - startTime;
+
+        // VERIFY: All 500 concurrent calls return the same handoff.id
+        const allHandoffs = await paseoState.handoffs.listBySourceAgent("agent-c");
+        const filteredByRequestId = allHandoffs.filter((h) => h.requestId === requestId);
+
+        // PERFORMANCE: Calculate latencies
+        latencies.sort((a, b) => a - b);
+        const p50 = latencies[Math.floor(latencies.length * 0.5)];
+        const p95 = latencies[Math.floor(latencies.length * 0.95)];
+        const p99 = latencies[Math.floor(latencies.length * 0.99)];
+
+        console.log(`\n📊 AUDIT 4.2: Idempotency Hammer (Concurrent)`);
+        console.log(`   Processes: ${processes}, Attempts per process: ${attemptsPerProcess}`);
+        console.log(`   Total concurrent calls: ${totalAttempts}`);
+        console.log(`   Unique handoff IDs returned: ${handoffIds.size} (expected: 1)`);
+        console.log(`   Database records with requestId: ${filteredByRequestId.length} (expected: 1)`);
+        console.log(`   Total time: ${totalTime.toFixed(2)}ms`);
+        console.log(`   Latency - p50: ${p50.toFixed(2)}ms, p95: ${p95.toFixed(2)}ms, p99: ${p99.toFixed(2)}ms`);
+
+        if (handoffIds.size > 1) {
+          console.log(`\n⚠️  CRITICAL FAILURE: Got ${handoffIds.size} unique handoff IDs under concurrent load`);
+          console.log(`   Created handoff IDs: ${Array.from(handoffIds).join(", ")}`);
+          console.log(`   Database shows: ${filteredByRequestId.length} record(s)`);
+          for (const h of filteredByRequestId) {
+            console.log(`     - ${h.id}`);
+          }
+        }
+
+        // GATE: Must have exactly one handoff under concurrent load
+        expect(handoffIds.size).toBe(1);
+        expect(filteredByRequestId).toHaveLength(1);
+      } finally {
+        if (ctx) await ctx.cleanup();
+      }
     });
 
-    it.skip("CRITICAL: database inspection confirms single entity (not 500)", async () => {
+    it("CRITICAL: database inspection confirms single entity (not 500)", async () => {
       // Don't trust the API response. Inspect the durable database.
       // This catches if responses claim idempotency but database has duplicates.
 
-      const requestId = `database-truth-${randomUUID()}`;
+      const paseoHomeRoot = mkdtempSync(path.join(tmpdir(), "audit-database-truth-"));
+      let ctx: DaemonTestContext | undefined;
 
-      // CORRECTNESS: In real execution:
-      // - Create handoff via createHandoff(requestId)
-      // - Retry 500 times
-      // - Open database file directly (bypass API)
-      // - Query handoffs collection where requestId = ?
-      // - Verify: count = 1 (not 500, not 2)
-      // - Verify record content byte-for-byte correct
-      // - Verify no orphaned/partial records with similar requestId
-      //
-      // This is the ultimate test of F1/F2 durability.
+      try {
+        ctx = await createDaemonTestContext({ paseoHomeRoot, cleanup: false });
+        const daemon = (ctx.daemon as any).daemon;
+        const paseoState = daemon.paseoState;
 
-      expect(requestId).toBeTruthy();
+        const requestId = `database-truth-${randomUUID()}`;
+
+        // Create handoff and retry 500 times
+        const handoffIds = new Set<string>();
+        for (let i = 0; i < 500; i++) {
+          const handoff = await paseoState.handoffs.createIdempotent(requestId, {
+            projectId: "test-project",
+            workspaceId: "test-workspace",
+            sourceAgentId: "agent-e",
+            sourceRunId: "run-e",
+            targetAgentId: "agent-f",
+            targetRunId: null,
+            requestId,
+            requestedAction: "Database truth test",
+            summary: "Verify single entity",
+            status: "pending",
+          });
+          if (handoff) {
+            handoffIds.add(handoff.id);
+          }
+        }
+
+        // Query via API (verify idempotency)
+        const handoffByRequestId = await paseoState.handoffs.getByRequestId(requestId);
+        expect(handoffByRequestId).toBeTruthy();
+        if (handoffByRequestId) {
+          expect(handoffByRequestId.requestId).toBe(requestId);
+        }
+
+        // Query database: count handoffs with this requestId
+        const allHandoffs = await paseoState.handoffs.listBySourceAgent("agent-e");
+        const handoffsWithRequestId = allHandoffs.filter((h) => h.requestId === requestId);
+
+        // VERIFY: Database truth - exactly 1 record
+        expect(handoffsWithRequestId).toHaveLength(1);
+        expect(handoffIds.size).toBe(1);
+
+        // VERIFY: Record content is correct and complete
+        const hand = handoffsWithRequestId[0];
+        expect(hand.id).toBeTruthy();
+        expect(hand.requestId).toBe(requestId);
+        expect(hand.status).toBe("pending");
+        expect(hand.sourceAgentId).toBe("agent-e");
+        expect(hand.sourceRunId).toBe("run-e");
+        expect(hand.targetAgentId).toBe("agent-f");
+        expect(hand.requestedAction).toBe("Database truth test");
+        expect(hand.summary).toBe("Verify single entity");
+        expect(hand.createdAt).toBeTruthy();
+
+        console.log(`\n📊 AUDIT 4.3: Database Inspection (Truth Test)`);
+        console.log(`   Retry attempts: 500`);
+        console.log(`   API responses (unique IDs): ${handoffIds.size} (expected: 1)`);
+        console.log(`   Database records (count): ${handoffsWithRequestId.length} (expected: 1)`);
+        console.log(`   Record ID: ${hand.id}`);
+        console.log(`   Record status: ${hand.status}`);
+        console.log(`   Record content complete: ✓`);
+      } finally {
+        if (ctx) await ctx.cleanup();
+      }
     });
 
-    it.skip("should provide idempotent read semantics across restart", async () => {
+    it("should provide idempotent read semantics across restart", async () => {
       // Extended test: F1 reads survive restart
       // Create handoff, restart daemon, read 1000 times
       // Expect: consistent reads, no version drift
 
-      const requestId = `read-stability-${randomUUID()}`;
+      const paseoHomeRoot = mkdtempSync(path.join(tmpdir(), "audit-read-stability-"));
+      let ctx: DaemonTestContext | undefined;
 
-      // CORRECTNESS: In real execution:
-      // - Create handoff with requestId
-      // - Restart daemon
-      // - Read getByRequestId(requestId) 1000 times
-      // - Verify all 1000 reads return identical object
-      // - Verify version not drifting
-      // - Verify createdAt/other immutable fields unchanged
+      try {
+        ctx = await createDaemonTestContext({ paseoHomeRoot, cleanup: false });
+        let daemon = (ctx.daemon as any).daemon;
+        let paseoState = daemon.paseoState;
 
-      expect(requestId).toBeTruthy();
+        const requestId = `read-stability-${randomUUID()}`;
+        const creationTime = new Date().toISOString();
+
+        // Create handoff
+        const handoff = await paseoState.handoffs.createIdempotent(requestId, {
+          projectId: "test-project",
+          workspaceId: "test-workspace",
+          sourceAgentId: "agent-g",
+          sourceRunId: "run-g",
+          targetAgentId: "agent-h",
+          targetRunId: null,
+          requestId,
+          requestedAction: "Read stability test",
+          summary: "Verify consistent reads",
+          status: "pending",
+        });
+
+        expect(handoff).toBeTruthy();
+        const handoffIdBefore = handoff?.id;
+        const createdAtBefore = handoff?.createdAt;
+
+        console.log(`   Created handoff: ${handoffIdBefore} at ${createdAtBefore}`);
+
+        // Restart daemon
+        console.log(`   Restarting daemon...`);
+        await ctx.cleanup();
+        ctx = await createDaemonTestContext({ paseoHomeRoot, cleanup: false });
+        daemon = (ctx.daemon as any).daemon;
+        paseoState = daemon.paseoState;
+
+        // Read 1000 times and verify consistency
+        const readings: Array<{ id: string; createdAt: string }> = [];
+        for (let i = 0; i < 1000; i++) {
+          const read = await paseoState.handoffs.getByRequestId(requestId);
+          if (read) {
+            readings.push({ id: read.id, createdAt: read.createdAt });
+          }
+        }
+
+        // Verify all 1000 reads are identical
+        expect(readings).toHaveLength(1000);
+        const firstReading = readings[0];
+        for (let i = 1; i < readings.length; i++) {
+          expect(readings[i].id).toBe(firstReading.id);
+          expect(readings[i].createdAt).toBe(firstReading.createdAt);
+        }
+
+        // Verify createdAt unchanged across restart
+        expect(firstReading.id).toBe(handoffIdBefore);
+        expect(firstReading.createdAt).toBe(createdAtBefore);
+
+        console.log(`\n📊 AUDIT 4.4: Read Stability Across Restart`);
+        console.log(`   Created handoff: ${handoffIdBefore}`);
+        console.log(`   Read 1000 times after restart`);
+        console.log(`   All reads returned: ${firstReading.id}`);
+        console.log(`   createdAt preserved: ${createdAtBefore === firstReading.createdAt}`);
+      } finally {
+        if (ctx) await ctx.cleanup();
+      }
     });
   });
 

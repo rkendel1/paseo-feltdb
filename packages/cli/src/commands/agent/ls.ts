@@ -1,15 +1,19 @@
 import type { Command } from "commander";
-import type { AgentSnapshotPayload } from "@getpaseo/server";
+import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
 import type { CommandOptions, ListResult, OutputSchema, CommandError } from "../../output/index.js";
 import { collectMultiple } from "../../utils/command-options.js";
 import { isSameOrDescendantPath } from "../../utils/paths.js";
 
+type FetchAgentsOptions = NonNullable<
+  Parameters<Awaited<ReturnType<typeof connectToDaemon>>["fetchAgents"]>[0]
+>;
+
 export function addLsOptions(cmd: Command): Command {
   return cmd
     .description("List agents. By default excludes archived agents.")
     .option("-a, --all", "Include archived agents")
-    .option("-g, --global", "Legacy no-op (kept for compatibility)")
+    .option("-g, --global", "List agents across all directories")
     .option(
       "--label <key=value>",
       "Filter by label (can be used multiple times)",
@@ -103,7 +107,7 @@ export type AgentLsResult = ListResult<AgentListItem>;
 export interface AgentLsOptions extends CommandOptions {
   /** -a: Include archived agents */
   all?: boolean;
-  /** Legacy flag retained for CLI compatibility */
+  /** -g: List agents across all directories */
   global?: boolean;
   /** Filter by specific status */
   status?: string;
@@ -115,26 +119,69 @@ export interface AgentLsOptions extends CommandOptions {
   thinking?: string;
 }
 
+function parseLabelFilters(labels: string[] | undefined): Record<string, string> {
+  const labelFilters: Record<string, string> = {};
+  for (const labelStr of labels ?? []) {
+    const eqIndex = labelStr.indexOf("=");
+    if (eqIndex !== -1) {
+      const key = labelStr.slice(0, eqIndex);
+      const value = labelStr.slice(eqIndex + 1);
+      labelFilters[key] = value;
+    }
+  }
+  return labelFilters;
+}
+
+export function buildAgentLsFetchOptions(
+  options: Pick<AgentLsOptions, "all" | "global" | "label" | "thinking">,
+): FetchAgentsOptions {
+  const labelFilters = parseLabelFilters(options.label);
+  const normalizedThinkingOptionId = options.thinking?.trim();
+  const daemonFilter: NonNullable<FetchAgentsOptions["filter"]> = {};
+
+  if (options.all) {
+    daemonFilter.includeArchived = true;
+  }
+  if (Object.keys(labelFilters).length > 0) {
+    daemonFilter.labels = labelFilters;
+  }
+  if (normalizedThinkingOptionId) {
+    daemonFilter.thinkingOptionId = normalizedThinkingOptionId;
+  }
+
+  const fetchOptions: FetchAgentsOptions = {};
+  if (!options.global) {
+    fetchOptions.scope = "active";
+  }
+  if (Object.keys(daemonFilter).length > 0) {
+    fetchOptions.filter = daemonFilter;
+  }
+  return fetchOptions;
+}
+
 /**
  * Agent ls command semantics:
- * - `paseo agent ls`    → all non-archived agents
- * - `paseo agent ls -a` → include archived agents
+ * - `paseo agent ls`    → active non-archived agents
+ * - `paseo agent ls -g` → global non-archived agents
+ * - `paseo agent ls -a` → active agents, including archived
+ * - `paseo agent ls -ag` → global agents, including archived
  */
 export async function runLsCommand(
   options: AgentLsOptions,
   _command: Command,
 ): Promise<AgentLsResult> {
-  const host = getDaemonHost({ host: options.host as string | undefined });
+  const host = getDaemonHost({ host: options.host });
 
   let client;
   try {
-    client = await connectToDaemon({ host: options.host as string | undefined });
+    client = await connectToDaemon({ host: options.host });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const error: CommandError = {
       code: "DAEMON_NOT_RUNNING",
       message: `Cannot connect to daemon at ${host}: ${message}`,
-      details: "Start the daemon with: paseo daemon start",
+      details:
+        "Start the daemon with: paseo daemon start\nFor a remote daemon, pass --host <host:port> or set PASEO_HOST.",
     };
     throw error;
   }
@@ -149,37 +196,8 @@ export async function runLsCommand(
       throw error;
     }
 
-    // Parse --label filters (key=value).
-    const labelFilters: Record<string, string> = {};
-    if (options.label) {
-      for (const labelStr of options.label) {
-        const eqIndex = labelStr.indexOf("=");
-        if (eqIndex !== -1) {
-          const key = labelStr.slice(0, eqIndex);
-          const value = labelStr.slice(eqIndex + 1);
-          labelFilters[key] = value;
-        }
-      }
-    }
-
-    const daemonFilter: {
-      includeArchived?: boolean;
-      labels?: Record<string, string>;
-      thinkingOptionId?: string;
-    } = {};
-    if (options.all) {
-      daemonFilter.includeArchived = true;
-    }
-    if (Object.keys(labelFilters).length > 0) {
-      daemonFilter.labels = labelFilters;
-    }
-    if (normalizedThinkingOptionId) {
-      daemonFilter.thinkingOptionId = normalizedThinkingOptionId;
-    }
-
-    const fetchPayload = await client.fetchAgents({
-      filter: Object.keys(daemonFilter).length > 0 ? daemonFilter : undefined,
-    });
+    const labelFilters = parseLabelFilters(options.label);
+    const fetchPayload = await client.fetchAgents(buildAgentLsFetchOptions(options));
     let agents = fetchPayload.entries.map((entry) => entry.agent);
 
     // By default, exclude archived agents. `-a` includes them.

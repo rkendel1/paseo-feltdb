@@ -1,4 +1,4 @@
-import { useCallback, useState, type ReactElement } from "react";
+import { useCallback, useMemo, type ReactElement } from "react";
 import {
   DndContext,
   closestCenter,
@@ -7,23 +7,28 @@ import {
   type Modifier,
   useSensor,
   useSensors,
-  type DragEndEvent,
-  type DragStartEvent,
 } from "@dnd-kit/core";
 import {
   SortableContext,
   sortableKeyboardCoordinates,
   horizontalListSortingStrategy,
   useSortable,
-  arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { DraggableRenderItemInfo } from "./draggable-list.types";
+import { useDragReorderState } from "./drag-reorder";
 
 const restrictToHorizontalAxis: Modifier = ({ transform }) => ({
   ...transform,
   y: 0,
 });
+
+const DND_MODIFIERS: Modifier[] = [restrictToHorizontalAxis];
+
+function computeDragOpacity(hasExternalContext: boolean, isDragging: boolean): number {
+  if (!isDragging) return 1;
+  return hasExternalContext ? 0.3 : 0.9;
+}
 
 function SortableItem<T>({
   id,
@@ -71,12 +76,15 @@ function SortableItem<T>({
   const scaleTransform = !externalDndContext && isDragging ? "scale(1.01)" : "";
   const combinedTransform = [baseTransform, scaleTransform].filter(Boolean).join(" ");
 
-  const style = {
-    transform: combinedTransform || undefined,
-    transition,
-    opacity: externalDndContext && isDragging ? 0.3 : isDragging ? 0.9 : 1,
-    zIndex: isDragging ? 1000 : 1,
-  };
+  const style = useMemo(
+    () => ({
+      transform: combinedTransform || undefined,
+      transition,
+      opacity: computeDragOpacity(Boolean(externalDndContext), isDragging),
+      zIndex: isDragging ? 1000 : 1,
+    }),
+    [combinedTransform, transition, externalDndContext, isDragging],
+  );
 
   const info: DraggableRenderItemInfo<T> = {
     item,
@@ -128,9 +136,19 @@ export function SortableInlineList<T>({
   activeId?: string | null;
   getItemData?: (item: T, index: number) => Record<string, unknown>;
 }): ReactElement {
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [dragItems, setDragItems] = useState<T[] | null>(null);
-  const items = externalDndContext ? data : (dragItems ?? data);
+  const {
+    activeId: internalActiveId,
+    items: managedItems,
+    handlers,
+  } = useDragReorderState({
+    data,
+    keyExtractor,
+    onDragEnd,
+    onDragBegin,
+    disabled,
+  });
+  const items = externalDndContext ? data : managedItems;
+  const activeId = externalDndContext ? externalActiveId : internalActiveId;
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -143,43 +161,10 @@ export function SortableInlineList<T>({
     }),
   );
 
-  const handleDragStart = useCallback(
-    (event: DragStartEvent) => {
-      if (disabled) {
-        return;
-      }
-      setDragItems(data);
-      setActiveId(String(event.active.id));
-      onDragBegin?.();
-    },
-    [data, disabled, onDragBegin],
+  const ids = useMemo(
+    () => items.map((item, index) => keyExtractor(item, index)),
+    [items, keyExtractor],
   );
-
-  const handleDragEnd = useCallback(
-    (event: DragEndEvent) => {
-      const { active, over } = event;
-
-      setActiveId(null);
-      setDragItems(null);
-
-      if (disabled) {
-        return;
-      }
-
-      if (over && active.id !== over.id) {
-        const oldIndex = items.findIndex((item, i) => keyExtractor(item, i) === active.id);
-        const newIndex = items.findIndex((item, i) => keyExtractor(item, i) === over.id);
-
-        if (oldIndex >= 0 && newIndex >= 0 && oldIndex !== newIndex) {
-          const newItems = arrayMove(items, oldIndex, newIndex);
-          onDragEnd?.(newItems);
-        }
-      }
-    },
-    [disabled, items, keyExtractor, onDragEnd],
-  );
-
-  const ids = items.map((item, index) => keyExtractor(item, index));
 
   const renderedItems = (
     <SortableContext items={ids} strategy={horizontalListSortingStrategy}>
@@ -192,7 +177,7 @@ export function SortableInlineList<T>({
             item={item}
             index={index}
             renderItem={renderItem}
-            activeId={externalDndContext ? externalActiveId : activeId}
+            activeId={activeId}
             useDragHandle={useDragHandle}
             disabled={disabled}
             itemData={getItemData?.(item, index)}
@@ -211,9 +196,10 @@ export function SortableInlineList<T>({
     <DndContext
       sensors={sensors}
       collisionDetection={closestCenter}
-      modifiers={[restrictToHorizontalAxis]}
-      onDragStart={handleDragStart}
-      onDragEnd={handleDragEnd}
+      modifiers={DND_MODIFIERS}
+      onDragStart={handlers.onDragStart}
+      onDragCancel={handlers.onDragCancel}
+      onDragEnd={handlers.onDragEnd}
     >
       {renderedItems}
     </DndContext>

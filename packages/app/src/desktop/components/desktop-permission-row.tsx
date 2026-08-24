@@ -1,33 +1,37 @@
+import { useMemo } from "react";
 import { View, Text } from "react-native";
-import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Check } from "lucide-react-native";
 import { Button } from "@/components/ui/button";
+import { settingsStyles } from "@/styles/settings";
 import type { DesktopPermissionStatus } from "@/desktop/permissions/desktop-permissions";
 
 export interface DesktopPermissionRowProps {
   title: string;
   status: DesktopPermissionStatus | null;
   isRequesting: boolean;
+  labels: {
+    granted: string;
+    request: string;
+    requesting: string;
+  };
   showBorder?: boolean;
   onRequest: () => void;
-  extraActionLabel?: string;
-  isExtraActionBusy?: boolean;
-  isExtraActionDisabled?: boolean;
-  onExtraAction?: () => void;
 }
+
+const ThemedCheck = withUnistyles(Check, (theme) => ({
+  size: theme.iconSize.sm,
+  color: theme.colors.foregroundMuted,
+}));
 
 export function DesktopPermissionRow({
   title,
   status,
   isRequesting,
+  labels,
   showBorder,
   onRequest,
-  extraActionLabel,
-  isExtraActionBusy = false,
-  isExtraActionDisabled = false,
-  onExtraAction,
 }: DesktopPermissionRowProps) {
-  const { theme } = useUnistyles();
   const state = status?.state ?? "unknown";
   const isGranted = state === "granted";
   const shouldShowDetail =
@@ -37,32 +41,25 @@ export function DesktopPermissionRow({
     state !== "prompt" &&
     state !== "not-granted";
 
+  const rowStyle = useMemo(
+    () => [settingsStyles.row, showBorder && settingsStyles.rowBorder],
+    [showBorder],
+  );
+
   return (
-    <View style={[styles.audioRow, showBorder && styles.audioRowBorder]}>
-      <View style={styles.audioRowContent}>
-        <Text style={styles.audioRowTitle}>{title}</Text>
+    <View style={rowStyle}>
+      <View style={settingsStyles.rowContent}>
+        <Text style={settingsStyles.rowTitle}>{title}</Text>
       </View>
       <View style={styles.permissionRowActions}>
         {isGranted ? (
-          <View style={styles.permissionGrantedActions}>
-            <View style={styles.permissionStatusPill}>
-              <Check size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
-              <Text style={styles.permissionStatusText}>Granted</Text>
-            </View>
-            {extraActionLabel && onExtraAction ? (
-              <Button
-                variant="outline"
-                size="sm"
-                onPress={onExtraAction}
-                disabled={isExtraActionDisabled || isExtraActionBusy}
-              >
-                {isExtraActionBusy ? `${extraActionLabel}...` : extraActionLabel}
-              </Button>
-            ) : null}
+          <View style={styles.permissionStatusPill}>
+            <ThemedCheck />
+            <Text style={styles.permissionStatusText}>{labels.granted}</Text>
           </View>
         ) : (
           <Button variant="outline" size="sm" onPress={onRequest} disabled={isRequesting}>
-            {isRequesting ? "Requesting..." : "Request"}
+            {isRequesting ? labels.requesting : labels.request}
           </Button>
         )}
         {shouldShowDetail ? (
@@ -74,33 +71,9 @@ export function DesktopPermissionRow({
 }
 
 const styles = StyleSheet.create((theme) => ({
-  audioRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingVertical: theme.spacing[4],
-    paddingHorizontal: theme.spacing[4],
-  },
-  audioRowBorder: {
-    borderTopWidth: 1,
-    borderTopColor: theme.colors.border,
-  },
-  audioRowContent: {
-    flex: 1,
-    marginRight: theme.spacing[3],
-  },
-  audioRowTitle: {
-    color: theme.colors.foreground,
-    fontSize: theme.fontSize.base,
-  },
   permissionRowActions: {
     alignItems: "flex-end",
     gap: theme.spacing[1],
-  },
-  permissionGrantedActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
   },
   permissionStatusPill: {
     flexDirection: "row",
@@ -116,13 +89,12 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: "center",
   },
   permissionStatusText: {
-    fontSize: theme.fontSize.xs,
-    fontWeight: theme.fontWeight.normal,
+    fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
   },
   permissionDetailText: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     maxWidth: 220,
     textAlign: "right",
   },

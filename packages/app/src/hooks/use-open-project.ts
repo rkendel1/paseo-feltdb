@@ -1,45 +1,78 @@
-import { router } from "expo-router";
 import { useCallback } from "react";
-import { useToast } from "@/contexts/toast-context";
-import { useHostRuntimeClient } from "@/runtime/host-runtime";
-import { normalizeWorkspaceDescriptor, useSessionStore } from "@/stores/session-store";
-import { prepareWorkspaceTab } from "@/utils/workspace-navigation";
+import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
+import { useSessionStore } from "@/stores/session-store";
+import {
+  cloneGithubProjectDirectly,
+  openProjectDirectly,
+  type OpenProjectResult,
+  type ProjectGithubCloneProtocol,
+} from "@/hooks/open-project";
 
-export function useOpenProject(serverId: string | null): (path: string) => Promise<boolean> {
+export function useOpenProject(
+  serverId: string | null,
+): (path: string) => Promise<OpenProjectResult> {
   const normalizedServerId = serverId?.trim() ?? "";
-  const toast = useToast();
   const client = useHostRuntimeClient(normalizedServerId);
-  const mergeWorkspaces = useSessionStore((state) => state.mergeWorkspaces);
+  const isConnected = useHostRuntimeIsConnected(normalizedServerId);
+  const canAddProject = useSessionStore((state) =>
+    normalizedServerId
+      ? state.sessions[normalizedServerId]?.serverInfo?.features?.projectAdd === true &&
+        state.sessions[normalizedServerId]?.serverInfo?.features?.stableProjectIdentity === true
+      : false,
+  );
+  const upsertProject = useSessionStore((state) => state.upsertProject);
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
 
   return useCallback(
     async (path: string) => {
-      const trimmedPath = path.trim();
-      if (!trimmedPath || !client || !normalizedServerId) {
-        return false;
-      }
-
-      try {
-        const payload = await client.openProject(trimmedPath);
-        if (payload.error || !payload.workspace) {
-          throw new Error(payload.error || "Failed to open project");
-        }
-
-        mergeWorkspaces(normalizedServerId, [normalizeWorkspaceDescriptor(payload.workspace)]);
-        setHasHydratedWorkspaces(normalizedServerId, true);
-        router.replace(
-          prepareWorkspaceTab({
-            serverId: normalizedServerId,
-            workspaceId: payload.workspace.id,
-            target: { kind: "draft", draftId: "new" },
-          }) as any,
-        );
-        return true;
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Failed to open project");
-        return false;
-      }
+      const result = await openProjectDirectly({
+        serverId: normalizedServerId,
+        projectPath: path,
+        isConnected,
+        canAddProject,
+        client,
+        upsertProject,
+        setHasHydratedWorkspaces,
+      });
+      return result;
     },
-    [client, mergeWorkspaces, normalizedServerId, setHasHydratedWorkspaces, toast],
+    [
+      upsertProject,
+      canAddProject,
+      client,
+      isConnected,
+      normalizedServerId,
+      setHasHydratedWorkspaces,
+    ],
+  );
+}
+
+export function useCloneGithubProject(
+  serverId: string | null,
+): (
+  repo: string,
+  targetDirectory: string,
+  cloneProtocol?: ProjectGithubCloneProtocol,
+) => Promise<OpenProjectResult> {
+  const normalizedServerId = serverId?.trim() ?? "";
+  const client = useHostRuntimeClient(normalizedServerId);
+  const isConnected = useHostRuntimeIsConnected(normalizedServerId);
+  const upsertProject = useSessionStore((state) => state.upsertProject);
+  const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
+
+  return useCallback(
+    async (repo: string, targetDirectory: string, cloneProtocol?: ProjectGithubCloneProtocol) => {
+      return cloneGithubProjectDirectly({
+        serverId: normalizedServerId,
+        repo,
+        targetDirectory,
+        ...(cloneProtocol ? { cloneProtocol } : {}),
+        isConnected,
+        client,
+        upsertProject,
+        setHasHydratedWorkspaces,
+      });
+    },
+    [client, isConnected, normalizedServerId, setHasHydratedWorkspaces, upsertProject],
   );
 }

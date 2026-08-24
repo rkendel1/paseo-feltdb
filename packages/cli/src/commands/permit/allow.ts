@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import type { AgentPermissionRequest } from "@getpaseo/server";
+import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
 import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
 import type { CommandOptions, ListResult, OutputSchema, CommandError } from "../../output/index.js";
 
@@ -79,7 +79,7 @@ export async function runAllowCommand(
   }
 
   try {
-    const fetchResult = await client.fetchAgent(agentIdOrPrefix);
+    const fetchResult = await client.fetchAgent({ agentId: agentIdOrPrefix });
     if (!fetchResult) {
       await client.close();
       const error: CommandError = {
@@ -111,7 +111,7 @@ export async function runAllowCommand(
       permissionsToAllow = pendingPermissions;
     } else {
       // Find permission by ID prefix
-      const permission = pendingPermissions.find((p) => p.id === reqId || p.id.startsWith(reqId!));
+      const permission = pendingPermissions.find((p) => p.id === reqId || p.id.startsWith(reqId));
       if (!permission) {
         await client.close();
         const error: CommandError = {
@@ -125,20 +125,21 @@ export async function runAllowCommand(
     }
 
     // Allow permissions
-    const results: PermissionResponseItem[] = [];
-    for (const permission of permissionsToAllow) {
-      await client.respondToPermission(resolvedAgentId, permission.id, {
-        behavior: "allow",
-        ...(updatedInput ? { updatedInput } : {}),
-      });
-      results.push({
-        requestId: permission.id.slice(0, 8),
-        agentId: resolvedAgentId,
-        agentShortId: resolvedAgentId.slice(0, 7),
-        name: permission.name,
-        result: "allowed",
-      });
-    }
+    const results: PermissionResponseItem[] = await Promise.all(
+      permissionsToAllow.map(async (permission) => {
+        await client.respondToPermission(resolvedAgentId, permission.id, {
+          behavior: "allow",
+          ...(updatedInput ? { updatedInput } : {}),
+        });
+        return {
+          requestId: permission.id.slice(0, 8),
+          agentId: resolvedAgentId,
+          agentShortId: resolvedAgentId.slice(0, 7),
+          name: permission.name,
+          result: "allowed",
+        };
+      }),
+    );
 
     await client.close();
 

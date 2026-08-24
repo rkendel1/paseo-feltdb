@@ -4,10 +4,47 @@ import { tmpdir } from "os";
 import path from "path";
 import { execSync } from "child_process";
 
-import { createDaemonTestContext, type DaemonTestContext } from "../test-utils/index.js";
-import { createWorktree } from "../../utils/worktree.js";
+import {
+  createDaemonTestContext,
+  createTempGithubRepoName,
+  type DaemonTestContext,
+} from "../test-utils/index.js";
+import {
+  createWorktree as createWorktreePrimitive,
+  type CreateWorktreeOptions,
+  type WorktreeConfig,
+} from "../../utils/worktree.js";
 
-const CODEX_TEST_MODEL = "gpt-5.1-codex-mini";
+interface LegacyCreateWorktreeTestOptions {
+  branchName: string;
+  cwd: string;
+  baseBranch: string;
+  worktreeSlug: string;
+  runSetup?: boolean;
+  paseoHome?: string;
+}
+
+function createLegacyWorktreeForTest(
+  options: CreateWorktreeOptions | LegacyCreateWorktreeTestOptions,
+): Promise<WorktreeConfig> {
+  if ("source" in options) {
+    return createWorktreePrimitive(options);
+  }
+
+  return createWorktreePrimitive({
+    cwd: options.cwd,
+    worktreeSlug: options.worktreeSlug,
+    source: {
+      kind: "branch-off",
+      baseBranch: options.baseBranch,
+      branchName: options.branchName,
+    },
+    runSetup: options.runSetup ?? true,
+    paseoHome: options.paseoHome,
+  });
+}
+
+const CODEX_TEST_MODEL = "gpt-5.4-mini";
 const CODEX_TEST_THINKING_OPTION_ID = "low";
 
 function tmpCwd(prefix: string): string {
@@ -41,11 +78,6 @@ function initGitRepo(repoDir: string): void {
     cwd: repoDir,
     stdio: "pipe",
   });
-}
-
-function createTempRepoName(): string {
-  const rand = Math.random().toString(16).slice(2, 8);
-  return `paseo-checkout-ship-${Date.now()}-${rand}`;
 }
 
 function getGhLogin(): string {
@@ -95,7 +127,7 @@ describe("daemon checkout ship loop", () => {
         initGitRepo(repoDir);
 
         const owner = getGhLogin();
-        const repoName = createTempRepoName();
+        const repoName = createTempGithubRepoName("checkout-ship");
         repoFullName = `${owner}/${repoName}`;
         createPrivateRepo(repoName);
 
@@ -109,7 +141,7 @@ describe("daemon checkout ship loop", () => {
         );
         execSync("git push -u origin main", { cwd: repoDir, stdio: "pipe" });
 
-        const worktree = await createWorktree({
+        const worktree = await createLegacyWorktreeForTest({
           branchName: "ship-loop",
           cwd: repoDir,
           baseBranch: "main",
@@ -223,13 +255,15 @@ describe("daemon checkout ship loop", () => {
         expect(archiveResult.error).toBeNull();
         expect(archiveResult.success).toBe(true);
 
+        // Archiving removes the agent from the active list but leaves the
+        // worktree on disk — disk deletion is a separate, explicit step.
         const worktreeListAfter = await ctx.client.getPaseoWorktreeList({
           cwd: repoDir,
         });
         expect(
           worktreeListAfter.worktrees.some((entry) => entry.worktreePath === worktree.worktreePath),
-        ).toBe(false);
-        expect(existsSync(worktree.worktreePath)).toBe(false);
+        ).toBe(true);
+        expect(existsSync(worktree.worktreePath)).toBe(true);
 
         const remainingAgents = await ctx.client.fetchAgents();
         expect(remainingAgents.entries.some((entry) => entry.agent.id === agent.id)).toBe(false);
@@ -256,7 +290,7 @@ describe("daemon checkout ship loop", () => {
       execSync(`git remote add origin ${remoteDir}`, { cwd: repoDir, stdio: "pipe" });
       execSync("git push -u origin main", { cwd: repoDir, stdio: "pipe" });
 
-      const worktree = await createWorktree({
+      const worktree = await createLegacyWorktreeForTest({
         branchName: "merge-from-base",
         cwd: repoDir,
         baseBranch: "main",

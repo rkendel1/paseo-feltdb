@@ -5,9 +5,10 @@ import type { PaseoSpeechConfig } from "../bootstrap.js";
 import type { InitializedLocalSpeech } from "./providers/local/runtime.js";
 import type { SpeechToTextProvider, TextToSpeechProvider } from "./speech-provider.js";
 import type { TurnDetectionProvider } from "./turn-detection-provider.js";
-import { initializeSpeechRuntime } from "./speech-runtime.js";
+import { createSpeechService } from "./speech-runtime.js";
 
-const { initializeLocalSpeechServicesMock } = vi.hoisted(() => ({
+const { ensureLocalSpeechModelsMock, initializeLocalSpeechServicesMock } = vi.hoisted(() => ({
+  ensureLocalSpeechModelsMock: vi.fn(async () => ({})),
   initializeLocalSpeechServicesMock: vi.fn<(args: unknown) => Promise<InitializedLocalSpeech>>(),
 }));
 
@@ -34,7 +35,7 @@ vi.mock("./providers/openai/runtime.js", () => ({
 }));
 
 vi.mock("./providers/local/models.js", () => ({
-  ensureLocalSpeechModels: vi.fn(async () => {}),
+  ensureLocalSpeechModels: ensureLocalSpeechModelsMock,
   getLocalSpeechModelDir: vi.fn(() => ""),
   listLocalSpeechModels: vi.fn(() => []),
 }));
@@ -66,12 +67,26 @@ function createStubTurnDetection(id: string): TurnDetectionProvider {
   };
 }
 
-function createSpeechConfig(providers: PaseoSpeechConfig["providers"]): PaseoSpeechConfig {
-  return { providers };
+function rejectWhenAborted(signal?: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
 }
 
-describe("initializeSpeechRuntime readiness", () => {
+function createSpeechConfig(providers: PaseoSpeechConfig["providers"]): PaseoSpeechConfig {
+  return {
+    providers,
+    sttLanguages: {
+      dictation: "en",
+      voice: "en",
+    },
+  };
+}
+
+describe("createSpeechService readiness", () => {
   beforeEach(() => {
+    ensureLocalSpeechModelsMock.mockReset();
+    ensureLocalSpeechModelsMock.mockResolvedValue({});
     initializeLocalSpeechServicesMock.mockReset();
   });
 
@@ -92,7 +107,7 @@ describe("initializeSpeechRuntime readiness", () => {
       cleanup: () => {},
     });
 
-    const runtime = await initializeSpeechRuntime({
+    const runtime = createSpeechService({
       logger: pino({ level: "silent" }),
       speechConfig: createSpeechConfig({
         dictationStt: { provider: "local", enabled: true, explicit: true },
@@ -101,14 +116,16 @@ describe("initializeSpeechRuntime readiness", () => {
         voiceTts: { provider: "local", enabled: false, explicit: true },
       }),
     });
+    runtime.start();
+    await runtime.ready;
 
-    const readiness = runtime.getSpeechReadiness();
+    const readiness = runtime.getReadiness();
     expect(readiness.dictation.available).toBe(true);
     expect(readiness.realtimeVoice.reasonCode).toBe("disabled");
     expect(readiness.voiceFeature.available).toBe(true);
     expect(readiness.voiceFeature.reasonCode).toBe("ready");
 
-    runtime.cleanup();
+    await runtime.stop();
   });
 
   it("keeps voice feature available when only realtime voice is enabled and ready", async () => {
@@ -130,7 +147,7 @@ describe("initializeSpeechRuntime readiness", () => {
       cleanup: () => {},
     });
 
-    const runtime = await initializeSpeechRuntime({
+    const runtime = createSpeechService({
       logger: pino({ level: "silent" }),
       speechConfig: createSpeechConfig({
         dictationStt: { provider: "local", enabled: false, explicit: true },
@@ -139,13 +156,56 @@ describe("initializeSpeechRuntime readiness", () => {
         voiceTts: { provider: "local", enabled: true, explicit: true },
       }),
     });
+    runtime.start();
+    await runtime.ready;
 
-    const readiness = runtime.getSpeechReadiness();
+    const readiness = runtime.getReadiness();
     expect(readiness.realtimeVoice.available).toBe(true);
     expect(readiness.dictation.reasonCode).toBe("disabled");
     expect(readiness.voiceFeature.available).toBe(true);
     expect(readiness.voiceFeature.reasonCode).toBe("ready");
 
-    runtime.cleanup();
+    await runtime.stop();
+  });
+
+  it("aborts and joins an in-flight model download when stopped", async () => {
+    let downloadSignal: AbortSignal | undefined;
+    ensureLocalSpeechModelsMock.mockImplementation(({ signal }: { signal?: AbortSignal }) => {
+      downloadSignal = signal;
+      return rejectWhenAborted(signal);
+    });
+    initializeLocalSpeechServicesMock.mockResolvedValue({
+      turnDetectionService: null,
+      sttService: null,
+      ttsService: null,
+      dictationSttService: null,
+      localVoiceTtsProvider: null,
+      localModelConfig: {
+        modelsDir: "/tmp/missing-local-speech-models",
+        defaultModelIds: ["parakeet-tdt-0.6b-v2-int8"],
+      },
+      availability: {
+        configured: true,
+        modelsDir: "/tmp/missing-local-speech-models",
+      },
+      cleanup: () => {},
+    });
+
+    const runtime = createSpeechService({
+      logger: pino({ level: "silent" }),
+      speechConfig: createSpeechConfig({
+        dictationStt: { provider: "local", enabled: true, explicit: true },
+        voiceTurnDetection: { provider: "local", enabled: false, explicit: true },
+        voiceStt: { provider: "local", enabled: false, explicit: true },
+        voiceTts: { provider: "local", enabled: false, explicit: true },
+      }),
+    });
+    runtime.start();
+    await runtime.ready;
+    expect(ensureLocalSpeechModelsMock).toHaveBeenCalledOnce();
+
+    await runtime.stop();
+
+    expect(downloadSignal?.aborted).toBe(true);
   });
 });

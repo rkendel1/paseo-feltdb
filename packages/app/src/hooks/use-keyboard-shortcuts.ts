@@ -1,73 +1,143 @@
-import { useEffect, useMemo, useRef } from "react";
-import { Platform } from "react-native";
-import { usePathname } from "expo-router";
-import { getIsDesktop } from "@/constants/layout";
-import { useHosts } from "@/runtime/host-runtime";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import { usePathname, useRouter } from "expo-router";
+import { getIsElectronRuntime } from "@/constants/layout";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { setCommandCenterFocusRestoreElement } from "@/utils/command-center-focus-restore";
-import {
-  parseHostAgentRouteFromPathname,
-  parseServerIdFromPathname,
-  parseHostWorkspaceRouteFromPathname,
-} from "@/utils/host-routes";
-import { navigateToWorkspace } from "@/hooks/use-workspace-navigation";
-import {
-  type MessageInputKeyboardActionKind,
-  type KeyboardShortcutPayload,
-} from "@/keyboard/actions";
-import { canToggleFileExplorerShortcut } from "@/keyboard/keyboard-shortcut-routing";
-import { keyboardActionDispatcher } from "@/keyboard/keyboard-action-dispatcher";
+import { getResidentBrowserWebview } from "@/desktop/browser/resident-webviews";
+import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
+import { useKeyboardActionDispatcher } from "@/keyboard/keyboard-action-dispatcher-context";
 import {
   type ChordState,
+  type KeyboardShortcutInput,
   resolveKeyboardShortcut,
   buildEffectiveBindings,
+  getWorkspaceIndexJumpModifierKey,
 } from "@/keyboard/keyboard-shortcuts";
 import { resolveKeyboardFocusScope } from "@/keyboard/focus-scope";
+import {
+  buildBrowserKeyboardPolicy,
+  parseBrowserShortcutInput,
+  shouldPublishBrowserShortcutPolicy,
+} from "@/desktop/browser/shortcuts";
+import type { KeyboardFocusScope, KeyboardShortcutPayload } from "@/keyboard/actions";
+import {
+  routeKeyboardShortcut,
+  type ShortcutAction,
+  type ShortcutCallbackName,
+} from "@/keyboard/route-shortcut";
 import { getShortcutOs } from "@/utils/shortcut-platform";
-import { useOpenProjectPicker } from "@/hooks/use-open-project-picker";
+import { useOpenAddProject } from "@/hooks/use-open-add-project";
 import { useKeyboardShortcutOverrides } from "@/hooks/use-keyboard-shortcut-overrides";
+import { isNative } from "@/constants/platform";
+import { keyboardShortcutsAvailable } from "@/keyboard/availability";
+import { getDesktopHost, isElectronRuntime } from "@/desktop/host";
+import { isImeComposingKeyboardEvent } from "@/utils/keyboard-ime";
+import {
+  type ActiveWorkspaceSelection,
+  navigateToLastWorkspace,
+  useActiveWorkspaceSelection,
+} from "@/stores/navigation-active-workspace-store";
+import { dispatchTopWebOverlayKeyDown } from "@/lib/overlay-root";
 
 export function useKeyboardShortcuts({
   enabled,
   isMobile,
+  isWorkspaceFocusModeEnabled,
   toggleAgentList,
-  selectedAgentId,
-  toggleFileExplorer,
   toggleBothSidebars,
-  toggleFocusMode,
+  exitFocusMode,
+  cycleTheme,
 }: {
   enabled: boolean;
   isMobile: boolean;
+  isWorkspaceFocusModeEnabled: boolean;
   toggleAgentList: () => void;
-  selectedAgentId?: string;
-  toggleFileExplorer?: () => void;
   toggleBothSidebars?: () => void;
-  toggleFocusMode?: () => void;
+  exitFocusMode: () => void;
+  cycleTheme?: () => void;
 }) {
+  const keyboardActionDispatcher = useKeyboardActionDispatcher();
   const pathname = usePathname();
-  const hosts = useHosts();
+  const router = useRouter();
   const resetModifiers = useKeyboardShortcutsStore((s) => s.resetModifiers);
   const { overrides } = useKeyboardShortcutOverrides();
   const bindings = useMemo(() => buildEffectiveBindings(overrides), [overrides]);
+  const shortcutsAvailable = keyboardShortcutsAvailable({ isNative, isCompact: isMobile });
+  const isDesktopApp = getIsElectronRuntime();
+  const isMac = getShortcutOs() === "mac";
   const chordStateRef = useRef<ChordState>({
     candidateIndices: [],
     step: 0,
     timeoutId: null,
   });
-  const activeServerIdFromPath = parseServerIdFromPathname(pathname);
-  const activeServerId =
-    hosts.find((host) => host.serverId === activeServerIdFromPath)?.serverId ??
-    hosts[0]?.serverId ??
-    null;
-  const openProjectPickerAction = useOpenProjectPicker(activeServerId);
+  const openProjectPickerAction = useOpenAddProject();
+  const activeWorkspaceSelection = useActiveWorkspaceSelection();
+  const keyboardWorkspaceSelectionRef = useRef<ActiveWorkspaceSelection | null>(null);
+  const badgeModifierKeyRef = useRef<string | null | undefined>(undefined);
+
+  const publishBrowserShortcutPolicy = useCallback(
+    (chordState?: ChordState) => {
+      const policy =
+        enabled && shortcutsAvailable
+          ? buildBrowserKeyboardPolicy({
+              bindings,
+              chordState,
+              isMac,
+              isDesktop: isDesktopApp,
+            })
+          : { menuPrefixes: [], prefixes: [] };
+      void getDesktopHost()?.browser?.setShortcutPolicy?.(policy);
+    },
+    [bindings, enabled, isDesktopApp, isMac, shortcutsAvailable],
+  );
+
+  useEffect(() => {
+    if (activeWorkspaceSelection) {
+      keyboardWorkspaceSelectionRef.current = activeWorkspaceSelection;
+    }
+  }, [activeWorkspaceSelection]);
+
+  useEffect(() => {
+    if (!isDesktopApp) {
+      return;
+    }
+
+    publishBrowserShortcutPolicy();
+  }, [isDesktopApp, publishBrowserShortcutPolicy]);
 
   useEffect(() => {
     if (!enabled) return;
-    if (Platform.OS !== "web") return;
-    if (isMobile) return;
+    if (!shortcutsAvailable) return;
 
-    const isDesktopApp = getIsDesktop();
-    const isMac = getShortcutOs() === "mac";
+    // Only the modifier that actually performs the workspace-index jump on this
+    // runtime should reveal the sidebar number badges (Alt on web, Cmd on
+    // desktop Mac, Ctrl on desktop non-Mac). The store ORs altDown/cmdOrCtrlDown
+    // to drive badge visibility, so we set the flag matching this runtime.
+    // Derived from the effective bindings: `null` when the user unassigned or
+    // rebound the jump shortcut, and no `event.key` ever equals null, so the
+    // badges simply never appear.
+    const badgeModifierKey = getWorkspaceIndexJumpModifierKey(
+      { isMac, isDesktop: isDesktopApp },
+      bindings,
+    );
+    const setBadgeModifierDown = (down: boolean) => {
+      const state = useKeyboardShortcutsStore.getState();
+      if (isDesktopApp) {
+        state.setCmdOrCtrlDown(down);
+      } else {
+        state.setAltDown(down);
+      }
+    };
+
+    // The keyup listener matches the released key against the modifier derived
+    // when the effect last ran, so a modifier held while the jump binding
+    // changes can never be released -- the badges would stay up until a blur.
+    // Clear on change only: this effect also re-runs on every navigation, and
+    // clearing unconditionally would drop the badges mid Cmd+1, Cmd+2.
+    if (badgeModifierKeyRef.current !== badgeModifierKey) {
+      badgeModifierKeyRef.current = badgeModifierKey;
+      resetModifiers();
+    }
 
     const shouldHandle = () => {
       if (typeof document === "undefined") return false;
@@ -75,222 +145,182 @@ export function useKeyboardShortcuts({
       return true;
     };
 
-    const navigateToWorkspaceShortcut = (index: number): boolean => {
-      const state = useKeyboardShortcutsStore.getState();
-      const target = state.sidebarShortcutWorkspaceTargets[index - 1] ?? null;
-      if (!target) {
-        return false;
-      }
-
-      navigateToWorkspace(target.serverId, target.workspaceId);
-      return true;
+    const captureCommandCenterFocusRestore = (event: KeyboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const targetEl =
+        target?.closest?.("textarea, input, [contenteditable='true']") ??
+        (target instanceof HTMLElement ? target : null);
+      const active = document.activeElement;
+      const activeEl = active instanceof HTMLElement ? active : null;
+      setCommandCenterFocusRestoreElement((targetEl as HTMLElement | null) ?? activeEl ?? null);
     };
-    const navigateRelativeWorkspace = (delta: 1 | -1): boolean => {
-      const state = useKeyboardShortcutsStore.getState();
-      const targets = state.visibleWorkspaceTargets;
-      if (targets.length === 0) {
-        return false;
-      }
 
-      const workspaceRoute = parseHostWorkspaceRouteFromPathname(pathname);
-      if (!workspaceRoute) {
-        const fallback = targets[delta > 0 ? 0 : targets.length - 1] ?? null;
-        if (!fallback) {
+    const callbacksByName: Record<ShortcutCallbackName, (() => void) | undefined> = {
+      "toggle-agent-list": toggleAgentList,
+      "toggle-both-sidebars": toggleBothSidebars,
+      "cycle-theme": cycleTheme,
+    };
+
+    const performShortcutAction = (
+      action: ShortcutAction,
+      event: KeyboardEvent | null,
+      browserFocusRestoreElement: HTMLElement | null = null,
+    ): boolean => {
+      switch (action.kind) {
+        case "none":
           return false;
+        case "dispatch":
+          return keyboardActionDispatcher.dispatch(action.action);
+        case "navigate-workspace":
+          keyboardWorkspaceSelectionRef.current = {
+            serverId: action.serverId,
+            workspaceId: action.workspaceId,
+          };
+          navigateToWorkspace({ serverId: action.serverId, workspaceId: action.workspaceId });
+          return true;
+        case "navigate-last-workspace":
+          return navigateToLastWorkspace();
+        case "router-replace":
+          router.replace(action.route as Parameters<typeof router.replace>[0]);
+          return true;
+        case "router-back":
+          router.back();
+          return true;
+        case "router-push":
+          router.push(action.route as Parameters<typeof router.push>[0]);
+          return true;
+        case "open-project-picker":
+          void openProjectPickerAction();
+          return true;
+        case "callback":
+          callbacksByName[action.name]?.();
+          return true;
+        case "command-center-toggle": {
+          if (action.nextOpen) {
+            if (event) {
+              captureCommandCenterFocusRestore(event);
+            } else {
+              setCommandCenterFocusRestoreElement(browserFocusRestoreElement);
+            }
+          }
+          useKeyboardShortcutsStore
+            .getState()
+            .setCommandCenterOpen(action.nextOpen, action.scope ?? null);
+          return true;
         }
-        navigateToWorkspace(fallback.serverId, fallback.workspaceId);
-        return true;
-      }
-
-      const currentIndex = targets.findIndex(
-        (target) =>
-          target.serverId === workspaceRoute.serverId &&
-          target.workspaceId === workspaceRoute.workspaceId,
-      );
-      const fromIndex = currentIndex >= 0 ? currentIndex : delta > 0 ? -1 : 0;
-      const nextIndex = (fromIndex + delta + targets.length) % targets.length;
-      const target = targets[nextIndex] ?? null;
-      if (!target) {
-        return false;
-      }
-      navigateToWorkspace(target.serverId, target.workspaceId);
-      return true;
-    };
-
-    const openProjectPicker = (): boolean => {
-      void openProjectPickerAction();
-      return true;
-    };
-
-    const dispatchMessageInputAction = (kind: MessageInputKeyboardActionKind): boolean => {
-      switch (kind) {
-        case "focus":
-          return keyboardActionDispatcher.dispatch({
-            id: "message-input.focus",
-            scope: "message-input",
-          });
-        case "dictation-toggle":
-          return keyboardActionDispatcher.dispatch({
-            id: "message-input.dictation-toggle",
-            scope: "message-input",
-          });
-        case "dictation-cancel":
-          return keyboardActionDispatcher.dispatch({
-            id: "message-input.dictation-cancel",
-            scope: "message-input",
-          });
-        case "voice-toggle":
-          return keyboardActionDispatcher.dispatch({
-            id: "message-input.voice-toggle",
-            scope: "message-input",
-          });
-        case "voice-mute-toggle":
-          return keyboardActionDispatcher.dispatch({
-            id: "message-input.voice-mute-toggle",
-            scope: "message-input",
-          });
-        default:
-          return false;
+        case "shortcuts-dialog-toggle":
+          useKeyboardShortcutsStore.getState().setShortcutsDialogOpen(action.nextOpen);
+          return true;
       }
     };
-    const handleAction = (input: {
+
+    const routeAndPerformShortcut = (input: {
       action: string;
       payload: KeyboardShortcutPayload;
-      event: KeyboardEvent;
+      domEvent: KeyboardEvent | null;
+      browserFocusRestoreElement?: HTMLElement | null;
     }): boolean => {
-      switch (input.action) {
-        case "agent.new":
-          return openProjectPicker();
-        case "workspace.tab.new":
-          return keyboardActionDispatcher.dispatch({
-            id: "workspace.tab.new",
-            scope: "workspace",
-          });
-        case "worktree.archive":
-          return keyboardActionDispatcher.dispatch({
-            id: "worktree.archive",
-            scope: "sidebar",
-          });
-        case "worktree.new":
-          return keyboardActionDispatcher.dispatch({
-            id: "worktree.new",
-            scope: "sidebar",
-          });
-        case "workspace.terminal.new":
-          return keyboardActionDispatcher.dispatch({
-            id: "workspace.terminal.new",
-            scope: "workspace",
-          });
-        case "workspace.tab.close.current":
-          return keyboardActionDispatcher.dispatch({
-            id: "workspace.tab.close-current",
-            scope: "workspace",
-          });
-        case "workspace.tab.navigate.index":
-          if (!input.payload || typeof input.payload !== "object" || !("index" in input.payload)) {
-            return false;
-          }
-          return keyboardActionDispatcher.dispatch({
-            id: "workspace.tab.navigate-index",
-            scope: "workspace",
-            index: input.payload.index,
-          });
-        case "workspace.tab.navigate.relative":
-          if (!input.payload || typeof input.payload !== "object" || !("delta" in input.payload)) {
-            return false;
-          }
-          return keyboardActionDispatcher.dispatch({
-            id: "workspace.tab.navigate-relative",
-            scope: "workspace",
-            delta: input.payload.delta,
-          });
-        case "workspace.pane.split.right":
-        case "workspace.pane.split.down":
-        case "workspace.pane.focus.left":
-        case "workspace.pane.focus.right":
-        case "workspace.pane.focus.up":
-        case "workspace.pane.focus.down":
-        case "workspace.pane.move-tab.left":
-        case "workspace.pane.move-tab.right":
-        case "workspace.pane.move-tab.up":
-        case "workspace.pane.move-tab.down":
-        case "workspace.pane.close":
-          return keyboardActionDispatcher.dispatch({
-            id: input.action,
-            scope: "workspace",
-          });
-        case "workspace.navigate.index":
-          if (!input.payload || typeof input.payload !== "object" || !("index" in input.payload)) {
-            return false;
-          }
-          return navigateToWorkspaceShortcut(input.payload.index);
-        case "workspace.navigate.relative":
-          if (!input.payload || typeof input.payload !== "object" || !("delta" in input.payload)) {
-            return false;
-          }
-          return navigateRelativeWorkspace(input.payload.delta);
-        case "sidebar.toggle.left":
-          toggleAgentList();
-          return true;
-        case "sidebar.toggle.both":
-          if (toggleBothSidebars) {
-            toggleBothSidebars();
-          }
-          return true;
-        case "sidebar.toggle.right":
-          if (!toggleFileExplorer) {
-            return false;
-          }
-          if (
-            !canToggleFileExplorerShortcut({
-              selectedAgentId,
-              pathname,
-              toggleFileExplorer,
-            })
-          ) {
-            return false;
-          }
-          toggleFileExplorer();
-          return true;
-        case "view.toggle.focus":
-          if (toggleFocusMode) {
-            toggleFocusMode();
-          }
-          return true;
-        case "command-center.toggle": {
-          const store = useKeyboardShortcutsStore.getState();
-          if (!store.commandCenterOpen) {
-            const target =
-              input.event.target instanceof Element ? (input.event.target as Element) : null;
-            const targetEl =
-              target?.closest?.("textarea, input, [contenteditable='true']") ??
-              (target instanceof HTMLElement ? target : null);
-            const active = document.activeElement;
-            const activeEl = active instanceof HTMLElement ? active : null;
-            setCommandCenterFocusRestoreElement(
-              (targetEl as HTMLElement | null) ?? activeEl ?? null,
-            );
-          }
-          store.setCommandCenterOpen(!store.commandCenterOpen);
-          return true;
-        }
-        case "shortcuts.dialog.toggle": {
-          const store = useKeyboardShortcutsStore.getState();
-          store.setShortcutsDialogOpen(!store.shortcutsDialogOpen);
-          return true;
-        }
-        case "message-input.action":
-          if (!input.payload || typeof input.payload !== "object" || !("kind" in input.payload)) {
-            return false;
-          }
-          return dispatchMessageInputAction(input.payload.kind);
-        default:
-          return false;
+      const store = useKeyboardShortcutsStore.getState();
+      const shortcutAction = routeKeyboardShortcut(
+        { action: input.action, payload: input.payload },
+        {
+          pathname,
+          isMobile,
+          sidebarShortcutTargets: store.sidebarShortcutWorkspaceTargets,
+          navigationActiveWorkspace:
+            keyboardWorkspaceSelectionRef.current ?? activeWorkspaceSelection,
+          commandCenterOpen: store.commandCenterOpen,
+          shortcutsDialogOpen: store.shortcutsDialogOpen,
+        },
+      );
+      const handled = performShortcutAction(
+        shortcutAction,
+        input.domEvent,
+        input.browserFocusRestoreElement,
+      );
+      if (handled && isWorkspaceFocusModeEnabled && input.action.startsWith("sidebar.")) {
+        exitFocusMode();
+      }
+      return handled;
+    };
+
+    const resolveAndPerformShortcut = (input: {
+      event: KeyboardShortcutInput;
+      focusScope: KeyboardFocusScope;
+      domEvent: KeyboardEvent | null;
+      browserFocusRestoreElement?: HTMLElement | null;
+    }) => {
+      const store = useKeyboardShortcutsStore.getState();
+      const previousChordState = chordStateRef.current;
+      const result = resolveKeyboardShortcut({
+        event: input.event,
+        context: {
+          isMac,
+          isDesktop: isDesktopApp,
+          focusScope: input.focusScope,
+          commandCenterOpen: store.commandCenterOpen,
+        },
+        chordState: chordStateRef.current,
+        onChordReset: () => {
+          chordStateRef.current = {
+            candidateIndices: [],
+            step: 0,
+            timeoutId: null,
+          };
+          publishBrowserShortcutPolicy();
+        },
+        bindings,
+      });
+      chordStateRef.current = result.nextChordState;
+      if (
+        shouldPublishBrowserShortcutPolicy({
+          isBrowserInput: "browserId" in input.event,
+          previousChordState,
+          nextChordState: result.nextChordState,
+        })
+      ) {
+        publishBrowserShortcutPolicy(result.nextChordState);
+      }
+
+      if (result.preventDefault && input.domEvent) {
+        input.domEvent.preventDefault();
+        input.domEvent.stopPropagation();
+      }
+
+      if (!result.match) {
+        return;
+      }
+
+      const handled = routeAndPerformShortcut({
+        action: result.match.action,
+        payload: result.match.payload,
+        domEvent: input.domEvent,
+        browserFocusRestoreElement: input.browserFocusRestoreElement,
+      });
+      if (!handled || !input.domEvent) {
+        return;
+      }
+
+      if (result.match.preventDefault) {
+        input.domEvent.preventDefault();
+      }
+      if (result.match.stopPropagation) {
+        input.domEvent.stopPropagation();
       }
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!shouldHandle()) {
+        return;
+      }
+
+      if (dispatchTopWebOverlayKeyDown(event)) {
+        return;
+      }
+
+      // During IME composition, Enter confirms the candidate selection and must
+      // not route through global shortcuts like message send.
+      if (isImeComposingKeyboardEvent(event)) {
         return;
       }
 
@@ -300,11 +330,8 @@ export function useKeyboardShortcuts({
       }
 
       const key = event.key ?? "";
-      if (key === "Alt" && !event.shiftKey) {
-        useKeyboardShortcutsStore.getState().setAltDown(true);
-      }
-      if (isDesktopApp && (key === "Meta" || key === "Control") && !event.shiftKey) {
-        useKeyboardShortcutsStore.getState().setCmdOrCtrlDown(true);
+      if (key === badgeModifierKey && !event.shiftKey) {
+        setBadgeModifierDown(true);
       }
       if (key === "Shift") {
         const state = useKeyboardShortcutsStore.getState();
@@ -317,65 +344,17 @@ export function useKeyboardShortcuts({
         target: event.target,
         commandCenterOpen: store.commandCenterOpen,
       });
-      const result = resolveKeyboardShortcut({
+      resolveAndPerformShortcut({
         event,
-        context: {
-          isMac,
-          isDesktop: isDesktopApp,
-          focusScope,
-          commandCenterOpen: store.commandCenterOpen,
-          hasSelectedAgent: canToggleFileExplorerShortcut({
-            selectedAgentId,
-            pathname,
-            toggleFileExplorer,
-          }),
-        },
-        chordState: chordStateRef.current,
-        onChordReset: () => {
-          chordStateRef.current = {
-            candidateIndices: [],
-            step: 0,
-            timeoutId: null,
-          };
-        },
-        bindings,
+        focusScope,
+        domEvent: event,
       });
-
-      chordStateRef.current = result.nextChordState;
-
-      if (result.preventDefault) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-
-      if (!result.match) {
-        return;
-      }
-
-      const handled = handleAction({
-        action: result.match.action,
-        payload: result.match.payload,
-        event,
-      });
-      if (!handled) {
-        return;
-      }
-
-      if (result.match.preventDefault) {
-        event.preventDefault();
-      }
-      if (result.match.stopPropagation) {
-        event.stopPropagation();
-      }
     };
 
     const handleKeyUp = (event: KeyboardEvent) => {
       const key = event.key ?? "";
-      if (key === "Alt") {
-        useKeyboardShortcutsStore.getState().setAltDown(false);
-      }
-      if (isDesktopApp && (key === "Meta" || key === "Control")) {
-        useKeyboardShortcutsStore.getState().setCmdOrCtrlDown(false);
+      if (key === badgeModifierKey) {
+        setBadgeModifierDown(false);
       }
     };
 
@@ -387,6 +366,21 @@ export function useKeyboardShortcuts({
     window.addEventListener("keyup", handleKeyUp, true);
     window.addEventListener("blur", handleBlurOrHide);
     document.addEventListener("visibilitychange", handleBlurOrHide);
+
+    const browserShortcutSubscription = isElectronRuntime()
+      ? getDesktopHost()?.events?.on?.("browser-shortcut-input", (payload) => {
+          const input = parseBrowserShortcutInput(payload);
+          if (!input) {
+            return;
+          }
+          resolveAndPerformShortcut({
+            event: input,
+            focusScope: "browser",
+            domEvent: null,
+            browserFocusRestoreElement: getResidentBrowserWebview(input.browserId),
+          });
+        })
+      : null;
     return () => {
       if (chordStateRef.current.timeoutId !== null) {
         clearTimeout(chordStateRef.current.timeoutId);
@@ -400,17 +394,30 @@ export function useKeyboardShortcuts({
       window.removeEventListener("keyup", handleKeyUp, true);
       window.removeEventListener("blur", handleBlurOrHide);
       document.removeEventListener("visibilitychange", handleBlurOrHide);
+      if (typeof browserShortcutSubscription === "function") {
+        browserShortcutSubscription();
+      } else {
+        void browserShortcutSubscription?.then((dispose) => dispose());
+      }
     };
   }, [
     bindings,
+    cycleTheme,
     enabled,
+    exitFocusMode,
+    activeWorkspaceSelection,
+    isDesktopApp,
+    isMac,
     isMobile,
+    isWorkspaceFocusModeEnabled,
+    keyboardActionDispatcher,
     openProjectPickerAction,
     pathname,
+    publishBrowserShortcutPolicy,
     resetModifiers,
-    selectedAgentId,
+    router,
+    shortcutsAvailable,
     toggleAgentList,
-    toggleFileExplorer,
-    toggleFocusMode,
+    toggleBothSidebars,
   ]);
 }

@@ -1,16 +1,17 @@
-import { Platform } from "react-native";
-import { isDesktop } from "@/desktop/host";
+import { isElectronRuntime } from "@/desktop/host";
 import type { AttachmentStore } from "@/attachments/types";
+import { isWeb } from "@/constants/platform";
 
 let attachmentStorePromise: Promise<AttachmentStore> | null = null;
 
 async function createAttachmentStore(): Promise<AttachmentStore> {
-  if (Platform.OS === "web") {
-    if (isDesktop()) {
-      const { createDesktopAttachmentStore } = await import(
-        "../desktop/attachments/desktop-attachment-store"
-      );
-      return createDesktopAttachmentStore();
+  if (isWeb) {
+    if (isElectronRuntime()) {
+      const { createDesktopAttachmentStore } =
+        await import("../desktop/attachments/desktop-attachment-store");
+      const { createDesktopAttachmentBridge } =
+        await import("../desktop/attachments/desktop-attachment-bridge");
+      return createDesktopAttachmentStore(createDesktopAttachmentBridge());
     }
 
     const { createIndexedDbAttachmentStore } = await import("./web/indexeddb-attachment-store");

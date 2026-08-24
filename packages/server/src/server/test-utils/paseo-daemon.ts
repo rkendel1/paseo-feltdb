@@ -11,15 +11,27 @@ import {
 } from "../bootstrap.js";
 import type { AgentClient, AgentProvider } from "../agent/agent-sdk-types.js";
 import { createTestAgentClients } from "./fake-agent-client.js";
+import type { PushNotificationSender } from "../push/index.js";
+import type { AgentProfile } from "@getpaseo/protocol/messages";
 
-type TestPaseoDaemonOptions = {
+interface TestPaseoDaemonOptions {
+  daemonVersion?: string;
+  desktopManaged?: boolean;
   downloadTokenTtlMs?: number;
   corsAllowedOrigins?: string[];
   listen?: string;
   logger?: Parameters<typeof createPaseoDaemon>[1];
+  mcpEnabled?: boolean;
+  mcpDebug?: boolean;
+  isDev?: boolean;
   relayEnabled?: boolean;
   relayEndpoint?: string;
+  relayUseTls?: boolean;
+  relayPublicUseTls?: boolean;
+  daemonStatusRpcCapability?: boolean;
+  relayConfigCapability?: boolean;
   agentClients?: Partial<Record<AgentProvider, AgentClient>>;
+  providerOverrides?: PaseoDaemonConfig["providerOverrides"];
   paseoHomeRoot?: string;
   staticDir?: string;
   cleanup?: boolean;
@@ -29,16 +41,25 @@ type TestPaseoDaemonOptions = {
   voiceLlmProviderExplicit?: boolean;
   voiceLlmModel?: string | null;
   dictationFinalTimeoutMs?: number;
-};
+  auth?: PaseoDaemonConfig["auth"];
+  pushNotificationSender?: PushNotificationSender;
+  serviceProxy?: PaseoDaemonConfig["serviceProxy"];
+  webUi?: PaseoDaemonConfig["webUi"];
+  trustedProxies?: PaseoDaemonConfig["trustedProxies"];
+  agentProfiles?: AgentProfile[];
+  autoArchiveAfterMerge?: boolean;
+  pluginsEnabled?: PaseoDaemonConfig["pluginsEnabled"];
+  plugins?: PaseoDaemonConfig["plugins"];
+}
 
-export type TestPaseoDaemon = {
+export interface TestPaseoDaemon {
   config: PaseoDaemonConfig;
   daemon: Awaited<ReturnType<typeof createPaseoDaemon>>;
   port: number;
   paseoHome: string;
   staticDir: string;
   close: () => Promise<void>;
-};
+}
 
 const TEST_DAEMON_START_TIMEOUT_MS = 20_000;
 
@@ -59,6 +80,7 @@ async function startDaemonWithTimeout(
       () => {
         clearTimeout(timeoutHandle);
         resolve();
+        return;
       },
       (error) => {
         clearTimeout(timeoutHandle);
@@ -75,36 +97,14 @@ export async function createTestPaseoDaemon(
   let lastError: unknown;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const paseoHomeRoot =
-      options.paseoHomeRoot ?? (await mkdtemp(path.join(os.tmpdir(), "paseo-home-")));
-    const paseoHome = path.join(paseoHomeRoot, ".paseo");
-    await mkdir(paseoHome, { recursive: true });
-    const staticDir = options.staticDir ?? (await mkdtemp(path.join(os.tmpdir(), "paseo-static-")));
-    const listenHost = options.listen ?? "127.0.0.1";
-    const config: PaseoDaemonConfig = {
-      listen: `${listenHost}:0`,
-      paseoHome,
-      corsAllowedOrigins: options.corsAllowedOrigins ?? [],
-      allowedHosts: true,
-      mcpEnabled: true,
-      staticDir,
-      mcpDebug: false,
-      agentClients: options.agentClients ?? createTestAgentClients(),
-      agentStoragePath: path.join(paseoHome, "agents"),
-      relayEnabled: options.relayEnabled ?? false,
-      relayEndpoint: options.relayEndpoint ?? "relay.paseo.sh:443",
-      appBaseUrl: "https://app.paseo.sh",
-      openai: options.openai,
-      speech: options.speech,
-      voiceLlmProvider: options.voiceLlmProvider ?? null,
-      voiceLlmProviderExplicit: options.voiceLlmProviderExplicit ?? false,
-      voiceLlmModel: options.voiceLlmModel ?? null,
-      dictationFinalTimeoutMs: options.dictationFinalTimeoutMs,
-      downloadTokenTtlMs: options.downloadTokenTtlMs,
-    };
-
+    const { config, paseoHomeRoot, paseoHome, staticDir } = await prepareTestDaemonConfig(options);
     const logger = options.logger ?? pino({ level: "silent" });
-    const daemon = await createPaseoDaemon(config, logger);
+    const daemon = await createPaseoDaemon(config, logger, {
+      serverFeatureOverrides: {
+        daemonStatusRpc: options.daemonStatusRpcCapability,
+        relayConfig: options.relayConfigCapability,
+      },
+    });
     try {
       await startDaemonWithTimeout(daemon, TEST_DAEMON_START_TIMEOUT_MS);
       const listenTarget = daemon.getListenTarget();
@@ -117,8 +117,10 @@ export async function createTestPaseoDaemon(
         await daemon.agentManager.flush().catch(() => undefined);
         if (options.cleanup ?? true) {
           await new Promise((r) => setTimeout(r, 50));
-          await rm(paseoHomeRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-          await rm(staticDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+          await Promise.all([
+            rm(paseoHomeRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
+            rm(staticDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
+          ]);
         }
       };
 
@@ -133,8 +135,10 @@ export async function createTestPaseoDaemon(
     } catch (error) {
       lastError = error;
       await daemon.stop().catch(() => undefined);
-      await rm(paseoHomeRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-      await rm(staticDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      await Promise.all([
+        rm(paseoHomeRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
+        rm(staticDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
+      ]);
 
       if (
         (!isAddressInUseError(error) && !isStartupTimeoutError(error)) ||
@@ -146,6 +150,61 @@ export async function createTestPaseoDaemon(
   }
 
   throw lastError ?? new Error("Failed to start test daemon");
+}
+
+interface PreparedTestDaemonConfig {
+  config: PaseoDaemonConfig;
+  paseoHomeRoot: string;
+  paseoHome: string;
+  staticDir: string;
+}
+
+async function prepareTestDaemonConfig(
+  options: TestPaseoDaemonOptions,
+): Promise<PreparedTestDaemonConfig> {
+  const paseoHomeRoot =
+    options.paseoHomeRoot ?? (await mkdtemp(path.join(os.tmpdir(), "paseo-home-")));
+  const paseoHome = path.join(paseoHomeRoot, ".paseo");
+  await mkdir(paseoHome, { recursive: true });
+  const staticDir = options.staticDir ?? (await mkdtemp(path.join(os.tmpdir(), "paseo-static-")));
+  const listenHost = options.listen ?? "127.0.0.1";
+  const config: PaseoDaemonConfig = {
+    listen: `${listenHost}:0`,
+    paseoHome,
+    daemonVersion: options.daemonVersion,
+    desktopManaged: options.desktopManaged,
+    corsAllowedOrigins: options.corsAllowedOrigins ?? [],
+    hostnames: true,
+    mcpEnabled: options.mcpEnabled ?? true,
+    staticDir,
+    mcpDebug: options.mcpDebug ?? false,
+    isDev: options.isDev,
+    agentClients: options.agentClients ?? createTestAgentClients(),
+    providerOverrides: options.providerOverrides,
+    agentStoragePath: path.join(paseoHome, "agents"),
+    relayEnabled: options.relayEnabled ?? false,
+    relayEndpoint: options.relayEndpoint ?? "relay.paseo.sh:443",
+    relayUseTls: options.relayUseTls,
+    relayPublicUseTls: options.relayPublicUseTls,
+    appBaseUrl: "https://app.paseo.sh",
+    auth: options.auth,
+    pushNotificationSender: options.pushNotificationSender,
+    serviceProxy: options.serviceProxy,
+    webUi: options.webUi,
+    trustedProxies: options.trustedProxies,
+    openai: options.openai,
+    speech: options.speech,
+    voiceLlmProvider: options.voiceLlmProvider ?? null,
+    voiceLlmProviderExplicit: options.voiceLlmProviderExplicit ?? false,
+    voiceLlmModel: options.voiceLlmModel ?? null,
+    dictationFinalTimeoutMs: options.dictationFinalTimeoutMs,
+    downloadTokenTtlMs: options.downloadTokenTtlMs,
+    agentProfiles: options.agentProfiles,
+    autoArchiveAfterMerge: options.autoArchiveAfterMerge,
+    pluginsEnabled: options.pluginsEnabled,
+    plugins: options.plugins,
+  };
+  return { config, paseoHomeRoot, paseoHome, staticDir };
 }
 
 function isAddressInUseError(error: unknown): boolean {

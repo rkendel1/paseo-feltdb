@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import type pino from "pino";
-import OpenAI from "openai";
+import { OpenAI } from "openai";
 import { writeFile, unlink } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -17,6 +17,7 @@ export type { LogprobToken, TranscriptionResult };
 
 export interface STTConfig {
   apiKey: string;
+  baseUrl?: string;
   model?: "whisper-1" | "gpt-4o-transcribe" | "gpt-4o-mini-transcribe" | (string & {});
   confidenceThreshold?: number; // Default: -3.0
 }
@@ -56,6 +57,7 @@ export class OpenAISTT implements SpeechToTextProvider {
     this.logger = parentLogger.child({ module: "agent", provider: "openai", component: "stt" });
     this.openaiClient = new OpenAI({
       apiKey: sttConfig.apiKey,
+      ...(sttConfig.baseUrl ? { baseURL: sttConfig.baseUrl } : {}),
     });
     this.logger.info({ model: sttConfig.model || "whisper-1" }, "STT (OpenAI Whisper) initialized");
   }
@@ -109,25 +111,25 @@ export class OpenAISTT implements SpeechToTextProvider {
       },
       appendPcm16(chunk: Buffer) {
         if (!connected) {
-          (emitter as any).emit("error", new Error("STT session not connected"));
+          emitter.emit("error", new Error("STT session not connected"));
           return;
         }
         pcm16 = pcm16.length === 0 ? chunk : Buffer.concat([pcm16, chunk]);
       },
       commit() {
         if (!connected) {
-          (emitter as any).emit("error", new Error("STT session not connected"));
+          emitter.emit("error", new Error("STT session not connected"));
           return;
         }
 
         const committedId = segmentId;
         const prev = previousSegmentId;
-        (emitter as any).emit("committed", { segmentId: committedId, previousSegmentId: prev });
+        emitter.emit("committed", { segmentId: committedId, previousSegmentId: prev });
 
         void (async () => {
           try {
             if (pcm16.length === 0) {
-              (emitter as any).emit("transcript", {
+              emitter.emit("transcript", {
                 segmentId: committedId,
                 transcript: "",
                 isFinal: true,
@@ -138,9 +140,15 @@ export class OpenAISTT implements SpeechToTextProvider {
             }
 
             const wav = convertPCMToWavBuffer(pcm16);
-            const result = await transcribeAudio(wav, "audio/wav", params.language ?? "en", logger);
+            const result = await transcribeAudio(
+              wav,
+              "audio/wav",
+              params.language ?? "en",
+              logger,
+              params.prompt,
+            );
 
-            (emitter as any).emit("transcript", {
+            emitter.emit("transcript", {
               segmentId: committedId,
               transcript: result.text,
               isFinal: true,
@@ -150,7 +158,7 @@ export class OpenAISTT implements SpeechToTextProvider {
               isLowConfidence: result.isLowConfidence,
             });
           } catch (err) {
-            (emitter as any).emit("error", err);
+            emitter.emit("error", err);
           } finally {
             previousSegmentId = committedId;
             segmentId = v4();
@@ -166,8 +174,8 @@ export class OpenAISTT implements SpeechToTextProvider {
         connected = false;
         pcm16 = Buffer.alloc(0);
       },
-      on(event: any, handler: any) {
-        emitter.on(event, handler);
+      on(event: string, handler: (...args: never[]) => void) {
+        emitter.on(event, handler as (...args: unknown[]) => void);
         return undefined;
       },
     };
@@ -178,6 +186,7 @@ export class OpenAISTT implements SpeechToTextProvider {
     format: string,
     language: string,
     logger: pino.Logger,
+    prompt?: string,
   ): Promise<TranscriptionResult> {
     const startTime = Date.now();
     let tempFilePath: string | null = null;
@@ -198,6 +207,7 @@ export class OpenAISTT implements SpeechToTextProvider {
         file: await import("fs").then((fs) => fs.createReadStream(tempFilePath!)),
         language,
         model: modelToUse,
+        ...(prompt ? { prompt } : {}),
         ...(supportsLogprobs ? { include: includeLogprobs } : {}),
         response_format: "json",
       });
@@ -243,14 +253,15 @@ export class OpenAISTT implements SpeechToTextProvider {
             ? response.language
             : undefined,
       };
-    } catch (error: any) {
+    } catch (error) {
       logger.error({ err: error }, "Transcription error");
-      throw new Error(`STT transcription failed: ${error.message}`);
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`STT transcription failed: ${message}`, { cause: error });
     } finally {
       if (tempFilePath) {
         try {
           await unlink(tempFilePath);
-        } catch (cleanupError) {
+        } catch {
           logger.warn({ tempFilePath }, "Failed to clean up temp file");
         }
       }

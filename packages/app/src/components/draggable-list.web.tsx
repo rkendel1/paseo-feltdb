@@ -1,26 +1,24 @@
-import { useCallback, useRef, useState, type ReactElement } from "react";
+import { memo, useCallback, useMemo, useRef, type ReactElement } from "react";
 import { ScrollView, View } from "react-native";
 import {
   DndContext,
   closestCenter,
   KeyboardSensor,
-  PointerSensor,
+  MouseSensor,
+  TouchSensor,
   type Modifier,
   useSensor,
   useSensors,
-  type DragEndEvent,
-  type DragStartEvent,
 } from "@dnd-kit/core";
 import {
   SortableContext,
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
   useSortable,
-  arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { DraggableListProps, DraggableRenderItemInfo } from "./draggable-list.types";
-import { WebDesktopScrollbarOverlay, useWebDesktopScrollbarMetrics } from "./web-desktop-scrollbar";
+import { getDragActivationConstraints, useDragReorderState } from "./drag-reorder";
 
 export type { DraggableListProps, DraggableRenderItemInfo };
 
@@ -28,6 +26,68 @@ const restrictToVerticalAxis: Modifier = ({ transform }) => ({
   ...transform,
   x: 0,
 });
+
+const DND_MODIFIERS = [restrictToVerticalAxis];
+const DRAG_ACTIVATION_CONFIG = {
+  movementDistance: 6,
+  touchHoldDelayMs: 180,
+  touchHoldTolerance: 8,
+};
+
+function areRecordsEqual(
+  left: Record<string, unknown> | undefined,
+  right: Record<string, unknown> | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => Object.is(left[key], right[key]));
+}
+
+function useShallowStableRecord(
+  value: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const stableRef = useRef(value);
+  if (!areRecordsEqual(stableRef.current, value)) {
+    stableRef.current = value;
+  }
+  return stableRef.current;
+}
+
+function useStableListenerRecord(
+  listeners: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const latestListenersRef = useRef(listeners);
+  latestListenersRef.current = listeners;
+  const listenerKeys = Object.keys(listeners ?? {}).sort();
+  const listenerKeySignature = listenerKeys.join("\u0000");
+  const stableListenersRef = useRef<{
+    keySignature: string;
+    listeners: Record<string, unknown> | undefined;
+  }>(undefined);
+  if (stableListenersRef.current?.keySignature !== listenerKeySignature) {
+    stableListenersRef.current = {
+      keySignature: listenerKeySignature,
+      listeners:
+        listenerKeys.length === 0
+          ? undefined
+          : Object.fromEntries(
+              listenerKeys.map((key) => [
+                key,
+                (...args: unknown[]) => {
+                  const listener = latestListenersRef.current?.[key];
+                  if (typeof listener === "function") {
+                    return Reflect.apply(listener, undefined, args);
+                  }
+                },
+              ]),
+            ),
+    };
+  }
+  return stableListenersRef.current.listeners;
+}
 
 interface SortableItemProps<T> {
   id: string;
@@ -38,7 +98,7 @@ interface SortableItemProps<T> {
   useDragHandle: boolean;
 }
 
-function SortableItem<T>({
+function SortableItemInner<T>({
   id,
   item,
   index,
@@ -78,25 +138,37 @@ function SortableItem<T>({
   const scaleTransform = isDragging ? "scale(1.02)" : "";
   const combinedTransform = [baseTransform, scaleTransform].filter(Boolean).join(" ");
 
-  const style = {
-    transform: combinedTransform || undefined,
-    transition,
-    opacity: isDragging ? 0.9 : 1,
-    zIndex: isDragging ? 1000 : 1,
-  };
+  const style = useMemo(
+    () => ({
+      transform: combinedTransform || undefined,
+      transition,
+      opacity: isDragging ? 0.9 : 1,
+      zIndex: isDragging ? 1000 : 1,
+    }),
+    [combinedTransform, transition, isDragging],
+  );
+  const stableAttributes = useShallowStableRecord(attributes as unknown as Record<string, unknown>);
+  const stableListeners = useStableListenerRecord(
+    listeners as unknown as Record<string, unknown> | undefined,
+  );
+  const dragHandleProps = useMemo(
+    () =>
+      useDragHandle
+        ? {
+            attributes: stableAttributes,
+            listeners: stableListeners,
+            setActivatorNodeRef: setActivatorNodeRef as unknown as (node: unknown) => void,
+          }
+        : undefined,
+    [setActivatorNodeRef, stableAttributes, stableListeners, useDragHandle],
+  );
 
   const info: DraggableRenderItemInfo<T> = {
     item,
     index,
     drag,
     isActive: activeId === id,
-    dragHandleProps: useDragHandle
-      ? {
-          attributes: attributes as unknown as Record<string, unknown>,
-          listeners: listeners as unknown as Record<string, unknown>,
-          setActivatorNodeRef: setActivatorNodeRef as unknown as (node: unknown) => void,
-        }
-      : undefined,
+    dragHandleProps,
   };
 
   const wrapperProps = useDragHandle
@@ -109,6 +181,8 @@ function SortableItem<T>({
     </div>
   );
 }
+
+const SortableItem = memo(SortableItemInner) as typeof SortableItemInner;
 
 export function DraggableList<T>({
   data,
@@ -123,91 +197,64 @@ export function DraggableList<T>({
   ListHeaderComponent,
   ListEmptyComponent,
   showsVerticalScrollIndicator = true,
-  enableDesktopWebScrollbar = false,
   scrollEnabled = true,
+  extraData: _extraData,
   useDragHandle = false,
   // simultaneousGestureRef is native-only, ignored on web
   onDragBegin,
   nestable: _nestable = false,
 }: DraggableListProps<T>) {
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [dragItems, setDragItems] = useState<T[] | null>(null);
-  const items = dragItems ?? data;
-  const scrollViewRef = useRef<ScrollView>(null);
-  const scrollbarMetrics = useWebDesktopScrollbarMetrics();
+  const { activeId, items, handlers } = useDragReorderState({
+    data,
+    keyExtractor,
+    onDragEnd,
+    onDragBegin,
+  });
+  const activationConstraints = getDragActivationConstraints(useDragHandle, DRAG_ACTIVATION_CONFIG);
 
   const sensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: {
-        distance: 8,
-      },
+    useSensor(MouseSensor, {
+      activationConstraint: activationConstraints.mouse,
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: activationConstraints.touch,
     }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
     }),
   );
 
-  const handleDragStart = useCallback(
-    (event: DragStartEvent) => {
-      setDragItems(data);
-      setActiveId(String(event.active.id));
-      onDragBegin?.();
-    },
-    [data, onDragBegin],
+  const ids = useMemo(
+    () => items.map((item, index) => keyExtractor(item, index)),
+    [items, keyExtractor],
   );
-
-  const handleDragEnd = useCallback(
-    (event: DragEndEvent) => {
-      const { active, over } = event;
-
-      setActiveId(null);
-      setDragItems(null);
-
-      if (over && active.id !== over.id) {
-        const oldIndex = items.findIndex((item, i) => keyExtractor(item, i) === active.id);
-        const newIndex = items.findIndex((item, i) => keyExtractor(item, i) === over.id);
-
-        if (oldIndex >= 0 && newIndex >= 0 && oldIndex !== newIndex) {
-          const newItems = arrayMove(items, oldIndex, newIndex);
-          onDragEnd(newItems);
-        }
-      }
-    },
-    [items, keyExtractor, onDragEnd],
+  const wrapperStyle = useMemo(
+    () => [
+      { position: "relative" as const },
+      scrollEnabled ? { flex: 1, minHeight: 0 } : null,
+      containerStyle,
+    ],
+    [scrollEnabled, containerStyle],
   );
-
-  const ids = items.map((item, index) => keyExtractor(item, index));
-  const showCustomScrollbar = enableDesktopWebScrollbar && scrollEnabled;
-  const wrapperStyle = [
-    { position: "relative" as const },
-    scrollEnabled ? { flex: 1, minHeight: 0 } : null,
-    containerStyle,
-  ];
 
   return (
     <View style={wrapperStyle}>
       {scrollEnabled ? (
         <ScrollView
-          ref={scrollViewRef}
           testID={testID}
           style={style}
           contentContainerStyle={contentContainerStyle}
-          showsVerticalScrollIndicator={showCustomScrollbar ? false : showsVerticalScrollIndicator}
-          onLayout={showCustomScrollbar ? scrollbarMetrics.onLayout : undefined}
-          onContentSizeChange={
-            showCustomScrollbar ? scrollbarMetrics.onContentSizeChange : undefined
-          }
-          onScroll={showCustomScrollbar ? scrollbarMetrics.onScroll : undefined}
-          scrollEventThrottle={showCustomScrollbar ? 16 : undefined}
+          showsVerticalScrollIndicator={showsVerticalScrollIndicator}
         >
           {ListHeaderComponent}
           {items.length === 0 && ListEmptyComponent}
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
-            modifiers={[restrictToVerticalAxis]}
-            onDragStart={handleDragStart}
-            onDragEnd={handleDragEnd}
+            modifiers={DND_MODIFIERS}
+            onDragStart={handlers.onDragStart}
+            onDragCancel={handlers.onDragCancel}
+            onDragEnd={handlers.onDragEnd}
           >
             <SortableContext items={ids} strategy={verticalListSortingStrategy}>
               {items.map((item, index) => {
@@ -235,9 +282,10 @@ export function DraggableList<T>({
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
-            modifiers={[restrictToVerticalAxis]}
-            onDragStart={handleDragStart}
-            onDragEnd={handleDragEnd}
+            modifiers={DND_MODIFIERS}
+            onDragStart={handlers.onDragStart}
+            onDragCancel={handlers.onDragCancel}
+            onDragEnd={handlers.onDragEnd}
           >
             <SortableContext items={ids} strategy={verticalListSortingStrategy}>
               {items.map((item, index) => {
@@ -259,13 +307,6 @@ export function DraggableList<T>({
           {ListFooterComponent}
         </>
       )}
-      <WebDesktopScrollbarOverlay
-        enabled={showCustomScrollbar}
-        metrics={scrollbarMetrics}
-        onScrollToOffset={(nextOffset) => {
-          scrollViewRef.current?.scrollTo({ y: nextOffset, animated: false });
-        }}
-      />
     </View>
   );
 }

@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { connectToDaemon, getDaemonHost, resolveAgentId } from "../../utils/client.js";
 import type {
   CommandOptions,
@@ -26,7 +27,7 @@ export const archiveSchema: OutputSchema<AgentArchiveResult> = {
 
 export function addArchiveOptions(cmd: Command): Command {
   return cmd
-    .description('Archive an agent (soft-delete)')
+    .description("Archive an agent (soft-delete)")
     .argument("<id>", "Agent ID, prefix, or name")
     .option("--force", "Force archive running agent (interrupts active run first)");
 }
@@ -43,7 +44,7 @@ export async function runArchiveCommand(
   options: AgentArchiveOptions,
   _command: Command,
 ): Promise<AgentArchiveCommandResult> {
-  const host = getDaemonHost({ host: options.host as string | undefined });
+  const host = getDaemonHost({ host: options.host });
 
   // Validate arguments
   if (!agentIdArg || agentIdArg.trim().length === 0) {
@@ -55,9 +56,9 @@ export async function runArchiveCommand(
     throw error;
   }
 
-  let client;
+  let client: DaemonClient;
   try {
-    client = await connectToDaemon({ host: options.host as string | undefined });
+    client = await connectToDaemon({ host: options.host });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const error: CommandError = {

@@ -1,40 +1,57 @@
-import { useCallback, useRef, useState } from "react";
-import { View } from "react-native";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { View, type PointerEvent as RNPointerEvent } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { startResizeHandleDrag, type ResizeHandleDrag } from "@/components/resize-handle-drag";
 
 export interface ResizeHandleProps {
+  testID?: string;
   direction: "horizontal" | "vertical";
   groupId: string;
   index: number;
   sizes: number[];
+  onPreviewResizeSplit: (groupId: string, sizes: number[]) => void;
   onResizeSplit: (groupId: string, sizes: number[]) => void;
 }
 
 interface PointerState {
   containerSize: number;
   pointerStart: number;
-  leftSize: number;
-  rightSize: number;
+  drag: ResizeHandleDrag;
+}
+
+function resetWindowHorizontalScroll() {
+  // Clamp any browser scroll introduced while dragging past the viewport edge.
+  if (window.scrollX === 0) {
+    return;
+  }
+  window.scrollTo(0, window.scrollY);
 }
 
 export function ResizeHandle({
+  testID,
   direction,
   groupId,
   index,
   sizes,
+  onPreviewResizeSplit,
   onResizeSplit,
 }: ResizeHandleProps) {
   const { theme } = useUnistyles();
-  const pointerStateRef = useRef<PointerState | null>(null);
+  const pointerStatesRef = useRef(new Map<number, PointerState>());
+  const cursorBeforeDragRef = useRef<string | null>(null);
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [active, setActive] = useState(false);
   const [dragging, setDragging] = useState(false);
   const highlighted = active || dragging;
 
   const handlePointerDown = useCallback(
-    (event: any) => {
-      const hitAreaElement = event.currentTarget as HTMLElement | null;
-      const containerElement = hitAreaElement?.parentElement?.parentElement ?? null;
+    (event: RNPointerEvent) => {
+      const hitAreaElement = event.currentTarget as unknown as HTMLElement | null;
+      if (!hitAreaElement) {
+        return;
+      }
+
+      const containerElement = hitAreaElement.parentElement?.parentElement ?? null;
       if (!containerElement) {
         return;
       }
@@ -45,95 +62,145 @@ export function ResizeHandle({
         return;
       }
 
+      const pointerId = event.nativeEvent.pointerId;
+      if (pointerStatesRef.current.has(pointerId)) {
+        return;
+      }
+
       setDragging(true);
 
-      pointerStateRef.current = {
+      pointerStatesRef.current.set(pointerId, {
         containerSize,
-        pointerStart: direction === "horizontal" ? event.clientX : event.clientY,
-        leftSize: sizes[index] ?? 0,
-        rightSize: sizes[index + 1] ?? 0,
-      };
+        pointerStart:
+          direction === "horizontal" ? event.nativeEvent.clientX : event.nativeEvent.clientY,
+        drag: startResizeHandleDrag({
+          sizes,
+          index,
+          preview: (nextSizes) => onPreviewResizeSplit(groupId, nextSizes),
+          commit: (nextSizes) => onResizeSplit(groupId, nextSizes),
+        }),
+      });
 
-      const previousCursor = document.body.style.cursor;
+      if (pointerStatesRef.current.size === 1) {
+        cursorBeforeDragRef.current = document.body.style.cursor;
+      }
       const nextCursor = direction === "horizontal" ? "col-resize" : "row-resize";
       document.body.style.cursor = nextCursor;
       event.preventDefault();
+      event.stopPropagation();
+      const pointerCaptureElement = hitAreaElement;
+      pointerCaptureElement.setPointerCapture?.(pointerId);
+      resetWindowHorizontalScroll();
 
       function cleanup() {
-        pointerStateRef.current = null;
-        setDragging(false);
-        document.body.style.cursor = previousCursor;
+        pointerStatesRef.current.delete(pointerId);
+        setDragging(pointerStatesRef.current.size > 0);
+        if (pointerStatesRef.current.size === 0) {
+          document.body.style.cursor = cursorBeforeDragRef.current ?? "";
+          cursorBeforeDragRef.current = null;
+        }
+        if (pointerCaptureElement.hasPointerCapture?.(pointerId)) {
+          pointerCaptureElement.releasePointerCapture(pointerId);
+        }
+        resetWindowHorizontalScroll();
         window.removeEventListener("pointermove", handlePointerMove);
         window.removeEventListener("pointerup", handlePointerUp);
+        window.removeEventListener("pointercancel", handlePointerUp);
       }
 
       function handlePointerMove(moveEvent: PointerEvent) {
-        const pointerState = pointerStateRef.current;
+        if (moveEvent.pointerId !== pointerId) {
+          return;
+        }
+
+        const pointerState = pointerStatesRef.current.get(pointerId);
         if (!pointerState) {
           return;
         }
 
+        moveEvent.preventDefault();
+        resetWindowHorizontalScroll();
         const pointerCurrent = direction === "horizontal" ? moveEvent.clientX : moveEvent.clientY;
         const deltaRatio =
           (pointerCurrent - pointerState.pointerStart) / pointerState.containerSize;
 
-        const nextSizes = sizes.slice();
-        nextSizes[index] = pointerState.leftSize + deltaRatio;
-        nextSizes[index + 1] = pointerState.rightSize - deltaRatio;
-        onResizeSplit(groupId, nextSizes);
+        pointerState.drag.move(deltaRatio);
       }
 
-      function handlePointerUp() {
+      function handlePointerUp(upEvent: PointerEvent) {
+        if (upEvent.pointerId !== pointerId) {
+          return;
+        }
+
+        pointerStatesRef.current.get(pointerId)?.drag.finish();
         cleanup();
       }
 
       window.addEventListener("pointermove", handlePointerMove);
-      window.addEventListener("pointerup", handlePointerUp, { once: true });
+      window.addEventListener("pointerup", handlePointerUp);
+      window.addEventListener("pointercancel", handlePointerUp);
     },
-    [direction, groupId, index, onResizeSplit, sizes],
+    [direction, groupId, index, onPreviewResizeSplit, onResizeSplit, sizes],
+  );
+
+  const handlePointerEnter = useCallback(() => {
+    hoverTimerRef.current = setTimeout(() => {
+      setActive(true);
+    }, 150);
+  }, []);
+
+  const handlePointerLeave = useCallback(() => {
+    if (hoverTimerRef.current) {
+      clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+    setActive(false);
+  }, []);
+
+  const handleStyle = useMemo(
+    () => [
+      styles.handle,
+      direction === "horizontal" ? styles.handleHorizontal : styles.handleVertical,
+      { backgroundColor: theme.colors.border },
+    ],
+    [direction, theme.colors.border],
+  );
+  const highlightStyle = useMemo(
+    () => [
+      styles.highlight,
+      direction === "horizontal" ? styles.highlightHorizontal : styles.highlightVertical,
+      { backgroundColor: theme.colors.accent },
+    ],
+    [direction, theme.colors.accent],
+  );
+  const hitAreaStyle = useMemo(
+    () => [
+      styles.hitArea,
+      direction === "horizontal" ? styles.hitAreaHorizontal : styles.hitAreaVertical,
+      {
+        cursor: direction === "horizontal" ? "col-resize" : "row-resize",
+        touchAction: "none",
+      } as object,
+    ],
+    [direction],
   );
 
   return (
-    <View
-      style={[
-        styles.handle,
-        direction === "horizontal" ? styles.handleHorizontal : styles.handleVertical,
-        { backgroundColor: theme.colors.border },
-      ]}
-    >
+    <View style={handleStyle} testID={testID}>
       {highlighted && (
         <View
           pointerEvents="none"
-          style={[
-            styles.highlight,
-            direction === "horizontal" ? styles.highlightHorizontal : styles.highlightVertical,
-            { backgroundColor: theme.colors.accent },
-          ]}
+          style={highlightStyle}
+          testID={testID ? `${testID}-highlight` : undefined}
         />
       )}
       <View
         role="separator"
         aria-orientation={direction === "horizontal" ? "vertical" : "horizontal"}
-        style={[
-          styles.hitArea,
-          direction === "horizontal" ? styles.hitAreaHorizontal : styles.hitAreaVertical,
-          {
-            cursor: direction === "horizontal" ? "col-resize" : "row-resize",
-          } as any,
-        ]}
+        style={hitAreaStyle}
         onPointerDown={handlePointerDown}
-        onPointerEnter={() => {
-          hoverTimerRef.current = setTimeout(() => {
-            setActive(true);
-          }, 150);
-        }}
-        onPointerLeave={() => {
-          if (hoverTimerRef.current) {
-            clearTimeout(hoverTimerRef.current);
-            hoverTimerRef.current = null;
-          }
-          setActive(false);
-        }}
+        onPointerEnter={handlePointerEnter}
+        onPointerLeave={handlePointerLeave}
       />
     </View>
   );

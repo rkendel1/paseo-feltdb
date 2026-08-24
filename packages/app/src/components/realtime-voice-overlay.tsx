@@ -1,4 +1,7 @@
-import { ActivityIndicator, Pressable, View } from "react-native";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
+import { Pressable, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { Mic, MicOff, Square } from "lucide-react-native";
 import { FOOTER_HEIGHT } from "@/constants/layout";
@@ -22,7 +25,21 @@ export function RealtimeVoiceOverlay({
   onStop,
 }: RealtimeVoiceOverlayProps) {
   const { theme } = useUnistyles();
+  const { t } = useTranslation();
   const { volume, isSpeaking } = useVoiceTelemetry();
+  const muteButtonStyle = useMemo(
+    () => [
+      styles.actionButton,
+      styles.muteButton,
+      isMuted ? styles.muteButtonMuted : undefined,
+      isSwitching ? styles.buttonDisabled : undefined,
+    ],
+    [isMuted, isSwitching],
+  );
+  const stopButtonStyle = useMemo(
+    () => [styles.actionButton, styles.stopButton, isSwitching ? styles.buttonDisabled : undefined],
+    [isSwitching],
+  );
   return (
     <View style={styles.container}>
       <View style={styles.meterContainer}>
@@ -39,13 +56,10 @@ export function RealtimeVoiceOverlay({
           onPress={onToggleMute}
           disabled={isSwitching}
           accessibilityRole="button"
-          accessibilityLabel={isMuted ? "Unmute realtime voice" : "Mute realtime voice"}
-          style={[
-            styles.actionButton,
-            styles.muteButton,
-            isMuted ? styles.muteButtonMuted : undefined,
-            isSwitching ? styles.buttonDisabled : undefined,
-          ]}
+          accessibilityLabel={
+            isMuted ? t("realtimeVoice.actions.unmute") : t("realtimeVoice.actions.mute")
+          }
+          style={muteButtonStyle}
         >
           {isMuted ? (
             <MicOff size={theme.iconSize.lg} color={theme.colors.palette.white} strokeWidth={2.5} />
@@ -58,15 +72,11 @@ export function RealtimeVoiceOverlay({
           onPress={onStop}
           disabled={isSwitching}
           accessibilityRole="button"
-          accessibilityLabel="Stop realtime voice and interrupt turn"
-          style={[
-            styles.actionButton,
-            styles.stopButton,
-            isSwitching ? styles.buttonDisabled : undefined,
-          ]}
+          accessibilityLabel={t("realtimeVoice.actions.stop")}
+          style={stopButtonStyle}
         >
           {isSwitching ? (
-            <ActivityIndicator size="small" color={theme.colors.palette.white} />
+            <LoadingSpinner size="small" color={theme.colors.palette.white} />
           ) : (
             <Square
               size={theme.iconSize.lg}

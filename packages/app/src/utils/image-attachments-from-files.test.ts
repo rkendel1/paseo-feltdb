@@ -28,8 +28,10 @@ function createTestStore(): AttachmentStore {
         byteSize = input.source.blob.size;
       } else if (input.source.kind === "data_url") {
         byteSize = input.source.dataUrl.length;
-      } else {
+      } else if (input.source.kind === "file_uri") {
         byteSize = input.source.uri.length;
+      } else {
+        byteSize = input.source.bytes.byteLength;
       }
       return {
         id,
@@ -90,7 +92,25 @@ describe("collectImageFilesFromClipboardData", () => {
       ],
     });
 
-    expect(files).toEqual([imagePng]);
+    expect(files).toEqual([{ file: imagePng, mimeType: "image/png" }]);
+  });
+
+  it("ignores SVG clipboard files", () => {
+    const svgFile = new File(["<svg />"], "logo.svg", {
+      type: "image/svg+xml",
+    });
+
+    const files = collectImageFilesFromClipboardData({
+      items: [
+        createClipboardItem({
+          kind: "file",
+          type: "image/svg+xml",
+          file: svgFile,
+        }),
+      ],
+    });
+
+    expect(files).toEqual([]);
   });
 
   it("returns an empty array when clipboard data is missing", () => {
@@ -107,7 +127,10 @@ describe("filesToImageAttachments", () => {
       type: "",
     });
 
-    const attachments = await filesToImageAttachments([pngFile, typeLessFile]);
+    const attachments = await filesToImageAttachments([
+      { file: pngFile, mimeType: "image/png" },
+      { file: typeLessFile, mimeType: "image/png" },
+    ]);
 
     expect(attachments).toEqual([
       {
@@ -121,7 +144,7 @@ describe("filesToImageAttachments", () => {
       },
       {
         id: "att-2",
-        mimeType: "image/jpeg",
+        mimeType: "image/png",
         storageType: "web-indexeddb",
         storageKey: "att-2",
         fileName: "second",
@@ -136,7 +159,7 @@ describe("filesToImageAttachments", () => {
       type: "image/png",
     });
 
-    const [attachment] = await filesToImageAttachments([large]);
+    const [attachment] = await filesToImageAttachments([{ file: large, mimeType: "image/png" }]);
 
     expect(attachment?.storageType).toBe("web-indexeddb");
     expect(attachment?.byteSize).toBe(4 * 1024 * 1024);

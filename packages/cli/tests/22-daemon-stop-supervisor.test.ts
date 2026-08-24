@@ -2,11 +2,11 @@
 
 /**
  * Regression: `paseo daemon stop` must stop supervised dev daemons
- * without allowing daemon-runner to respawn a new worker process.
+ * without allowing the supervisor entrypoint to respawn a new worker process.
  */
 
 import assert from "node:assert";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,9 +39,9 @@ function isProcessRunning(pid: number): boolean {
   }
 }
 
-type PidLockState = {
+interface PidLockState {
   pid: number | null;
-};
+}
 
 async function readPidLockState(paseoHome: string): Promise<PidLockState> {
   const pidPath = join(paseoHome, "paseo.pid");
@@ -59,38 +59,34 @@ async function readPidLockState(paseoHome: string): Promise<PidLockState> {
   }
 }
 
-function readProcessCommand(pid: number): string | null {
-  const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
-  if (result.status !== 0 || result.error) {
-    return null;
-  }
-  const command = result.stdout.trim();
-  return command.length > 0 ? command : null;
-}
-
-type DaemonStatus = {
-  status: string | null;
+interface DaemonStatus {
+  localDaemon: string | null;
   pid: number | null;
-};
+}
 
 async function readDaemonStatus(paseoHome: string): Promise<DaemonStatus> {
   const result =
     await $`PASEO_HOME=${paseoHome} PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD=${testEnv.PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD} PASEO_DICTATION_ENABLED=${testEnv.PASEO_DICTATION_ENABLED} PASEO_VOICE_MODE_ENABLED=${testEnv.PASEO_VOICE_MODE_ENABLED} npx paseo daemon status --home ${paseoHome} --json`.nothrow();
   if (result.exitCode !== 0) {
-    return { status: null, pid: null };
+    return { localDaemon: null, pid: null };
   }
 
   try {
-    const parsed = JSON.parse(result.stdout) as { status?: unknown; pid?: unknown };
-    const status = typeof parsed.status === "string" ? parsed.status : null;
+    const parsed = JSON.parse(result.stdout) as { localDaemon?: unknown; pid?: unknown };
+    const localDaemon = typeof parsed.localDaemon === "string" ? parsed.localDaemon : null;
     const pid =
       typeof parsed.pid === "number" && Number.isInteger(parsed.pid) && parsed.pid > 0
         ? parsed.pid
         : null;
-    return { status, pid };
+    return { localDaemon, pid };
   } catch {
-    return { status: null, pid: null };
+    return { localDaemon: null, pid: null };
   }
+}
+
+async function readCapturedSupervisorLogs(paseoHome: string, recentLogs: string): Promise<string> {
+  const durableLogs = await readFile(join(paseoHome, "daemon.log"), "utf8").catch(() => "");
+  return `${recentLogs}\n${durableLogs}`;
 }
 
 async function waitFor(
@@ -100,14 +96,14 @@ async function waitFor(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
-  while (Date.now() < deadline) {
-    if (await check()) {
-      return;
-    }
+  async function poll(): Promise<void> {
+    if (await check()) return;
+    if (Date.now() >= deadline) throw new Error(message);
     await sleep(pollIntervalMs);
+    return poll();
   }
 
-  throw new Error(message);
+  return poll();
 }
 
 console.log("=== Daemon Stop (supervisor regression) ===\n");
@@ -120,20 +116,24 @@ let supervisorProcess: ChildProcess | null = null;
 let recentSupervisorLogs = "";
 
 try {
-  console.log("Test 1: start daemon-runner in dev mode with isolated PASEO_HOME");
+  console.log("Test 1: start supervisor-entrypoint in dev mode with isolated PASEO_HOME");
 
-  supervisorProcess = spawn("npx", ["tsx", "../server/scripts/daemon-runner.ts", "--dev"], {
-    cwd: cliRoot,
-    env: {
-      ...process.env,
-      ...testEnv,
-      PASEO_HOME: paseoHome,
-      PASEO_LISTEN: `127.0.0.1:${port}`,
-      PASEO_RELAY_ENABLED: "false",
-      CI: "true",
+  supervisorProcess = spawn(
+    process.execPath,
+    ["--import", "tsx", "../server/scripts/supervisor-entrypoint.ts", "--dev"],
+    {
+      cwd: cliRoot,
+      env: {
+        ...process.env,
+        ...testEnv,
+        PASEO_HOME: paseoHome,
+        PASEO_LISTEN: `127.0.0.1:${port}`,
+        PASEO_RELAY_ENABLED: "false",
+        CI: "true",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
     },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  );
 
   supervisorProcess.stdout?.on("data", (chunk) => {
     recentSupervisorLogs = (recentSupervisorLogs + chunk.toString()).slice(-8000);
@@ -145,7 +145,9 @@ try {
   await waitFor(
     async () => {
       const status = await readDaemonStatus(paseoHome);
-      return status.status === "running" && status.pid !== null && isProcessRunning(status.pid);
+      return (
+        status.localDaemon === "running" && status.pid !== null && isProcessRunning(status.pid)
+      );
     },
     120000,
     "daemon did not become running in time",
@@ -153,16 +155,19 @@ try {
 
   const statusBeforeStop = await readDaemonStatus(paseoHome);
   const daemonPid = statusBeforeStop.pid;
-  assert.strictEqual(statusBeforeStop.status, "running", "daemon should be running before stop");
+  assert.strictEqual(
+    statusBeforeStop.localDaemon,
+    "running",
+    "daemon should be running before stop",
+  );
   assert(daemonPid !== null, "daemon pid should exist once daemon starts");
   assert(isProcessRunning(daemonPid), "daemon process should be running");
   const pidLockBeforeStop = await readPidLockState(paseoHome);
   assert.strictEqual(pidLockBeforeStop.pid, daemonPid, "pid lock should match status pid");
-  const command = readProcessCommand(daemonPid);
-  assert(command !== null, "pid lock pid should resolve to a running process command");
-  assert(
-    command.includes("daemon-runner.ts") || command.includes("daemon-runner.js"),
-    `pid lock pid should be daemon-runner process, got: ${command}`,
+  assert.strictEqual(
+    daemonPid,
+    supervisorProcess.pid,
+    "pid lock pid should be the supervisor-entrypoint process",
   );
   console.log(`✓ dev daemon started with daemon pid ${daemonPid}\n`);
 
@@ -176,7 +181,7 @@ try {
   await waitFor(
     async () => {
       const status = await readDaemonStatus(paseoHome);
-      return status.status === "stopped";
+      return status.localDaemon === "stopped";
     },
     15000,
     "daemon status did not transition to stopped after stop",
@@ -186,7 +191,7 @@ try {
     await waitFor(
       () => !isProcessRunning(supervisorProcess!.pid ?? -1),
       15000,
-      "daemon-runner supervisor remained running after stop",
+      "supervisor-entrypoint process remained running after stop",
     );
   }
 
@@ -202,17 +207,24 @@ try {
 
   const statusAfterStop = await readDaemonStatus(paseoHome);
   assert.strictEqual(
-    statusAfterStop.status,
+    statusAfterStop.localDaemon,
     "stopped",
     "daemon should remain stopped after stop command",
   );
+  const capturedSupervisorLogs = await readCapturedSupervisorLogs(paseoHome, recentSupervisorLogs);
   assert(
-    recentSupervisorLogs.includes("Shutdown requested by worker. Stopping worker..."),
-    `stop should request lifecycle shutdown from daemon worker, logs:\n${recentSupervisorLogs}`,
+    capturedSupervisorLogs.includes('"msg":"Worker requested shutdown"') &&
+      capturedSupervisorLogs.includes('"reason":"client_shutdown_rpc"'),
+    `stop should log lifecycle shutdown reason from daemon worker, logs:\n${capturedSupervisorLogs}`,
   );
   assert(
-    !recentSupervisorLogs.includes("cli_shutdown"),
-    `supervisor logs should not route shutdown by reason string:\n${recentSupervisorLogs}`,
+    capturedSupervisorLogs.includes('"msg":"Supervisor sending signal to worker"') &&
+      capturedSupervisorLogs.includes('"signal":"SIGTERM"'),
+    `stop should log supervisor signal dispatch, logs:\n${capturedSupervisorLogs}`,
+  );
+  assert(
+    !capturedSupervisorLogs.includes("cli_shutdown"),
+    `supervisor logs should not route shutdown by reason string:\n${capturedSupervisorLogs}`,
   );
   console.log("✓ stop leaves supervised daemon stopped (no respawn)\n");
 } finally {

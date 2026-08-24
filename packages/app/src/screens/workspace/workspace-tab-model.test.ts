@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deriveWorkspaceTabModel } from "@/screens/workspace/workspace-tab-model";
-import type { WorkspaceTab } from "@/stores/workspace-tabs-store";
+import type { WorkspaceTab } from "@/workspace-tabs/model";
 
 describe("deriveWorkspaceTabModel", () => {
   it("keeps normalized tabs in stored order and preserves targets", () => {
@@ -23,7 +23,7 @@ describe("deriveWorkspaceTabModel", () => {
     ];
 
     const model = deriveWorkspaceTabModel({
-      tabs: [uiTabs[0]!, uiTabs[2]!, uiTabs[1]!],
+      tabs: [uiTabs[0], uiTabs[2], uiTabs[1]],
     });
 
     expect(model.tabs.map((tab) => tab.descriptor.tabId)).toEqual([

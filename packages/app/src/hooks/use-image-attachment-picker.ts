@@ -1,26 +1,31 @@
 import { useCallback, useRef } from "react";
 import { Alert } from "react-native";
-import { Platform } from "react-native";
 import * as ImagePicker from "expo-image-picker";
-import { isDesktop } from "@/desktop/host";
+import { useTranslation } from "react-i18next";
+import { getDesktopHost, isElectronRuntime } from "@/desktop/host";
 import {
   normalizePickedImageAssets,
-  openImagePathsWithDesktopDialog,
+  pickImagesWithDesktopDialog,
   type PickedImageAttachmentInput,
 } from "@/hooks/image-attachment-picker";
+import { isWeb } from "@/constants/platform";
 
 interface UseImageAttachmentPickerResult {
   pickImages: () => Promise<PickedImageAttachmentInput[] | null>;
 }
 
 export function useImageAttachmentPicker(): UseImageAttachmentPickerResult {
+  const { t } = useTranslation();
   const [mediaPermission, requestMediaPermission] = ImagePicker.useMediaLibraryPermissions();
   const isPickingRef = useRef(false);
 
   const ensurePermission = useCallback(async () => {
     let currentPermission = mediaPermission;
 
-    if (!currentPermission || currentPermission.status === "undetermined") {
+    if (
+      !currentPermission ||
+      currentPermission.status === ImagePicker.PermissionStatus.UNDETERMINED
+    ) {
       currentPermission = await requestMediaPermission();
     } else if (!currentPermission.granted) {
       currentPermission = await requestMediaPermission();
@@ -28,14 +33,14 @@ export function useImageAttachmentPicker(): UseImageAttachmentPickerResult {
 
     if (!currentPermission?.granted) {
       Alert.alert(
-        "Permission required",
-        "Please allow access to your photo library to attach images.",
+        t("imageAttachmentPicker.permissionTitle"),
+        t("imageAttachmentPicker.permissionMessage"),
       );
       return false;
     }
 
     return true;
-  }, [mediaPermission, requestMediaPermission]);
+  }, [mediaPermission, requestMediaPermission, t]);
 
   const pickImages = useCallback(async () => {
     if (isPickingRef.current) {
@@ -45,16 +50,12 @@ export function useImageAttachmentPicker(): UseImageAttachmentPickerResult {
     isPickingRef.current = true;
 
     try {
-      if (Platform.OS === "web" && isDesktop()) {
-        const selectedPaths = await openImagePathsWithDesktopDialog();
-        if (selectedPaths.length === 0) {
+      if (isWeb && isElectronRuntime()) {
+        const selectedImages = await pickImagesWithDesktopDialog(getDesktopHost()?.dialog);
+        if (selectedImages.length === 0) {
           return null;
         }
-        return selectedPaths.map((path) => ({
-          source: { kind: "file_uri" as const, uri: path },
-          mimeType: null,
-          fileName: null,
-        }));
+        return selectedImages;
       }
 
       const hasPermission = await ensurePermission();
@@ -80,12 +81,12 @@ export function useImageAttachmentPicker(): UseImageAttachmentPickerResult {
       return await normalizePickedImageAssets(result.assets);
     } catch (error) {
       console.error("[ImageAttachmentPicker] Failed to pick image:", error);
-      Alert.alert("Error", "Failed to select image");
+      Alert.alert(t("imageAttachmentPicker.errorTitle"), t("imageAttachmentPicker.failedToSelect"));
       return null;
     } finally {
       isPickingRef.current = false;
     }
-  }, [ensurePermission]);
+  }, [ensurePermission, t]);
 
   return { pickImages };
 }

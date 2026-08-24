@@ -6,7 +6,7 @@ import type {
   CommandError,
   AnyCommandResult,
 } from "../../output/index.js";
-import type { AgentMode } from "@getpaseo/server";
+import type { AgentMode } from "@getpaseo/protocol/agent-types";
 
 /** Result for setting mode */
 export interface SetModeResult {
@@ -55,7 +55,7 @@ export async function runModeCommand(
   _command: Command,
 ): Promise<AgentModeResult> {
   const normalizedMode = mode?.trim();
-  const host = getDaemonHost({ host: options.host as string | undefined });
+  const host = getDaemonHost({ host: options.host });
 
   // Validate arguments
   if (!options.list && !normalizedMode) {
@@ -64,8 +64,8 @@ export async function runModeCommand(
 
   let client: Awaited<ReturnType<typeof connectToDaemon>> | undefined;
   try {
-    client = await connectToDaemon({ host: options.host as string | undefined });
-    const fetchResult = await client.fetchAgent(id);
+    client = await connectToDaemon({ host: options.host });
+    const fetchResult = await client.fetchAgent({ agentId: id });
     if (!fetchResult) {
       const error: CommandError = {
         code: "AGENT_NOT_FOUND",

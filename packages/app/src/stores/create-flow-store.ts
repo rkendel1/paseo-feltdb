@@ -1,28 +1,46 @@
 import { create } from "zustand";
 import type { UserMessageImageAttachment } from "@/types/stream";
+import type { AgentAttachment } from "@getpaseo/protocol/messages";
 
 export type CreateFlowLifecycleState = "active" | "abandoned" | "sent";
 
-type PendingCreateAttempt = {
+export interface PendingCreateAttempt {
   draftId: string;
   serverId: string;
+  workspaceId?: string;
   agentId: string | null;
   clientMessageId: string;
   text: string;
   timestamp: number;
   lifecycle: CreateFlowLifecycleState;
   images?: UserMessageImageAttachment[];
-};
+  attachments?: AgentAttachment[];
+}
 
-type CreateFlowState = {
+export function isActiveCreateFlowForDraft(input: {
+  pending: PendingCreateAttempt | null | undefined;
+  serverId: string;
+  draftId: string | null | undefined;
+}): boolean {
+  const draftId = input.draftId?.trim();
+  return Boolean(
+    draftId &&
+    input.pending?.draftId === draftId &&
+    input.pending.serverId === input.serverId &&
+    input.pending.lifecycle === "active",
+  );
+}
+
+interface CreateFlowState {
   pendingByDraftId: Record<string, PendingCreateAttempt>;
   setPending: (pending: Omit<PendingCreateAttempt, "lifecycle">) => void;
   updateAgentId: (input: { draftId: string; agentId: string }) => void;
   markLifecycle: (input: { draftId: string; lifecycle: CreateFlowLifecycleState }) => void;
   rekeyDraft: (input: { fromDraftId: string; toDraftId: string }) => void;
   clear: (input: { draftId: string }) => void;
+  clearByAgent: (input: { serverId: string; agentId: string }) => void;
   clearAll: () => void;
-};
+}
 
 export const useCreateFlowStore = create<CreateFlowState>((set) => ({
   pendingByDraftId: {},
@@ -86,6 +104,21 @@ export const useCreateFlowStore = create<CreateFlowState>((set) => ({
       }
       const { [draftId]: _removed, ...rest } = state.pendingByDraftId;
       return { pendingByDraftId: rest };
+    }),
+  clearByAgent: ({ serverId, agentId }) =>
+    set((state) => {
+      const next = Object.fromEntries(
+        Object.entries(state.pendingByDraftId).filter(
+          ([, pending]) =>
+            pending.lifecycle !== "sent" ||
+            pending.serverId !== serverId ||
+            pending.agentId !== agentId,
+        ),
+      );
+      if (Object.keys(next).length === Object.keys(state.pendingByDraftId).length) {
+        return state;
+      }
+      return { pendingByDraftId: next };
     }),
   clearAll: () => set({ pendingByDraftId: {} }),
 }));

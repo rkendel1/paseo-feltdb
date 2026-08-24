@@ -1,8 +1,8 @@
-export type PendingTerminalModifiers = {
+export interface PendingTerminalModifiers {
   ctrl: boolean;
   shift: boolean;
   alt: boolean;
-};
+}
 
 const MODIFIER_DOM_KEYS = new Set(["Control", "Shift", "Alt", "Meta", "AltGraph", "OS"]);
 
@@ -82,18 +82,57 @@ export function hasPendingTerminalModifiers(modifiers: PendingTerminalModifiers)
   return modifiers.ctrl || modifiers.shift || modifiers.alt;
 }
 
+interface AppleHandheldDetectionInput {
+  userAgent: string | null | undefined;
+  platform: string | null | undefined;
+  maxTouchPoints: number | null | undefined;
+}
+
+// iPadOS 13+ WKWebView reports navigator.platform="MacIntel" and a Mac UA string. Distinguish
+// iPad/iPhone from real macOS via maxTouchPoints, which is 0 on macOS and >1 on iPadOS/iOS.
+export function isAppleHandheldPlatform(input: AppleHandheldDetectionInput): boolean {
+  const userAgent = input.userAgent ?? "";
+  const platform = input.platform ?? "";
+  const touchPoints = input.maxTouchPoints ?? 0;
+  if (/iPad|iPhone|iPod/.test(userAgent)) {
+    return true;
+  }
+  if (/Mac/i.test(platform) && touchPoints > 1) {
+    return true;
+  }
+  return false;
+}
+
 export function shouldInterceptDomTerminalKey(args: {
   key: string;
   ctrlKey: boolean;
+  shiftKey: boolean;
   altKey: boolean;
+  metaKey: boolean;
   pendingModifiers: PendingTerminalModifiers;
+  enhancedInputActive?: boolean;
+  isAppleHandheld?: boolean;
 }): boolean {
-  return (
-    args.key.length > 1 ||
-    args.ctrlKey ||
-    args.altKey ||
-    hasPendingTerminalModifiers(args.pendingModifiers)
-  );
+  if (hasPendingTerminalModifiers(args.pendingModifiers)) {
+    return true;
+  }
+  if (args.key === "Enter" && (args.shiftKey || args.ctrlKey || args.altKey || args.metaKey)) {
+    return Boolean(args.enhancedInputActive);
+  }
+  // COMPAT(xterm-ipad-ctrl-c): WebKit sends keyCode=13 for hardware-kbd Ctrl+C on iPad, so
+  // xterm.js emits \r instead of \x03. Upstream: xtermjs/xterm.js#5721, targeting xterm.js 7.0.0.
+  // Drop this block and the isAppleHandheld plumbing once @xterm/xterm is bumped past it.
+  if (
+    args.isAppleHandheld &&
+    args.ctrlKey &&
+    !args.metaKey &&
+    !args.altKey &&
+    !args.shiftKey &&
+    (args.key === "c" || args.key === "C")
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export function mergeTerminalModifiers(args: {

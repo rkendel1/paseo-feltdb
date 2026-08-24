@@ -1,4 +1,4 @@
-import WebSocket from "ws";
+import { WebSocket } from "ws";
 import {
   DaemonClient as SharedDaemonClient,
   type DaemonClientConfig as SharedDaemonClientConfig,
@@ -7,12 +7,12 @@ import {
   type DaemonEventHandler,
   type SendMessageOptions,
   type WebSocketLike,
-} from "../../client/daemon-client.js";
+} from "@getpaseo/client/internal/daemon-client";
 
 export type DaemonClientConfig = Omit<
   SharedDaemonClientConfig,
   "webSocketFactory" | "transportFactory" | "clientId"
->;
+> & { clientId?: string };
 export type CreateAgentOptions = CreateAgentRequestOptions;
 export { type SendMessageOptions, type DaemonEvent, type DaemonEventHandler };
 
@@ -25,12 +25,14 @@ function nextTestClientId(): string {
 
 export class DaemonClient extends SharedDaemonClient {
   constructor(config: DaemonClientConfig) {
-    const clientId = nextTestClientId();
+    const clientId = config.clientId ?? nextTestClientId();
     super({
       ...config,
       clientId,
       webSocketFactory: (url, options) =>
-        new WebSocket(url, { headers: options?.headers }) as unknown as WebSocketLike,
+        new WebSocket(url, options?.protocols, {
+          headers: options?.headers,
+        }) as unknown as WebSocketLike,
     });
   }
 }

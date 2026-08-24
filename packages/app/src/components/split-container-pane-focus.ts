@@ -1,12 +1,9 @@
 const INTERACTIVE_TARGET_SELECTOR = [
   "a",
   "button",
-  "input",
   "select",
-  "textarea",
   "[role='button']",
   "[role='link']",
-  "[contenteditable='true']",
   "[data-paseo-pane-focus-exempt='true']",
 ].join(", ");
 

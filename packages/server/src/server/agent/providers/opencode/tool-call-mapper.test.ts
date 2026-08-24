@@ -88,6 +88,36 @@ describe("opencode tool-call mapper", () => {
       query: "opencode mapper",
       toolName: "web_search",
     });
+
+    const globItem = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "glob",
+        callId: "opencode-running-glob",
+        status: "running",
+        input: { pattern: "**/*.md" },
+        output: null,
+      }),
+    );
+    expect(globItem.detail).toEqual({
+      type: "search",
+      query: "**/*.md",
+      toolName: "glob",
+    });
+
+    const grepItem = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "grep",
+        callId: "opencode-running-grep",
+        status: "running",
+        input: { pattern: "sendCorrelatedSessionRequest" },
+        output: null,
+      }),
+    );
+    expect(grepItem.detail).toEqual({
+      type: "search",
+      query: "sendCorrelatedSessionRequest",
+      toolName: "grep",
+    });
   });
 
   it("maps completed read calls", () => {
@@ -150,6 +180,36 @@ describe("opencode tool-call mapper", () => {
     if (objectContent.detail?.type === "read") {
       expect(objectContent.detail.content).toBe("gamma");
     }
+  });
+
+  it("unwraps OpenCode XML read output into file content", () => {
+    const item = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "read",
+        callId: "opencode-read-xml",
+        status: "completed",
+        input: { filePath: "/workspaces/paseo/docs/release.md" },
+        output: [
+          "<path>/workspaces/paseo/docs/release.md</path>",
+          "<type>file</type>",
+          "<content>",
+          "1: # Release",
+          "2:",
+          "3: All workspaces share one version and release together.",
+          "</content>",
+        ].join("\n"),
+      }),
+    );
+
+    expect(item.detail).toEqual({
+      type: "read",
+      filePath: "/workspaces/paseo/docs/release.md",
+      content: [
+        "1: # Release",
+        "2:",
+        "3: All workspaces share one version and release together.",
+      ].join("\n"),
+    });
   });
 
   it("maps failed calls with required error", () => {
@@ -215,6 +275,118 @@ describe("opencode tool-call mapper", () => {
     });
   });
 
+  it("maps completed write calls with OpenCode success text into canonical detail", () => {
+    const item = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "write",
+        callId: "opencode-write-success-text",
+        status: "completed",
+        input: {
+          filePath: "/workspaces/paseo/worktrees/cold-ladybug/dummy.txt",
+          content: "hello world\n",
+        },
+        output: "Wrote file successfully.",
+      }),
+    );
+
+    expect(item.detail).toEqual({
+      type: "write",
+      filePath: "/workspaces/paseo/worktrees/cold-ladybug/dummy.txt",
+      content: "hello world\n",
+    });
+  });
+
+  it("maps completed edit calls with OpenCode camelCase input and success text", () => {
+    const item = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "edit",
+        callId: "opencode-edit-camel",
+        status: "completed",
+        input: {
+          filePath: "/workspaces/paseo/packages/website/src/data/agent-pages.ts",
+          oldString: 'metaTitle: "Agent page"',
+          newString: 'metaTitle: "Updated agent page"',
+        },
+        output: "Edit applied successfully.",
+      }),
+    );
+
+    expect(item.detail).toEqual({
+      type: "edit",
+      filePath: "/workspaces/paseo/packages/website/src/data/agent-pages.ts",
+      oldString: 'metaTitle: "Agent page"',
+      newString: 'metaTitle: "Updated agent page"',
+    });
+  });
+
+  it("maps skill calls to plain text detail with the loaded skill name", () => {
+    const item = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "skill",
+        callId: "opencode-skill-1",
+        status: "completed",
+        input: { name: "diagnose" },
+        output: '<skill_content name="diagnose"># Skill: diagnose</skill_content>',
+      }),
+    );
+
+    expect(item.detail).toEqual({
+      type: "plain_text",
+      label: "diagnose",
+      icon: "sparkles",
+      text: '<skill_content name="diagnose"># Skill: diagnose</skill_content>',
+    });
+  });
+
+  it("maps completed grep calls with string output into search detail", () => {
+    const item = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "grep",
+        callId: "opencode-grep-string-output-1",
+        status: "completed",
+        input: { pattern: "todowrite" },
+        output: "Found 2 matches\nsrc/file.ts:\n  Line 1: todowrite",
+      }),
+    );
+
+    expect(item.detail).toEqual({
+      type: "search",
+      query: "todowrite",
+      toolName: "grep",
+      content: "Found 2 matches\nsrc/file.ts:\n  Line 1: todowrite",
+      numFiles: 0,
+    });
+  });
+
+  it("maps apply_patch patchText payloads into edit detail", () => {
+    const patchText = [
+      "*** Begin Patch",
+      "*** Delete File: /tmp/repo/src/App.tsx",
+      "*** End Patch",
+    ].join("\n");
+
+    const item = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "apply_patch",
+        callId: "opencode-apply-patch-text-1",
+        status: "completed",
+        input: { patchText },
+        output: "Success. Updated the following files:\nD /tmp/repo/src/App.tsx",
+      }),
+    );
+
+    expect(item.detail.type).toBe("edit");
+    expect(item.detail).toEqual({
+      type: "edit",
+      filePath: "/tmp/repo/src/App.tsx",
+      unifiedDiff: [
+        "diff --git a//tmp/repo/src/App.tsx b//tmp/repo/src/App.tsx",
+        "--- a//tmp/repo/src/App.tsx",
+        "+++ /dev/null",
+      ].join("\n"),
+    });
+  });
+
   it("maps unknown tools to unknown detail with raw payloads", () => {
     const item = expectMapped(
       mapOpencodeToolCall({
@@ -232,6 +404,107 @@ describe("opencode tool-call mapper", () => {
       type: "unknown",
       input: { foo: "bar" },
       output: { ok: true },
+    });
+  });
+
+  it("maps running task calls with subagent input to sub_agent detail", () => {
+    const item = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "task",
+        callId: "opencode-task-running",
+        status: "running",
+        input: {
+          subagent_type: "explore",
+          description: "Explore agent-tools codebase",
+        },
+        output: null,
+      }),
+    );
+
+    expect(item.status).toBe("running");
+    expect(item.error).toBeNull();
+    expect(item.detail).toEqual({
+      type: "sub_agent",
+      subAgentType: "explore",
+      description: "Explore agent-tools codebase",
+      log: "",
+      actions: [],
+    });
+  });
+
+  it("maps completed task calls with final output log to sub_agent detail", () => {
+    const item = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "task",
+        callId: "opencode-task-completed",
+        status: "completed",
+        input: {
+          subagent_type: "explore",
+          description: "Explore agent-tools codebase",
+        },
+        output: { result: "Found the CLI entrypoint and provider registry." },
+      }),
+    );
+
+    expect(item.status).toBe("completed");
+    expect(item.error).toBeNull();
+    expect(item.detail).toEqual({
+      type: "sub_agent",
+      subAgentType: "explore",
+      description: "Explore agent-tools codebase",
+      log: "Found the CLI entrypoint and provider registry.",
+      actions: [],
+    });
+  });
+
+  it("extracts child session ids from current task metadata", () => {
+    const item = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "task",
+        callId: "opencode-task-completed-with-id",
+        status: "completed",
+        input: {
+          subagent_type: "explore",
+          description: "Explore current directory",
+        },
+        output: '<task id="ses_2268db431ffe299vL1bbot8R7Z">done</task>',
+        metadata: { sessionId: "ses_2268db431ffe299vL1bbot8R7Z" },
+      }),
+    );
+
+    expect(item.detail).toEqual({
+      type: "sub_agent",
+      subAgentType: "explore",
+      description: "Explore current directory",
+      childSessionId: "ses_2268db431ffe299vL1bbot8R7Z",
+      log: '<task id="ses_2268db431ffe299vL1bbot8R7Z">done</task>',
+      actions: [],
+    });
+  });
+
+  it("maps aborted task calls with preserved error log to sub_agent detail", () => {
+    const item = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "task",
+        callId: "opencode-task-aborted",
+        status: "aborted",
+        input: {
+          subagent_type: "explore",
+          description: "Explore agent-tools codebase",
+        },
+        output: null,
+        error: "Tool execution aborted",
+      }),
+    );
+
+    expect(item.status).toBe("failed");
+    expect(item.error).toBe("Tool execution aborted");
+    expect(item.detail).toEqual({
+      type: "sub_agent",
+      subAgentType: "explore",
+      description: "Explore agent-tools codebase",
+      log: "Tool execution aborted",
+      actions: [],
     });
   });
 

@@ -8,23 +8,33 @@
  * Bundle format (binary):
  *   [nonce (24 bytes)] [ciphertext...]
  *
- * Transport format:
- *   The encrypted-channel sends the bundle as base64 text over WebSocket.
+ * The encrypted channel chooses the WebSocket representation. Crypto remains
+ * byte-oriented so frame kind is never inferred from plaintext contents.
  */
 
 import nacl from "tweetnacl";
 import { fromByteArray, toByteArray } from "base64-js";
 
-export type KeyPair = {
+export interface KeyPair {
   publicKey: Uint8Array; // 32 bytes
   secretKey: Uint8Array; // 32 bytes
-};
+}
 
 export type SharedKey = Uint8Array; // 32 bytes (box.before)
 
 const NONCE_LENGTH = nacl.box.nonceLength; // 24
+const ZERO_X25519_SHARED_RESULT = new Uint8Array(nacl.box.sharedKeyLength);
 
 let prngReady = false;
+
+interface GlobalWithCrypto {
+  crypto?: Crypto;
+}
+
+function getGlobalCrypto(): Crypto | undefined {
+  const g = globalThis as GlobalWithCrypto;
+  return g.crypto;
+}
 
 function ensurePrng(): void {
   if (prngReady) return;
@@ -37,10 +47,12 @@ function ensurePrng(): void {
     // fallthrough
   }
 
-  const cryptoObj = (globalThis as unknown as { crypto?: Crypto }).crypto;
+  const cryptoObj = getGlobalCrypto();
   if (cryptoObj?.getRandomValues) {
     nacl.setPRNG((x, n) => {
-      cryptoObj.getRandomValues(x.subarray(0, n));
+      const buf = new Uint8Array(n);
+      cryptoObj.getRandomValues(buf);
+      x.set(buf, 0);
     });
     prngReady = true;
     return;
@@ -55,6 +67,22 @@ function encodeBase64(bytes: Uint8Array): string {
 
 function decodeBase64(base64: string): Uint8Array {
   return toByteArray(base64);
+}
+
+function decodePublicKeyBase64(base64: string): Uint8Array {
+  if (
+    typeof base64 !== "string" ||
+    base64.length % 4 !== 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64)
+  ) {
+    throw new Error("Invalid public key encoding");
+  }
+
+  const bytes = decodeBase64(base64);
+  if (encodeBase64(bytes) !== base64) {
+    throw new Error("Invalid public key encoding");
+  }
+  return bytes;
 }
 
 function toUint8(data: string | ArrayBuffer): Uint8Array {
@@ -81,7 +109,7 @@ export function exportPublicKey(publicKey: Uint8Array): string {
 }
 
 export function importPublicKey(base64: string): Uint8Array {
-  const bytes = decodeBase64(base64);
+  const bytes = decodePublicKeyBase64(base64);
   if (bytes.byteLength !== nacl.box.publicKeyLength) {
     throw new Error(`Invalid public key length (expected ${nacl.box.publicKeyLength})`);
   }
@@ -110,6 +138,14 @@ export function deriveSharedKey(ourSecretKey: Uint8Array, peerPublicKey: Uint8Ar
   if (peerPublicKey.byteLength !== nacl.box.publicKeyLength) {
     throw new Error(`Invalid peer public key length (expected ${nacl.box.publicKeyLength})`);
   }
+
+  const rawSharedResult = nacl.scalarMult(ourSecretKey, peerPublicKey);
+  const isAllZero = nacl.verify(rawSharedResult, ZERO_X25519_SHARED_RESULT);
+  rawSharedResult.fill(0);
+  if (isAllZero) {
+    throw new Error("Invalid peer public key");
+  }
+
   return nacl.box.before(peerPublicKey, ourSecretKey);
 }
 
@@ -128,7 +164,7 @@ export function encrypt(sharedKey: SharedKey, data: string | ArrayBuffer): Array
   return toArrayBuffer(out);
 }
 
-export function decrypt(sharedKey: SharedKey, data: ArrayBuffer): string | ArrayBuffer {
+export function decrypt(sharedKey: SharedKey, data: ArrayBuffer): ArrayBuffer {
   const bytes = new Uint8Array(data);
   if (bytes.byteLength < NONCE_LENGTH) {
     throw new Error("Ciphertext bundle too short");
@@ -141,10 +177,5 @@ export function decrypt(sharedKey: SharedKey, data: ArrayBuffer): string | Array
     throw new Error("Decryption failed");
   }
 
-  const plaintext = toArrayBuffer(opened);
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(plaintext);
-  } catch {
-    return plaintext;
-  }
+  return toArrayBuffer(opened);
 }

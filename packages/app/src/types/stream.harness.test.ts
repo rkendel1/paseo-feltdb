@@ -6,10 +6,13 @@ import {
   type AgentToolCallItem,
   isAgentToolCallItem,
 } from "./stream";
-import type { AgentStreamEventPayload } from "@server/shared/messages";
-import type { ToolCallDetail } from "@server/server/agent/agent-sdk-types";
+import type { AgentStreamEventPayload } from "@getpaseo/protocol/messages";
+import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
 
-type HarnessUpdate = { event: AgentStreamEventPayload; timestamp: Date };
+interface HarnessUpdate {
+  event: AgentStreamEventPayload;
+  timestamp: Date;
+}
 type ToolStatus = "running" | "completed" | "failed" | "canceled";
 
 const HARNESS_CALL_IDS = {

@@ -10,7 +10,11 @@ import { addSendOptions, runSendCommand } from "./send.js";
 import { addInspectOptions, runInspectCommand } from "./inspect.js";
 import { addWaitOptions, runWaitCommand } from "./wait.js";
 import { addAttachOptions, runAttachCommand } from "./attach.js";
+import { addReloadOptions, runReloadCommand } from "./reload.js";
+import { addImportOptions, runImportCommand } from "./import.js";
 import { runUpdateCommand } from "./update.js";
+import { runDetachCommand } from "./detach.js";
+import { addOpenOptions, runOpenCommand } from "./open.js";
 import { withOutput } from "../../output/index.js";
 import {
   addDaemonHostOption,
@@ -22,41 +26,43 @@ export function createAgentCommand(): Command {
   const agent = new Command("agent").description("Manage agents (advanced operations)");
 
   // Primary agent commands (same as top-level)
-  addJsonAndDaemonHostOptions(
-    addLsOptions(agent.command("ls")),
-  ).action(withOutput(runLsCommand));
+  addJsonAndDaemonHostOptions(addLsOptions(agent.command("ls"))).action(withOutput(runLsCommand));
 
-  addJsonAndDaemonHostOptions(
-    addRunOptions(agent.command("run")),
-  ).action(withOutput(runRunCommand));
+  addJsonAndDaemonHostOptions(addRunOptions(agent.command("run"))).action(
+    withOutput(runRunCommand),
+  );
 
-  addDaemonHostOption(
-    addAttachOptions(agent.command("attach")),
-  ).action(runAttachCommand);
+  addJsonAndDaemonHostOptions(addImportOptions(agent.command("import"))).action(
+    withOutput(runImportCommand),
+  );
 
-  addDaemonHostOption(
-    addLogsOptions(agent.command("logs")),
-  ).action(runLogsCommand);
+  addDaemonHostOption(addAttachOptions(agent.command("attach"))).action(runAttachCommand);
 
-  addJsonAndDaemonHostOptions(
-    addStopOptions(agent.command("stop")),
-  ).action(withOutput(runStopCommand));
+  addDaemonHostOption(addLogsOptions(agent.command("logs"))).action(runLogsCommand);
 
-  addJsonAndDaemonHostOptions(
-    addDeleteOptions(agent.command("delete")),
-  ).action(withOutput(runDeleteCommand));
+  addJsonAndDaemonHostOptions(addOpenOptions(agent.command("open"))).action(
+    withOutput(runOpenCommand),
+  );
 
-  addJsonAndDaemonHostOptions(
-    addSendOptions(agent.command("send")),
-  ).action(withOutput(runSendCommand));
+  addJsonAndDaemonHostOptions(addStopOptions(agent.command("stop"))).action(
+    withOutput(runStopCommand),
+  );
 
-  addJsonAndDaemonHostOptions(
-    addInspectOptions(agent.command("inspect")),
-  ).action(withOutput(runInspectCommand));
+  addJsonAndDaemonHostOptions(addDeleteOptions(agent.command("delete"))).action(
+    withOutput(runDeleteCommand),
+  );
 
-  addJsonAndDaemonHostOptions(
-    addWaitOptions(agent.command("wait")),
-  ).action(withOutput(runWaitCommand));
+  addJsonAndDaemonHostOptions(addSendOptions(agent.command("send"))).action(
+    withOutput(runSendCommand),
+  );
+
+  addJsonAndDaemonHostOptions(addInspectOptions(agent.command("inspect"))).action(
+    withOutput(runInspectCommand),
+  );
+
+  addJsonAndDaemonHostOptions(addWaitOptions(agent.command("wait"))).action(
+    withOutput(runWaitCommand),
+  );
 
   // Advanced agent commands (less common operations)
   addJsonAndDaemonHostOptions(
@@ -68,16 +74,28 @@ export function createAgentCommand(): Command {
       .option("--list", "List available modes for this agent"),
   ).action(withOutput(runModeCommand));
 
+  addJsonAndDaemonHostOptions(addArchiveOptions(agent.command("archive"))).action(
+    withOutput(runArchiveCommand),
+  );
+
+  addJsonAndDaemonHostOptions(addReloadOptions(agent.command("reload"))).action(
+    withOutput(runReloadCommand),
+  );
+
   addJsonAndDaemonHostOptions(
-    addArchiveOptions(agent.command("archive")),
-  ).action(withOutput(runArchiveCommand));
+    agent
+      .command("detach")
+      .description("Make a subagent independent without stopping or moving it")
+      .argument("<id>", "Agent ID, prefix, or name"),
+  ).action(withOutput(runDetachCommand));
 
   addJsonAndDaemonHostOptions(
     agent
       .command("update")
-      .description("Update an agent's metadata")
+      .description("Update an agent's settings or metadata")
       .argument("<id>", "Agent ID (or prefix)")
       .option("--name <name>", "Update the agent's display name")
+      .option("--thinking <id>", "Update the agent's thinking option ID")
       .option(
         "--label <label>",
         "Add/set label(s) on the agent (can be used multiple times or comma-separated)",

@@ -1,10 +1,8 @@
-import {
-  buildHostAgentDetailRoute,
-  buildHostRootRoute,
-  buildHostWorkspaceRoute,
-} from "@/utils/host-routes";
+import type { Href } from "expo-router";
+import { buildHostRootRoute, buildHostWorkspaceOpenRoute } from "@/utils/host-routes";
 
 type NotificationData = Record<string, unknown> | null | undefined;
+type NotificationRoute = Extract<Href, string>;
 
 function readNonEmptyString(data: NotificationData, key: string): string | null {
   const value = data?.[key];
@@ -19,25 +17,26 @@ export function resolveNotificationTarget(data: NotificationData): {
   serverId: string | null;
   agentId: string | null;
   workspaceId: string | null;
+  terminalId: string | null;
 } {
   return {
     serverId: readNonEmptyString(data, "serverId"),
     agentId: readNonEmptyString(data, "agentId"),
-    workspaceId: readNonEmptyString(data, "workspaceId") ?? readNonEmptyString(data, "cwd"),
+    workspaceId: readNonEmptyString(data, "workspaceId"),
+    terminalId: readNonEmptyString(data, "terminalId"),
   };
 }
 
-export function buildNotificationRoute(data: NotificationData): string {
-  const { serverId, agentId, workspaceId } = resolveNotificationTarget(data);
-  if (serverId && agentId) {
-    if (workspaceId) {
-      const base = buildHostWorkspaceRoute(serverId, workspaceId);
-      return `${base}?open=${encodeURIComponent(`agent:${agentId}`)}`;
-    }
-    return buildHostAgentDetailRoute(serverId, agentId);
+export function buildNotificationRoute(data: NotificationData): NotificationRoute {
+  const { serverId, agentId, workspaceId, terminalId } = resolveNotificationTarget(data);
+  if (serverId && workspaceId && agentId) {
+    return buildHostWorkspaceOpenRoute(serverId, workspaceId, `agent:${agentId}`);
+  }
+  if (serverId && workspaceId && terminalId) {
+    return buildHostWorkspaceOpenRoute(serverId, workspaceId, `terminal:${terminalId}`);
   }
   if (serverId) {
     return buildHostRootRoute(serverId);
   }
-  return "/";
+  return "/" as const;
 }

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { useCreateFlowStore } from "./create-flow-store";
+import { isActiveCreateFlowForDraft, useCreateFlowStore } from "./create-flow-store";
 
 describe("create-flow-store", () => {
   beforeEach(() => {
@@ -70,5 +70,58 @@ describe("create-flow-store", () => {
 
     useCreateFlowStore.getState().clear({ draftId: "draft-1" });
     expect(useCreateFlowStore.getState().pendingByDraftId["draft-1"]).toBeUndefined();
+  });
+
+  it("clears pending handoff state by agent", () => {
+    useCreateFlowStore.getState().setPending({
+      draftId: "draft-1",
+      serverId: "server-1",
+      agentId: null,
+      clientMessageId: "msg-1",
+      text: "hello",
+      timestamp: Date.now(),
+    });
+    useCreateFlowStore.getState().updateAgentId({ draftId: "draft-1", agentId: "agent-1" });
+    useCreateFlowStore.getState().markLifecycle({ draftId: "draft-1", lifecycle: "sent" });
+
+    useCreateFlowStore.getState().clearByAgent({ serverId: "server-1", agentId: "agent-1" });
+
+    expect(useCreateFlowStore.getState().pendingByDraftId["draft-1"]).toBeUndefined();
+  });
+
+  it("matches only active pending create flows for a draft and server", () => {
+    useCreateFlowStore.getState().setPending({
+      draftId: "draft-1",
+      serverId: "server-1",
+      agentId: null,
+      clientMessageId: "msg-1",
+      text: "hello",
+      timestamp: Date.now(),
+    });
+    const pending = useCreateFlowStore.getState().pendingByDraftId["draft-1"];
+
+    expect(
+      isActiveCreateFlowForDraft({
+        pending,
+        serverId: "server-1",
+        draftId: " draft-1 ",
+      }),
+    ).toBe(true);
+    expect(
+      isActiveCreateFlowForDraft({
+        pending,
+        serverId: "server-2",
+        draftId: "draft-1",
+      }),
+    ).toBe(false);
+
+    useCreateFlowStore.getState().markLifecycle({ draftId: "draft-1", lifecycle: "sent" });
+    expect(
+      isActiveCreateFlowForDraft({
+        pending: useCreateFlowStore.getState().pendingByDraftId["draft-1"],
+        serverId: "server-1",
+        draftId: "draft-1",
+      }),
+    ).toBe(false);
   });
 });

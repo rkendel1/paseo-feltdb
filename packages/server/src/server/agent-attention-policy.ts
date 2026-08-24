@@ -1,88 +1,80 @@
-export type ClientAttentionState = {
-  deviceType: "web" | "mobile" | null;
-  focusedAgentId: string | null;
-  isStale: boolean;
+import type { AgentAttentionReason } from "@getpaseo/protocol/agent-attention-notification";
+
+export const PRESENCE_THRESHOLD_MS = 180_000;
+
+export interface ClientPresenceState {
   appVisible: boolean;
-};
-
-export type AgentAttentionReason = "finished" | "error" | "permission";
-
-type ComputeClientNotificationInput = {
-  clientState: ClientAttentionState;
-  allClientStates: ClientAttentionState[];
-  agentId: string;
-};
-
-type ComputePushNotificationInput = {
-  reason: AgentAttentionReason;
-  allClientStates: ClientAttentionState[];
-};
-
-function hasActiveClientOnAgent(allClientStates: ClientAttentionState[], agentId: string): boolean {
-  return allClientStates.some(
-    (state) => state.focusedAgentId === agentId && state.appVisible && !state.isStale,
-  );
+  lastActivityAtMs: number | null;
+  focusedAgentId: string | null;
+  focusedTerminalId: string | null;
 }
 
-function hasActiveWebClient(allClientStates: ClientAttentionState[]): boolean {
-  return allClientStates.some((state) => state.deviceType === "web" && !state.isStale);
+export type AttentionFocusTarget = { kind: "agent"; id: string } | { kind: "terminal"; id: string };
+
+export interface NotificationPlan {
+  inAppRecipientIndex: number | null;
+  shouldPush: boolean;
 }
 
-function hasOtherCompetingClient(
-  clientState: ClientAttentionState,
-  allClientStates: ClientAttentionState[],
+interface ComputeNotificationPlanInput {
+  allStates: ClientPresenceState[];
+  // A present, app-visible client focused on the attention target suppresses the
+  // notification entirely. Pass null when the target should not suppress notifications.
+  focusTarget: AttentionFocusTarget | null;
+  // Whether a push notification is allowed when no client is present.
+  pushEligible: boolean;
+  nowMs: number;
+}
+
+function isFocusedOnTarget(
+  state: ClientPresenceState,
+  target: AttentionFocusTarget | null,
 ): boolean {
-  return allClientStates.some(
-    (state) =>
-      state !== clientState && (state.deviceType === "mobile" || state.deviceType === null),
-  );
-}
-
-function hasActiveForegroundMobileClient(allClientStates: ClientAttentionState[]): boolean {
-  return allClientStates.some(
-    (state) => state.deviceType === "mobile" && state.appVisible && !state.isStale,
-  );
-}
-
-export function computeShouldNotifyClient({
-  clientState,
-  allClientStates,
-  agentId,
-}: ComputeClientNotificationInput): boolean {
-  if (hasActiveClientOnAgent(allClientStates, agentId)) {
+  if (target === null) {
     return false;
   }
-
-  if (clientState.deviceType === null) {
-    return true;
+  if (target.kind === "agent") {
+    return state.focusedAgentId === target.id;
   }
-
-  if (!clientState.isStale && clientState.appVisible && clientState.focusedAgentId !== null) {
-    return true;
-  }
-
-  if (!clientState.isStale) {
-    return false;
-  }
-
-  if (clientState.deviceType === "mobile") {
-    return !hasActiveWebClient(allClientStates);
-  }
-
-  if (clientState.deviceType === "web") {
-    return !hasOtherCompetingClient(clientState, allClientStates);
-  }
-
-  return true;
+  return state.focusedTerminalId === target.id;
 }
 
-export function computeShouldSendPush({
-  reason,
-  allClientStates,
-}: ComputePushNotificationInput): boolean {
-  if (reason === "error") {
-    return false;
+export function computeNotificationPlan({
+  allStates,
+  focusTarget,
+  pushEligible,
+  nowMs,
+}: ComputeNotificationPlanInput): NotificationPlan {
+  let mostRecentPresentIndex: number | null = null;
+  let mostRecentPresentAtMs = Number.NEGATIVE_INFINITY;
+
+  for (const [clientIndex, state] of allStates.entries()) {
+    const clampedActivityAtMs =
+      state.lastActivityAtMs === null ? null : Math.min(state.lastActivityAtMs, nowMs);
+    const isPresent =
+      clampedActivityAtMs !== null && nowMs - clampedActivityAtMs <= PRESENCE_THRESHOLD_MS;
+
+    if (!isPresent) {
+      continue;
+    }
+
+    if (state.appVisible && isFocusedOnTarget(state, focusTarget)) {
+      return { inAppRecipientIndex: null, shouldPush: false };
+    }
+
+    if (clampedActivityAtMs > mostRecentPresentAtMs) {
+      mostRecentPresentIndex = clientIndex;
+      mostRecentPresentAtMs = clampedActivityAtMs;
+    }
   }
 
-  return !hasActiveWebClient(allClientStates) && !hasActiveForegroundMobileClient(allClientStates);
+  if (mostRecentPresentIndex !== null) {
+    return { inAppRecipientIndex: mostRecentPresentIndex, shouldPush: false };
+  }
+
+  return { inAppRecipientIndex: null, shouldPush: pushEligible };
+}
+
+export function isPushEligibleAttentionReason(reason: AgentAttentionReason): boolean {
+  return reason !== "error";
 }

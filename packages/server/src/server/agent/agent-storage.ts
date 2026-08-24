@@ -1,23 +1,33 @@
-import { randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type { Logger } from "pino";
 
-import { AgentStatusSchema } from "../messages.js";
+import { writeJsonFileAtomic } from "../atomic-file.js";
+import { AgentFeatureSchema, AgentStatusSchema } from "../messages.js";
 import { toStoredAgentRecord } from "./agent-projections.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
+import { AgentOwnerSchema, daemonExecutionKey, type DaemonAgentOwner } from "./agent-owner.js";
 
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
-    title: z.string().nullable().optional(),
     modeId: z.string().nullable().optional(),
     model: z.string().nullable().optional(),
     thinkingOptionId: z.string().nullable().optional(),
-    extra: z.record(z.any()).nullable().optional(),
+    featureValues: z.record(z.string(), z.unknown()).nullable().optional(),
+    providerOptions: z.record(z.string(), z.json()).nullable().optional(),
+    toolPolicy: z
+      .object({
+        preapproved: z.array(
+          z.object({ kind: z.literal("mcp"), server: z.string(), tool: z.string() }).strict(),
+        ),
+      })
+      .strict()
+      .nullable()
+      .optional(),
     systemPrompt: z.string().nullable().optional(),
-    mcpServers: z.record(z.any()).nullable().optional(),
+    mcpServers: z.record(z.string(), z.any()).nullable().optional(),
   })
   .nullable()
   .optional();
@@ -27,7 +37,7 @@ const PERSISTENCE_HANDLE_SCHEMA = z
     provider: z.string(),
     sessionId: z.string(),
     nativeHandle: z.any().optional(),
-    metadata: z.record(z.any()).optional(),
+    metadata: z.record(z.string(), z.any()).optional(),
   })
   .nullable()
   .optional();
@@ -36,12 +46,13 @@ const STORED_AGENT_SCHEMA = z.object({
   id: z.string(),
   provider: z.string(),
   cwd: z.string(),
+  workspaceId: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   lastActivityAt: z.string().optional(),
   lastUserMessageAt: z.string().nullable().optional(),
   title: z.string().nullable().optional(),
-  labels: z.record(z.string()).default({}),
+  labels: z.record(z.string(), z.string()).default({}),
   lastStatus: AgentStatusSchema.default("closed"),
   lastModeId: z.string().nullable().optional(),
   config: SERIALIZABLE_CONFIG_SCHEMA,
@@ -52,23 +63,36 @@ const STORED_AGENT_SCHEMA = z.object({
       model: z.string().nullable().optional(),
       thinkingOptionId: z.string().nullable().optional(),
       modeId: z.string().nullable().optional(),
-      extra: z.record(z.unknown()).optional(),
+      extra: z.record(z.string(), z.unknown()).optional(),
     })
     .optional(),
+  features: z.array(AgentFeatureSchema).optional(),
   persistence: PERSISTENCE_HANDLE_SCHEMA,
+  lastError: z.string().nullable().optional(),
   requiresAttention: z.boolean().optional(),
   attentionReason: z.enum(["finished", "error", "permission"]).nullable().optional(),
   attentionTimestamp: z.string().nullable().optional(),
   internal: z.boolean().optional(),
   archivedAt: z.string().nullable().optional(),
+  owner: AgentOwnerSchema.optional(),
 });
 
 export type SerializableAgentConfig = Pick<
   AgentSessionConfig,
-  "title" | "modeId" | "model" | "thinkingOptionId" | "extra" | "systemPrompt" | "mcpServers"
+  | "modeId"
+  | "model"
+  | "thinkingOptionId"
+  | "featureValues"
+  | "providerOptions"
+  | "toolPolicy"
+  | "systemPrompt"
+  | "mcpServers"
 >;
 
 export type StoredAgentRecord = z.infer<typeof STORED_AGENT_SCHEMA>;
+export function parseStoredAgentRecord(value: unknown): StoredAgentRecord {
+  return STORED_AGENT_SCHEMA.parse(value);
+}
 
 export class AgentStorage {
   private cache: Map<string, StoredAgentRecord> = new Map();
@@ -76,6 +100,8 @@ export class AgentStorage {
   private pathsById: Map<string, Set<string>> = new Map();
   private pendingWrites: Map<string, Promise<void>> = new Map();
   private deleting: Set<string> = new Set();
+  private daemonAgentIdsByExecution: Map<string, string> = new Map();
+  private daemonExecutionKeysByAgentId: Map<string, string> = new Map();
   private loaded = false;
   private baseDir: string;
   private loadPromise: Promise<StoredAgentRecord[]> | null = null;
@@ -100,45 +126,84 @@ export class AgentStorage {
     return this.cache.get(agentId) ?? null;
   }
 
+  async listByProviderSession(
+    provider: string,
+    providerHandleId: string,
+  ): Promise<StoredAgentRecord[]> {
+    await this.load();
+    return Array.from(this.cache.values()).filter(
+      (record) =>
+        record.persistence?.provider === provider &&
+        (record.persistence.sessionId === providerHandleId ||
+          record.persistence.nativeHandle === providerHandleId),
+    );
+  }
+
+  async listByWorkspace(workspaceId: string): Promise<StoredAgentRecord[]> {
+    await this.load();
+    return Array.from(this.cache.values()).filter((record) => record.workspaceId === workspaceId);
+  }
+
+  async findByDaemonExecution(owner: DaemonAgentOwner): Promise<StoredAgentRecord | null> {
+    await this.load();
+    const agentId = this.daemonAgentIdsByExecution.get(daemonExecutionKey(owner));
+    return agentId ? (this.cache.get(agentId) ?? null) : null;
+  }
+
   async upsert(record: StoredAgentRecord): Promise<void> {
     await this.load();
-    const agentId = record.id;
+    await this.queueRecordWrite(record);
+  }
+
+  private queueRecordWrite(record: StoredAgentRecord): Promise<void> {
+    return this.queueRecordMutation(record.id, () => record);
+  }
+
+  private queueRecordMutation(
+    agentId: string,
+    mutate: (existing: StoredAgentRecord | null) => StoredAgentRecord,
+  ): Promise<void> {
     const prev = this.pendingWrites.get(agentId) ?? Promise.resolve();
     const next = prev.then(async () => {
       if (this.deleting.has(agentId)) {
-        return;
+        return undefined;
       }
 
-      const nextPath = this.buildRecordPath(record);
-      const previousPath = this.pathById.get(agentId);
-
-      await fs.mkdir(path.dirname(nextPath), { recursive: true });
-      await writeFileAtomically(nextPath, JSON.stringify(record, null, 2));
-      this.addIndexedPath(agentId, nextPath);
-
-      if (previousPath && previousPath !== nextPath) {
-        try {
-          await fs.unlink(previousPath);
-        } catch {
-          // ignore cleanup errors
-        }
-        this.removeIndexedPath(agentId, previousPath);
-      }
-
-      this.cache.set(agentId, record);
-      this.pathById.set(agentId, nextPath);
+      const record = mutate(this.cache.get(agentId) ?? null);
+      await this.writeRecord(record);
+      return undefined;
     });
 
-    this.pendingWrites.set(
-      agentId,
-      next.finally(() => {
-        if (this.pendingWrites.get(agentId) === next) {
-          this.pendingWrites.delete(agentId);
-        }
-      }),
-    );
+    const tracked = next.finally(() => {
+      if (this.pendingWrites.get(agentId) === tracked) {
+        this.pendingWrites.delete(agentId);
+      }
+    });
 
-    await next;
+    this.pendingWrites.set(agentId, tracked);
+    return tracked;
+  }
+
+  private async writeRecord(record: StoredAgentRecord): Promise<void> {
+    const agentId = record.id;
+    const nextPath = this.buildRecordPath(record);
+    const previousPath = this.pathById.get(agentId);
+
+    await writeJsonFileAtomic(nextPath, record);
+    this.addIndexedPath(agentId, nextPath);
+
+    if (previousPath && previousPath !== nextPath) {
+      try {
+        await fs.unlink(previousPath);
+      } catch {
+        // ignore cleanup errors
+      }
+      this.removeIndexedPath(agentId, previousPath);
+    }
+
+    this.cache.set(agentId, record);
+    this.indexOwner(record);
+    this.pathById.set(agentId, nextPath);
   }
 
   beginDelete(agentId: string): void {
@@ -150,18 +215,24 @@ export class AgentStorage {
     this.beginDelete(agentId);
     await (this.pendingWrites.get(agentId) ?? Promise.resolve());
     const paths = Array.from(this.pathsById.get(agentId) ?? []);
-    for (const filePath of paths) {
-      try {
-        await fs.unlink(filePath);
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code && code !== "ENOENT") {
-          this.logger.warn({ err: error, agentId, filePath }, "Failed to remove agent record file");
+    await Promise.all(
+      paths.map(async (filePath) => {
+        try {
+          await fs.unlink(filePath);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code && code !== "ENOENT") {
+            this.logger.warn(
+              { err: error, agentId, filePath },
+              "Failed to remove agent record file",
+            );
+          }
         }
-      }
-    }
+      }),
+    );
 
     this.cache.delete(agentId);
+    this.removeOwnerIndex(agentId);
     this.pathById.delete(agentId);
     this.pathsById.delete(agentId);
   }
@@ -171,25 +242,25 @@ export class AgentStorage {
     options?: { title?: string | null; internal?: boolean },
   ): Promise<void> {
     await this.load();
-    await this.waitForPendingWrite(agent.id);
-    const existing = (await this.get(agent.id)) ?? null;
     const hasTitleOverride =
       options !== undefined && Object.prototype.hasOwnProperty.call(options, "title");
     const hasInternalOverride =
       options !== undefined && Object.prototype.hasOwnProperty.call(options, "internal");
-    const record = toStoredAgentRecord(agent, {
-      title: hasTitleOverride ? (options?.title ?? null) : (existing?.title ?? null),
-      createdAt: existing?.createdAt,
-      internal: hasInternalOverride ? options?.internal : (agent.internal ?? existing?.internal),
-    });
+    await this.queueRecordMutation(agent.id, (existing) => {
+      const record = toStoredAgentRecord(agent, {
+        title: hasTitleOverride ? (options?.title ?? null) : (existing?.title ?? null),
+        createdAt: existing?.createdAt,
+        internal: hasInternalOverride ? options?.internal : (agent.internal ?? existing?.internal),
+      });
 
-    // Preserve soft-delete/archive status across snapshot flushes.
-    // `archivedAt` is not part of the ManagedAgent snapshot, so a naive projection
-    // would wipe it during normal persistence (including on daemon restart).
-    if (existing && existing.archivedAt !== undefined) {
-      record.archivedAt = existing.archivedAt;
-    }
-    await this.upsert(record);
+      // Preserve soft-delete/archive status across snapshot flushes. The
+      // projection runs inside the per-agent write queue so it cannot commit a
+      // stale pre-archive record after the archive mutation.
+      if (existing && existing.archivedAt !== undefined) {
+        record.archivedAt = existing.archivedAt;
+      }
+      return record;
+    });
   }
 
   async setTitle(agentId: string, title: string): Promise<void> {
@@ -224,6 +295,8 @@ export class AgentStorage {
     this.cache.clear();
     this.pathById.clear();
     this.pathsById.clear();
+    this.daemonAgentIdsByExecution.clear();
+    this.daemonExecutionKeysByAgentId.clear();
 
     try {
       const records = await this.scanDisk();
@@ -242,7 +315,7 @@ export class AgentStorage {
 
   private async scanDisk(): Promise<StoredAgentRecord[]> {
     const records: StoredAgentRecord[] = [];
-    let entries: Array<import("node:fs").Dirent> = [];
+    let entries: Dirent[] = [];
     try {
       entries = await fs.readdir(this.baseDir, { withFileTypes: true });
     } catch (error) {
@@ -252,45 +325,43 @@ export class AgentStorage {
       throw error;
     }
 
-    for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith(".json")) {
-        const rootPath = path.join(this.baseDir, entry.name);
-        const rootRecord = await this.readRecordFile(rootPath);
-        if (!rootRecord) {
-          continue;
-        }
-        records.push(rootRecord);
-        this.cache.set(rootRecord.id, rootRecord);
-        this.pathById.set(rootRecord.id, rootPath);
-        this.addIndexedPath(rootRecord.id, rootPath);
-        continue;
-      }
+    const rootRecordPaths = entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map((entry) => path.join(this.baseDir, entry.name));
 
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      const projectDir = path.join(this.baseDir, entry.name);
-      let files: Array<import("node:fs").Dirent> = [];
-      try {
-        files = await fs.readdir(projectDir, { withFileTypes: true });
-      } catch {
-        continue;
-      }
+    const projectDirs = entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(this.baseDir, entry.name));
 
-      for (const file of files) {
-        if (!file.isFile() || !file.name.endsWith(".json")) {
-          continue;
+    const projectFileLists = await Promise.all(
+      projectDirs.map(async (projectDir) => {
+        try {
+          const files = await fs.readdir(projectDir, { withFileTypes: true });
+          return files
+            .filter((file) => file.isFile() && file.name.endsWith(".json"))
+            .map((file) => path.join(projectDir, file.name));
+        } catch {
+          return [];
         }
-        const filePath = path.join(projectDir, file.name);
+      }),
+    );
+
+    const allFilePaths = [...rootRecordPaths, ...projectFileLists.flat()];
+    const loaded = await Promise.all(
+      allFilePaths.map(async (filePath) => {
         const record = await this.readRecordFile(filePath);
-        if (!record) {
-          continue;
-        }
-        records.push(record);
-        this.cache.set(record.id, record);
-        this.pathById.set(record.id, filePath);
-        this.addIndexedPath(record.id, filePath);
-      }
+        return record ? { record, filePath } : null;
+      }),
+    );
+
+    for (const item of loaded) {
+      if (!item) continue;
+      const { record, filePath } = item;
+      records.push(record);
+      this.cache.set(record.id, record);
+      this.indexOwner(record);
+      this.pathById.set(record.id, filePath);
+      this.addIndexedPath(record.id, filePath);
     }
 
     return records;
@@ -300,7 +371,7 @@ export class AgentStorage {
     try {
       const content = await fs.readFile(filePath, "utf8");
       const parsed = JSON.parse(content);
-      return STORED_AGENT_SCHEMA.parse(parsed);
+      return parseStoredAgentRecord(parsed);
     } catch (error) {
       this.logger.error({ err: error, filePath }, "Skipping invalid agent record");
       return null;
@@ -329,6 +400,28 @@ export class AgentStorage {
     }
   }
 
+  private indexOwner(record: StoredAgentRecord): void {
+    this.removeOwnerIndex(record.id);
+    if (record.owner?.kind === "daemon") {
+      const key = daemonExecutionKey(record.owner);
+      const previousAgentId = this.daemonAgentIdsByExecution.get(key);
+      if (previousAgentId && previousAgentId !== record.id) {
+        this.daemonExecutionKeysByAgentId.delete(previousAgentId);
+      }
+      this.daemonAgentIdsByExecution.set(key, record.id);
+      this.daemonExecutionKeysByAgentId.set(record.id, key);
+    }
+  }
+
+  private removeOwnerIndex(agentId: string): void {
+    const key = this.daemonExecutionKeysByAgentId.get(agentId);
+    if (!key) return;
+    if (this.daemonAgentIdsByExecution.get(key) === agentId) {
+      this.daemonAgentIdsByExecution.delete(key);
+    }
+    this.daemonExecutionKeysByAgentId.delete(agentId);
+  }
+
   private async waitForPendingWrite(agentId: string): Promise<void> {
     await (this.pendingWrites.get(agentId) ?? Promise.resolve()).catch(() => undefined);
   }
@@ -345,11 +438,4 @@ function projectDirNameFromCwd(cwd: string): string {
     return sanitizedRoot || "root";
   }
   return prefix + withoutRoot.replace(/[\\/]+/g, "-");
-}
-
-async function writeFileAtomically(targetPath: string, payload: string) {
-  const directory = path.dirname(targetPath);
-  const tempPath = path.join(directory, `.agent.tmp-${process.pid}-${Date.now()}-${randomUUID()}`);
-  await fs.writeFile(tempPath, payload, "utf8");
-  await fs.rename(tempPath, targetPath);
 }

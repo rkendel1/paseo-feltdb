@@ -1,5 +1,12 @@
 import { useCallback, useMemo } from "react";
-import { useSessionStore, type AgentFileExplorerState } from "@/stores/session-store";
+import { useTranslation } from "react-i18next";
+import {
+  useSessionStore,
+  type AgentFileExplorerState,
+  type ExplorerDirectory,
+} from "@/stores/session-store";
+import { explorerFileFromReadResult } from "@/file-explorer/read-result";
+import { parentExplorerPath } from "@/utils/explorer-paths";
 
 function createExplorerState(): AgentFileExplorerState {
   return {
@@ -50,6 +57,7 @@ export function buildWorkspaceExplorerStateKey(scope: FileExplorerWorkspaceScope
 }
 
 export function useFileExplorerActions(params: { serverId: string } & FileExplorerWorkspaceScope) {
+  const { t } = useTranslation();
   const { serverId, workspaceId, workspaceRoot } = params;
   const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
   const setFileExplorer = useSessionStore((state) => state.setFileExplorer);
@@ -82,13 +90,16 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
   );
 
   const requestDirectoryListing = useCallback(
-    async (path: string, options?: { recordHistory?: boolean; setCurrentPath?: boolean }) => {
+    async (
+      path: string,
+      options?: { recordHistory?: boolean; setCurrentPath?: boolean },
+    ): Promise<ExplorerDirectory | null> => {
       if (!workspaceStateKey) {
-        return;
+        return null;
       }
       const normalizedPath = path && path.length > 0 ? path : ".";
       const shouldSetCurrentPath = options?.setCurrentPath ?? true;
-      const shouldRecordHistory = options?.recordHistory ?? (shouldSetCurrentPath ? true : false);
+      const shouldRecordHistory = options?.recordHistory ?? shouldSetCurrentPath;
 
       updateExplorerState((state) => ({
         ...state,
@@ -110,56 +121,55 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
         updateExplorerState((state) => ({
           ...state,
           isLoading: false,
-          lastError: "Workspace is unavailable",
+          lastError: t("workspace.fileExplorer.states.unavailable"),
           pendingRequest: null,
         }));
-        return;
+        return null;
       }
 
       if (!client) {
         updateExplorerState((state) => ({
           ...state,
           isLoading: false,
-          lastError: "Host is not connected",
+          lastError: t("workspace.terminal.hostDisconnected"),
           pendingRequest: null,
         }));
-        return;
+        return null;
       }
 
       try {
-        const payload = await client.exploreFileSystem(
-          normalizedWorkspaceRoot,
-          normalizedPath,
-          "list",
-        );
+        const directory = await client.listDirectory(normalizedWorkspaceRoot, normalizedPath);
         updateExplorerState((state) => {
           const nextState: AgentFileExplorerState = {
             ...state,
             isLoading: false,
-            lastError: payload.error ?? null,
+            lastError: null,
             pendingRequest: null,
             directories: state.directories,
             files: state.files,
           };
 
-          if (!payload.error && payload.directory) {
-            const directories = new Map(state.directories);
-            directories.set(payload.directory.path, payload.directory);
-            nextState.directories = directories;
-          }
+          const directories = new Map(state.directories);
+          directories.set(directory.path, directory);
+          nextState.directories = directories;
 
           return nextState;
         });
+        return directory;
       } catch (error) {
         updateExplorerState((state) => ({
           ...state,
           isLoading: false,
-          lastError: error instanceof Error ? error.message : "Failed to list directory",
+          lastError:
+            error instanceof Error
+              ? error.message
+              : t("workspace.fileExplorer.errors.failedToListDirectory"),
           pendingRequest: null,
         }));
+        return null;
       }
     },
-    [client, normalizedWorkspaceRoot, updateExplorerState, workspaceStateKey],
+    [client, normalizedWorkspaceRoot, t, updateExplorerState, workspaceStateKey],
   );
 
   const requestFilePreview = useCallback(
@@ -179,7 +189,7 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
         updateExplorerState((state) => ({
           ...state,
           isLoading: false,
-          lastError: "Workspace is unavailable",
+          lastError: t("workspace.fileExplorer.states.unavailable"),
           pendingRequest: null,
         }));
         return;
@@ -189,55 +199,50 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
         updateExplorerState((state) => ({
           ...state,
           isLoading: false,
-          lastError: "Host is not connected",
+          lastError: t("workspace.terminal.hostDisconnected"),
           pendingRequest: null,
         }));
         return;
       }
 
       try {
-        const payload = await client.exploreFileSystem(
-          normalizedWorkspaceRoot,
-          normalizedPath,
-          "file",
-        );
+        const file = await client.readFile(normalizedWorkspaceRoot, normalizedPath);
         updateExplorerState((state) => {
           const nextState: AgentFileExplorerState = {
             ...state,
             isLoading: false,
+            lastError: null,
             pendingRequest: null,
             directories: state.directories,
             files: state.files,
           };
 
-          if (!payload.error && payload.file) {
-            const files = new Map(state.files);
-            files.set(payload.file.path, payload.file);
-            nextState.files = files;
-          } else if (payload.error) {
-            nextState.lastError = payload.error;
-          }
+          const files = new Map(state.files);
+          const explorerFile = explorerFileFromReadResult(file);
+          files.set(explorerFile.path, explorerFile);
+          nextState.files = files;
 
           return nextState;
         });
-      } catch {
+      } catch (error) {
         updateExplorerState((state) => ({
           ...state,
           isLoading: false,
+          lastError: error instanceof Error ? error.message : t("panels.file.failedToLoadPreview"),
           pendingRequest: null,
         }));
       }
     },
-    [client, normalizedWorkspaceRoot, updateExplorerState, workspaceStateKey],
+    [client, normalizedWorkspaceRoot, t, updateExplorerState, workspaceStateKey],
   );
 
   const requestFileDownloadToken = useCallback(
     async (path: string) => {
       if (!normalizedWorkspaceRoot) {
-        throw new Error("Workspace is unavailable");
+        throw new Error(t("workspace.fileExplorer.states.unavailable"));
       }
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(t("workspace.terminal.hostDisconnected"));
       }
       const payload = await client.requestDownloadToken(normalizedWorkspaceRoot, path);
       if (payload.error) {
@@ -245,7 +250,81 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
       }
       return payload;
     },
-    [client, normalizedWorkspaceRoot],
+    [client, normalizedWorkspaceRoot, t],
+  );
+
+  const createEntry = useCallback(
+    async (input: { parentPath: string; name: string; kind: "file" | "directory" }) => {
+      if (!client || !normalizedWorkspaceRoot) {
+        return null;
+      }
+      const payload = await client.createFileEntry({
+        cwd: normalizedWorkspaceRoot,
+        ...input,
+      });
+      if (payload.success) {
+        await requestDirectoryListing(input.parentPath, {
+          recordHistory: false,
+          setCurrentPath: false,
+        });
+      }
+      return payload;
+    },
+    [client, normalizedWorkspaceRoot, requestDirectoryListing],
+  );
+
+  const renameEntry = useCallback(
+    async (input: { path: string; name: string }) => {
+      if (!client || !normalizedWorkspaceRoot) {
+        return null;
+      }
+      const payload = await client.renameFileEntry({
+        cwd: normalizedWorkspaceRoot,
+        ...input,
+      });
+      if (payload.success) {
+        await requestDirectoryListing(parentExplorerPath(input.path), {
+          recordHistory: false,
+          setCurrentPath: false,
+        });
+      }
+      return payload;
+    },
+    [client, normalizedWorkspaceRoot, requestDirectoryListing],
+  );
+
+  const duplicateEntry = useCallback(
+    async (path: string) => {
+      if (!client || !normalizedWorkspaceRoot) {
+        return null;
+      }
+      const payload = await client.duplicateFileEntry({ cwd: normalizedWorkspaceRoot, path });
+      if (payload.success) {
+        await requestDirectoryListing(parentExplorerPath(path), {
+          recordHistory: false,
+          setCurrentPath: false,
+        });
+      }
+      return payload;
+    },
+    [client, normalizedWorkspaceRoot, requestDirectoryListing],
+  );
+
+  const deleteEntry = useCallback(
+    async (path: string) => {
+      if (!client || !normalizedWorkspaceRoot) {
+        return null;
+      }
+      const payload = await client.deleteFileEntry({ cwd: normalizedWorkspaceRoot, path });
+      if (payload.success) {
+        await requestDirectoryListing(parentExplorerPath(path), {
+          recordHistory: false,
+          setCurrentPath: false,
+        });
+      }
+      return payload;
+    },
+    [client, normalizedWorkspaceRoot, requestDirectoryListing],
   );
 
   const selectExplorerEntry = useCallback(
@@ -263,6 +342,10 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
     requestDirectoryListing,
     requestFilePreview,
     requestFileDownloadToken,
+    createEntry,
+    renameEntry,
+    duplicateEntry,
+    deleteEntry,
     selectExplorerEntry,
   };
 }

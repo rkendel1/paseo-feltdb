@@ -1,422 +1,56 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
-  createWorktree,
+  createWorktree as createWorktreePrimitive,
   deriveWorktreeProjectHash,
   deletePaseoWorktree,
-  getWorktreeTerminalSpecs,
   isPaseoOwnedWorktreeCwd,
-  listPaseoWorktrees,
-  resolveWorktreeRuntimeEnv,
-  type WorktreeSetupCommandProgressEvent,
-  runWorktreeSetupCommands,
+  mapWorkspaceCwdToWorktree,
   slugify,
+  type CreateWorktreeOptions,
+  type WorktreeConfig,
 } from "./worktree";
-import { getPaseoWorktreeMetadataPath } from "./worktree-metadata.js";
-import { execSync } from "child_process";
-import { mkdtempSync, rmSync, existsSync, realpathSync, writeFileSync, readFileSync } from "fs";
-import { dirname, join } from "path";
+import { execFileSync } from "child_process";
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  existsSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "fs";
+import { join } from "path";
 import { tmpdir } from "os";
-import net from "node:net";
+import { createRealpathAwarePathMatcher } from "./path";
 
-describe("createWorktree", () => {
-  let tempDir: string;
-  let repoDir: string;
-  let paseoHome: string;
+interface LegacyCreateWorktreeTestOptions {
+  branchName: string;
+  cwd: string;
+  baseBranch: string;
+  worktreeSlug: string;
+  runSetup?: boolean;
+  paseoHome?: string;
+}
 
-  beforeEach(() => {
-    // Use realpathSync to resolve symlinks (e.g., /var -> /private/var on macOS)
-    tempDir = realpathSync(mkdtempSync(join(tmpdir(), "worktree-test-")));
-    repoDir = join(tempDir, "test-repo");
-    paseoHome = join(tempDir, "paseo-home");
+function createLegacyWorktreeForTest(
+  options: CreateWorktreeOptions | LegacyCreateWorktreeTestOptions,
+): Promise<WorktreeConfig> {
+  if ("source" in options) {
+    return createWorktreePrimitive(options);
+  }
 
-    // Create a git repo with an initial commit
-    execSync(`mkdir -p ${repoDir}`);
-    execSync("git init -b main", { cwd: repoDir });
-    execSync("git config user.email 'test@test.com'", { cwd: repoDir });
-    execSync("git config user.name 'Test'", { cwd: repoDir });
-    execSync("echo 'hello' > file.txt", { cwd: repoDir });
-    execSync("git add .", { cwd: repoDir });
-    execSync("git -c commit.gpgsign=false commit -m 'initial'", { cwd: repoDir });
+  return createWorktreePrimitive({
+    cwd: options.cwd,
+    worktreeSlug: options.worktreeSlug,
+    source: {
+      kind: "branch-off",
+      baseBranch: options.baseBranch,
+      branchName: options.branchName,
+    },
+    runSetup: options.runSetup ?? true,
+    paseoHome: options.paseoHome,
   });
-
-  afterEach(() => {
-    rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  it("creates a worktree for the current branch (main)", async () => {
-    const projectHash = await deriveWorktreeProjectHash(repoDir);
-    const result = await createWorktree({
-      branchName: "main",
-      cwd: repoDir,
-      baseBranch: "main",
-      worktreeSlug: "hello-world",
-      paseoHome,
-    });
-
-    expect(result.worktreePath).toBe(join(paseoHome, "worktrees", projectHash, "hello-world"));
-    expect(existsSync(result.worktreePath)).toBe(true);
-    expect(existsSync(join(result.worktreePath, "file.txt"))).toBe(true);
-    const metadataPath = getPaseoWorktreeMetadataPath(result.worktreePath);
-    expect(existsSync(metadataPath)).toBe(true);
-    const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
-    expect(metadata).toMatchObject({ version: 1, baseRefName: "main" });
-  });
-
-  it.skip("detects paseo-owned worktrees across realpath differences (macOS /var vs /private/var)", async () => {
-    // Intentionally create repo using the non-realpath tmpdir() variant (often /var/... on macOS).
-    const varTempDir = mkdtempSync(join(tmpdir(), "worktree-realpath-test-"));
-    const privateTempDir = realpathSync(varTempDir);
-    const varRepoDir = join(varTempDir, "test-repo");
-    const varPaseoHome = join(varTempDir, "paseo-home");
-    execSync(`mkdir -p ${varRepoDir}`);
-    execSync("git init -b main", { cwd: varRepoDir });
-    execSync("git config user.email 'test@test.com'", { cwd: varRepoDir });
-    execSync("git config user.name 'Test'", { cwd: varRepoDir });
-    execSync("echo 'hello' > file.txt", { cwd: varRepoDir });
-    execSync("git add .", { cwd: varRepoDir });
-    execSync("git -c commit.gpgsign=false commit -m 'initial'", { cwd: varRepoDir });
-
-    const result = await createWorktree({
-      branchName: "main",
-      cwd: varRepoDir,
-      baseBranch: "main",
-      worktreeSlug: "realpath-test",
-      paseoHome: varPaseoHome,
-    });
-
-    const projectHash = await deriveWorktreeProjectHash(varRepoDir);
-    const privateWorktreePath = join(
-      privateTempDir,
-      "paseo-home",
-      "worktrees",
-      projectHash,
-      "realpath-test",
-    );
-    expect(existsSync(privateWorktreePath)).toBe(true);
-
-    const ownership = await isPaseoOwnedWorktreeCwd(privateWorktreePath, {
-      paseoHome: varPaseoHome,
-    });
-    expect(ownership.allowed).toBe(true);
-
-    rmSync(varTempDir, { recursive: true, force: true });
-  });
-
-  it("reports repoRoot as the repository root for paseo-owned worktrees", async () => {
-    const result = await createWorktree({
-      branchName: "main",
-      cwd: repoDir,
-      baseBranch: "main",
-      worktreeSlug: "repo-root-check",
-      paseoHome,
-    });
-
-    const ownership = await isPaseoOwnedWorktreeCwd(result.worktreePath, { paseoHome });
-    expect(ownership.allowed).toBe(true);
-    expect(ownership.repoRoot).toBe(repoDir);
-  });
-
-  it("treats non-git directories as non-worktrees without throwing", async () => {
-    const nonGitDir = join(tempDir, "not-a-repo");
-    execSync(`mkdir -p ${nonGitDir}`);
-
-    const ownership = await isPaseoOwnedWorktreeCwd(nonGitDir, { paseoHome });
-
-    expect(ownership.allowed).toBe(false);
-    expect(ownership.worktreePath).toBe(realpathSync(nonGitDir));
-  });
-
-  it("creates a worktree with a new branch", async () => {
-    const projectHash = await deriveWorktreeProjectHash(repoDir);
-    const result = await createWorktree({
-      branchName: "feature-branch",
-      cwd: repoDir,
-      baseBranch: "main",
-      worktreeSlug: "my-feature",
-      paseoHome,
-    });
-
-    expect(result.worktreePath).toBe(join(paseoHome, "worktrees", projectHash, "my-feature"));
-    expect(existsSync(result.worktreePath)).toBe(true);
-
-    // Verify branch was created
-    const branches = execSync("git branch", { cwd: repoDir }).toString();
-    expect(branches).toContain("feature-branch");
-    const metadataPath = getPaseoWorktreeMetadataPath(result.worktreePath);
-    const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
-    expect(metadata).toMatchObject({ version: 1, baseRefName: "main" });
-  });
-
-  it("fails with invalid branch name", async () => {
-    await expect(
-      createWorktree({
-        branchName: "INVALID_UPPERCASE",
-        cwd: repoDir,
-        baseBranch: "main",
-        worktreeSlug: "test",
-      }),
-    ).rejects.toThrow("Invalid branch name");
-  });
-
-  it("handles branch name collision by adding suffix", async () => {
-    const projectHash = await deriveWorktreeProjectHash(repoDir);
-    // Create a branch named "hello" first
-    execSync("git branch hello", { cwd: repoDir });
-
-    const result = await createWorktree({
-      branchName: "main",
-      cwd: repoDir,
-      baseBranch: "main",
-      worktreeSlug: "hello",
-      paseoHome,
-    });
-
-    // Should create branch "hello-1" since "hello" exists
-    expect(result.worktreePath).toBe(join(paseoHome, "worktrees", projectHash, "hello"));
-    expect(existsSync(result.worktreePath)).toBe(true);
-
-    const branches = execSync("git branch", { cwd: repoDir }).toString();
-    expect(branches).toContain("hello-1");
-  });
-
-  it("handles multiple collisions", async () => {
-    // Create branches "hello" and "hello-1"
-    execSync("git branch hello", { cwd: repoDir });
-    execSync("git branch hello-1", { cwd: repoDir });
-
-    const result = await createWorktree({
-      branchName: "main",
-      cwd: repoDir,
-      baseBranch: "main",
-      worktreeSlug: "hello",
-      paseoHome,
-    });
-
-    expect(existsSync(result.worktreePath)).toBe(true);
-
-    const branches = execSync("git branch", { cwd: repoDir }).toString();
-    expect(branches).toContain("hello-2");
-  });
-
-  it("runs setup commands from paseo.json", async () => {
-    // Create paseo.json with setup commands
-    const paseoConfig = {
-      worktree: {
-        setup: [
-          'echo "source=$PASEO_SOURCE_CHECKOUT_PATH" > setup.log',
-          'echo "root_alias=$PASEO_ROOT_PATH" >> setup.log',
-          'echo "worktree=$PASEO_WORKTREE_PATH" >> setup.log',
-          'echo "branch=$PASEO_BRANCH_NAME" >> setup.log',
-          'echo "port=$PASEO_WORKTREE_PORT" >> setup.log',
-        ],
-      },
-    };
-    writeFileSync(join(repoDir, "paseo.json"), JSON.stringify(paseoConfig));
-    execSync("git add paseo.json && git -c commit.gpgsign=false commit -m 'add paseo.json'", {
-      cwd: repoDir,
-    });
-
-    const result = await createWorktree({
-      branchName: "main",
-      cwd: repoDir,
-      baseBranch: "main",
-      worktreeSlug: "setup-test",
-      paseoHome,
-    });
-
-    expect(existsSync(result.worktreePath)).toBe(true);
-
-    // Verify setup ran and env vars were available
-    const setupLog = readFileSync(join(result.worktreePath, "setup.log"), "utf8");
-    expect(setupLog).toContain(`source=${repoDir}`);
-    expect(setupLog).toContain(`root_alias=${repoDir}`);
-    expect(setupLog).toContain(`worktree=${result.worktreePath}`);
-    expect(setupLog).toContain("branch=setup-test");
-    const portLine = setupLog.split("\n").find((line) => line.startsWith("port="));
-    expect(portLine).toBeDefined();
-    const portValue = Number(portLine?.slice("port=".length));
-    expect(Number.isInteger(portValue)).toBe(true);
-    expect(portValue).toBeGreaterThan(0);
-  });
-
-  it("does not run setup commands when runSetup=false", async () => {
-    const paseoConfig = {
-      worktree: {
-        setup: ['echo "setup ran" > setup.log'],
-      },
-    };
-    writeFileSync(join(repoDir, "paseo.json"), JSON.stringify(paseoConfig));
-    execSync("git add paseo.json && git -c commit.gpgsign=false commit -m 'add paseo.json'", {
-      cwd: repoDir,
-    });
-
-    const result = await createWorktree({
-      branchName: "main",
-      cwd: repoDir,
-      baseBranch: "main",
-      worktreeSlug: "no-setup-test",
-      runSetup: false,
-      paseoHome,
-    });
-
-    expect(existsSync(result.worktreePath)).toBe(true);
-    expect(existsSync(join(result.worktreePath, "setup.log"))).toBe(false);
-  });
-
-  it("streams setup command progress events while commands are executing", async () => {
-    const paseoConfig = {
-      worktree: {
-        setup: ['echo "first line"; echo "second line" 1>&2'],
-      },
-    };
-    writeFileSync(join(repoDir, "paseo.json"), JSON.stringify(paseoConfig));
-    execSync("git add paseo.json && git -c commit.gpgsign=false commit -m 'add streaming setup'", {
-      cwd: repoDir,
-    });
-
-    const progressEvents: WorktreeSetupCommandProgressEvent[] = [];
-    const results = await runWorktreeSetupCommands({
-      worktreePath: repoDir,
-      branchName: "main",
-      cleanupOnFailure: false,
-      onEvent: (event) => {
-        progressEvents.push(event);
-      },
-    });
-
-    expect(results).toHaveLength(1);
-    expect(progressEvents.some((event) => event.type === "command_started")).toBe(true);
-    expect(progressEvents.some((event) => event.type === "output")).toBe(true);
-    expect(progressEvents.some((event) => event.type === "command_completed")).toBe(true);
-  });
-
-  it("reuses persisted worktree runtime port across resolutions", async () => {
-    const result = await createWorktree({
-      branchName: "main",
-      cwd: repoDir,
-      baseBranch: "main",
-      worktreeSlug: "runtime-env-port-reuse",
-      runSetup: false,
-      paseoHome,
-    });
-
-    const first = await resolveWorktreeRuntimeEnv({
-      worktreePath: result.worktreePath,
-      branchName: result.branchName,
-    });
-    const second = await resolveWorktreeRuntimeEnv({
-      worktreePath: result.worktreePath,
-      branchName: result.branchName,
-    });
-
-    expect(second.PASEO_WORKTREE_PORT).toBe(first.PASEO_WORKTREE_PORT);
-  });
-
-  it("fails runtime env resolution when persisted port is in use", async () => {
-    const result = await createWorktree({
-      branchName: "main",
-      cwd: repoDir,
-      baseBranch: "main",
-      worktreeSlug: "runtime-env-port-conflict",
-      runSetup: false,
-      paseoHome,
-    });
-
-    const env = await resolveWorktreeRuntimeEnv({
-      worktreePath: result.worktreePath,
-      branchName: result.branchName,
-    });
-    const port = Number(env.PASEO_WORKTREE_PORT);
-
-    const server = net.createServer();
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(port, () => resolve());
-    });
-
-    await expect(
-      resolveWorktreeRuntimeEnv({
-        worktreePath: result.worktreePath,
-        branchName: result.branchName,
-      }),
-    ).rejects.toThrow(`Persisted worktree port ${port} is already in use`);
-
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      });
-    });
-  });
-
-  it("cleans up worktree if setup command fails", async () => {
-    // Create paseo.json with failing setup command
-    const paseoConfig = {
-      worktree: {
-        setup: ["exit 1"],
-      },
-    };
-    writeFileSync(join(repoDir, "paseo.json"), JSON.stringify(paseoConfig));
-    execSync("git add paseo.json && git -c commit.gpgsign=false commit -m 'add paseo.json'", {
-      cwd: repoDir,
-    });
-
-    const expectedWorktreePath = join(paseoHome, "worktrees", "test-repo", "fail-test");
-
-    await expect(
-      createWorktree({
-        branchName: "main",
-        cwd: repoDir,
-        baseBranch: "main",
-        worktreeSlug: "fail-test",
-        paseoHome,
-      }),
-    ).rejects.toThrow("Worktree setup command failed");
-
-    // Verify worktree was cleaned up
-    expect(existsSync(expectedWorktreePath)).toBe(false);
-  });
-
-  it("reads worktree terminal specs from paseo.json with optional name", async () => {
-    const paseoConfig = {
-      worktree: {
-        terminals: [
-          { name: "Dev Server", command: "npm run dev" },
-          { command: "cd packages/app && npm run dev" },
-        ],
-      },
-    };
-    writeFileSync(join(repoDir, "paseo.json"), JSON.stringify(paseoConfig));
-
-    expect(getWorktreeTerminalSpecs(repoDir)).toEqual([
-      { name: "Dev Server", command: "npm run dev" },
-      { command: "cd packages/app && npm run dev" },
-    ]);
-  });
-
-  it("filters invalid worktree terminal specs", async () => {
-    const paseoConfig = {
-      worktree: {
-        terminals: [
-          null,
-          {},
-          { name: "   ", command: "   " },
-          { name: " Watch ", command: "npm run watch", cwd: "packages/app" },
-          { name: 123, command: "npm run test" },
-        ],
-      },
-    };
-    writeFileSync(join(repoDir, "paseo.json"), JSON.stringify(paseoConfig));
-
-    expect(getWorktreeTerminalSpecs(repoDir)).toEqual([
-      { name: "Watch", command: "npm run watch" },
-      { command: "npm run test" },
-    ]);
-  });
-});
+}
 
 describe("paseo worktree manager", () => {
   let tempDir: string;
@@ -428,175 +62,245 @@ describe("paseo worktree manager", () => {
     repoDir = join(tempDir, "test-repo");
     paseoHome = join(tempDir, "paseo-home");
 
-    execSync(`mkdir -p ${repoDir}`);
-    execSync("git init -b main", { cwd: repoDir });
-    execSync("git config user.email 'test@test.com'", { cwd: repoDir });
-    execSync("git config user.name 'Test'", { cwd: repoDir });
-    execSync("echo 'hello' > file.txt", { cwd: repoDir });
-    execSync("git add .", { cwd: repoDir });
-    execSync("git -c commit.gpgsign=false commit -m 'initial'", { cwd: repoDir });
+    mkdirSync(repoDir, { recursive: true });
+    execFileSync("git", ["init", "-b", "main"], { cwd: repoDir });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoDir });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repoDir });
+    writeFileSync(join(repoDir, "file.txt"), "hello\n");
+    execFileSync("git", ["add", "."], { cwd: repoDir });
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "initial"], {
+      cwd: repoDir,
+    });
   });
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("isolates worktree roots for repositories that share the same directory name", async () => {
-    const repoA = join(tempDir, "team-a", "test-repo");
-    const repoB = join(tempDir, "team-b", "test-repo");
-
-    for (const repo of [repoA, repoB]) {
-      execSync(`mkdir -p ${repo}`);
-      execSync("git init -b main", { cwd: repo });
-      execSync("git config user.email 'test@test.com'", { cwd: repo });
-      execSync("git config user.name 'Test'", { cwd: repo });
-      execSync("echo 'hello' > file.txt", { cwd: repo });
-      execSync("git add .", { cwd: repo });
-      execSync("git -c commit.gpgsign=false commit -m 'initial'", { cwd: repo });
-    }
-
-    const fromRepoA = await createWorktree({
-      branchName: "main",
-      cwd: repoA,
+  it("treats a worktree as paseo-owned even when its .git admin is missing", async () => {
+    const created = await createLegacyWorktreeForTest({
+      branchName: "orphan-admin-branch",
+      cwd: repoDir,
       baseBranch: "main",
-      worktreeSlug: "alpha",
-      paseoHome,
-    });
-    const fromRepoB = await createWorktree({
-      branchName: "main",
-      cwd: repoB,
-      baseBranch: "main",
-      worktreeSlug: "alpha",
+      worktreeSlug: "orphan-admin",
       paseoHome,
     });
 
-    expect(dirname(fromRepoA.worktreePath)).not.toBe(dirname(fromRepoB.worktreePath));
-    expect(fromRepoA.worktreePath.endsWith("alpha-1")).toBe(false);
-    expect(fromRepoB.worktreePath.endsWith("alpha-1")).toBe(false);
+    // Simulate a previous archive attempt that removed git's admin dir but left
+    // the working tree on disk (e.g. because file churn prevented full cleanup).
+    rmSync(join(repoDir, ".git", "worktrees", "orphan-admin"), {
+      recursive: true,
+      force: true,
+    });
+    expect(existsSync(created.worktreePath)).toBe(true);
 
-    const repoAWorktrees = await listPaseoWorktrees({ cwd: repoA, paseoHome });
-    const repoBWorktrees = await listPaseoWorktrees({ cwd: repoB, paseoHome });
-
-    expect(repoAWorktrees.map((entry) => entry.path)).toEqual([fromRepoA.worktreePath]);
-    expect(repoBWorktrees.map((entry) => entry.path)).toEqual([fromRepoB.worktreePath]);
+    const ownership = await isPaseoOwnedWorktreeCwd(created.worktreePath, { paseoHome });
+    expect(ownership.allowed).toBe(true);
+    await expect(
+      isPaseoOwnedWorktreeCwd(join(created.worktreePath, "packages", "app"), { paseoHome }),
+    ).resolves.toMatchObject({
+      allowed: true,
+      worktreePath: created.worktreePath,
+    });
   });
 
-  it("lists and deletes paseo worktrees under ~/.paseo/worktrees/{hash}", async () => {
-    const first = await createWorktree({
-      branchName: "main",
-      cwd: repoDir,
-      baseBranch: "main",
-      worktreeSlug: "alpha",
-      paseoHome,
-    });
-    const second = await createWorktree({
-      branchName: "main",
-      cwd: repoDir,
-      baseBranch: "main",
-      worktreeSlug: "beta",
-      paseoHome,
-    });
+  it("rejects paths that are not under the paseo worktrees root", async () => {
+    const outsidePath = join(tempDir, "outside-paseo-home");
+    mkdirSync(outsidePath, { recursive: true });
 
-    const worktrees = await listPaseoWorktrees({ cwd: repoDir, paseoHome });
-    const paths = worktrees.map((worktree) => worktree.path).sort();
-    expect(paths).toEqual([first.worktreePath, second.worktreePath].sort());
+    const ownership = await isPaseoOwnedWorktreeCwd(outsidePath, { paseoHome });
 
-    await deletePaseoWorktree({ cwd: repoDir, worktreePath: first.worktreePath, paseoHome });
-    expect(existsSync(first.worktreePath)).toBe(false);
-
-    const remaining = await listPaseoWorktrees({ cwd: repoDir, paseoHome });
-    expect(remaining.map((worktree) => worktree.path)).toEqual([second.worktreePath]);
+    expect(ownership.allowed).toBe(false);
   });
 
-  it("deletes a paseo worktree even when given a subdirectory path", async () => {
-    const created = await createWorktree({
-      branchName: "main",
+  it("reports the source checkout root separately from Git's common directory", async () => {
+    const created = await createLegacyWorktreeForTest({
+      branchName: "placement-root-branch",
       cwd: repoDir,
       baseBranch: "main",
-      worktreeSlug: "alpha",
+      worktreeSlug: "placement-root",
       paseoHome,
     });
 
-    const nestedDir = join(created.worktreePath, "nested", "dir");
-    execSync(`mkdir -p ${nestedDir}`);
+    const ownership = await isPaseoOwnedWorktreeCwd(created.worktreePath, { paseoHome });
 
-    await deletePaseoWorktree({ cwd: repoDir, worktreePath: nestedDir, paseoHome });
-    expect(existsSync(created.worktreePath)).toBe(false);
-
-    const remaining = await listPaseoWorktrees({ cwd: repoDir, paseoHome });
-    expect(remaining.some((worktree) => worktree.path === created.worktreePath)).toBe(false);
-  });
-
-  it("runs destroy commands from paseo.json before deleting a worktree", async () => {
-    const paseoConfig = {
-      worktree: {
-        destroy: [
-          'echo "source=$PASEO_SOURCE_CHECKOUT_PATH" > "$PASEO_SOURCE_CHECKOUT_PATH/destroy.log"',
-          'echo "root_alias=$PASEO_ROOT_PATH" >> "$PASEO_SOURCE_CHECKOUT_PATH/destroy.log"',
-          'echo "worktree=$PASEO_WORKTREE_PATH" >> "$PASEO_SOURCE_CHECKOUT_PATH/destroy.log"',
-          'echo "branch=$PASEO_BRANCH_NAME" >> "$PASEO_SOURCE_CHECKOUT_PATH/destroy.log"',
-        ],
-      },
-    };
-    writeFileSync(join(repoDir, "paseo.json"), JSON.stringify(paseoConfig));
-    execSync("git add paseo.json && git -c commit.gpgsign=false commit -m 'add destroy commands'", {
-      cwd: repoDir,
-    });
-
-    const created = await createWorktree({
-      branchName: "destroy-branch",
-      cwd: repoDir,
-      baseBranch: "main",
-      worktreeSlug: "destroy-test",
-      paseoHome,
-    });
-
-    await deletePaseoWorktree({ cwd: repoDir, worktreePath: created.worktreePath, paseoHome });
-    expect(existsSync(created.worktreePath)).toBe(false);
-
-    const destroyLog = readFileSync(join(repoDir, "destroy.log"), "utf8");
-    expect(destroyLog).toContain(`source=${repoDir}`);
-    expect(destroyLog).toContain(`root_alias=${repoDir}`);
-    expect(destroyLog).toContain(`worktree=${created.worktreePath}`);
-    expect(destroyLog).toContain("branch=destroy-branch");
-  });
-
-  it("does not remove worktree when a destroy command fails", async () => {
-    const paseoConfig = {
-      worktree: {
-        destroy: [
-          'echo "started" > "$PASEO_SOURCE_CHECKOUT_PATH/destroy-start.log"',
-          "echo boom 1>&2; exit 9",
-        ],
-      },
-    };
-    writeFileSync(join(repoDir, "paseo.json"), JSON.stringify(paseoConfig));
-    execSync(
-      "git add paseo.json && git -c commit.gpgsign=false commit -m 'add failing destroy commands'",
-      { cwd: repoDir },
+    expect(ownership.allowed).toBe(true);
+    expect(createRealpathAwarePathMatcher(repoDir)(ownership.repoRoot ?? "")).toBe(true);
+    expect(createRealpathAwarePathMatcher(created.worktreePath)(ownership.worktreePath ?? "")).toBe(
+      true,
     );
+  });
 
-    const created = await createWorktree({
-      branchName: "destroy-failure-branch",
+  it("maps only root-contained workspace paths into a replacement worktree", () => {
+    const sourceWorktreePath = join(tempDir, "source-worktree");
+    const targetWorktreePath = join(tempDir, "target-worktree");
+    const nestedWorkspaceCwd = join(sourceWorktreePath, "packages", "app");
+
+    expect(
+      mapWorkspaceCwdToWorktree({
+        sourceWorktreePath,
+        workspaceCwd: sourceWorktreePath,
+        targetWorktreePath,
+      }),
+    ).toBe(targetWorktreePath);
+    expect(
+      mapWorkspaceCwdToWorktree({
+        sourceWorktreePath,
+        workspaceCwd: nestedWorkspaceCwd,
+        targetWorktreePath,
+      }),
+    ).toBe(join(targetWorktreePath, "packages", "app"));
+    expect(() =>
+      mapWorkspaceCwdToWorktree({
+        sourceWorktreePath,
+        workspaceCwd: join(tempDir, "outside-worktree"),
+        targetWorktreePath,
+      }),
+    ).toThrow("outside its source worktree");
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "maps a realpath-equivalent source workspace into the matching target subdirectory",
+    () => {
+      const sourceWorktreePath = join(tempDir, "source-worktree");
+      const workspaceCwd = join(sourceWorktreePath, "packages", "app");
+      const sourceAlias = join(tempDir, "source-alias");
+      const targetWorktreePath = join(tempDir, "target-worktree");
+      mkdirSync(workspaceCwd, { recursive: true });
+      symlinkSync(sourceWorktreePath, sourceAlias, "dir");
+
+      expect(
+        mapWorkspaceCwdToWorktree({
+          sourceWorktreePath: sourceAlias,
+          workspaceCwd,
+          targetWorktreePath,
+        }),
+      ).toBe(join(targetWorktreePath, "packages", "app"));
+    },
+  );
+
+  it("rejects the worktrees root itself and the per-repo hash dir", async () => {
+    const projectHash = await deriveWorktreeProjectHash(repoDir);
+    const worktreesRoot = join(paseoHome, "worktrees");
+    const projectHashDir = join(worktreesRoot, projectHash);
+    mkdirSync(projectHashDir, { recursive: true });
+
+    await expect(isPaseoOwnedWorktreeCwd(worktreesRoot, { paseoHome })).resolves.toMatchObject({
+      allowed: false,
+    });
+    await expect(isPaseoOwnedWorktreeCwd(projectHashDir, { paseoHome })).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it("deletes a worktree whose .git admin dir has already been removed", async () => {
+    const created = await createLegacyWorktreeForTest({
+      branchName: "orphan-delete-branch",
       cwd: repoDir,
       baseBranch: "main",
-      worktreeSlug: "destroy-failure-test",
+      worktreeSlug: "orphan-delete",
       paseoHome,
     });
 
+    rmSync(join(repoDir, ".git", "worktrees", "orphan-delete"), {
+      recursive: true,
+      force: true,
+    });
+    expect(existsSync(created.worktreePath)).toBe(true);
+
+    await deletePaseoWorktree({
+      cwd: repoDir,
+      worktreePath: created.worktreePath,
+      paseoHome,
+    });
+
+    expect(existsSync(created.worktreePath)).toBe(false);
+  });
+
+  it("is idempotent: deleting an already-absent worktree succeeds", async () => {
+    const created = await createLegacyWorktreeForTest({
+      branchName: "idempotent-delete-branch",
+      cwd: repoDir,
+      baseBranch: "main",
+      worktreeSlug: "idempotent-delete",
+      paseoHome,
+    });
+
+    await deletePaseoWorktree({
+      cwd: repoDir,
+      worktreePath: created.worktreePath,
+      paseoHome,
+    });
+    expect(existsSync(created.worktreePath)).toBe(false);
+
+    // Second call — nothing left on disk and no admin entry — must not throw.
     await expect(
       deletePaseoWorktree({ cwd: repoDir, worktreePath: created.worktreePath, paseoHome }),
-    ).rejects.toThrow("Worktree destroy command failed");
+    ).resolves.toBeUndefined();
+  });
 
-    expect(existsSync(created.worktreePath)).toBe(true);
-    expect(existsSync(join(repoDir, "destroy-start.log"))).toBe(true);
+  it("deletes a worktree when the parent repo root is not available", async () => {
+    const created = await createLegacyWorktreeForTest({
+      branchName: "no-cwd-branch",
+      cwd: repoDir,
+      baseBranch: "main",
+      worktreeSlug: "no-cwd",
+      paseoHome,
+    });
+
+    const ownership = await isPaseoOwnedWorktreeCwd(created.worktreePath, { paseoHome });
+    expect(ownership.allowed).toBe(true);
+    expect(ownership.worktreeRoot).toBeTruthy();
+
+    // Simulate the handler path when git has forgotten about the worktree:
+    // caller forwards the path-derived worktreesRoot from the ownership check.
+    await deletePaseoWorktree({
+      cwd: null,
+      worktreePath: created.worktreePath,
+      worktreesRoot: ownership.worktreeRoot,
+      paseoHome,
+    });
+
+    expect(existsSync(created.worktreePath)).toBe(false);
   });
 });
 
 describe("slugify", () => {
+  function expectValidHostnameLabel(label: string): void {
+    expect(label.length).toBeGreaterThan(0);
+    expect(label.length).toBeLessThanOrEqual(63);
+    expect(label).toMatch(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/);
+  }
+
   it("converts to lowercase kebab-case", () => {
     expect(slugify("Hello World")).toBe("hello-world");
     expect(slugify("FOO_BAR")).toBe("foo-bar");
+    expect(slugify("My GREAT App")).toBe("my-great-app");
+  });
+
+  it("replaces dots with hyphens", () => {
+    expect(slugify("my.app")).toBe("my-app");
+    expect(slugify("v1.2.3")).toBe("v1-2-3");
+  });
+
+  it("collapses multiple consecutive spaces to one hyphen", () => {
+    expect(slugify("feature   cool    stuff")).toBe("feature-cool-stuff");
+  });
+
+  it("replaces slashes with hyphens", () => {
+    expect(slugify("feature/cool stuff")).toBe("feature-cool-stuff");
+    expect(slugify("owner/repo")).toBe("owner-repo");
+  });
+
+  it("strips unsupported unicode characters", () => {
+    expect(slugify("café")).toBe("caf");
+    expect(slugify("日本語")).toBe("");
+  });
+
+  it("removes leading and trailing punctuation", () => {
+    expect(slugify("-foo-")).toBe("foo");
+    expect(slugify("__bar__")).toBe("bar");
+    expect(slugify(".baz.")).toBe("baz");
   });
 
   it("truncates long strings at word boundary", () => {
@@ -604,6 +308,7 @@ describe("slugify", () => {
       "https-stackoverflow-com-questions-68349031-only-run-actions-on-non-draft-pull-request";
     const result = slugify(longInput);
     expect(result.length).toBeLessThanOrEqual(50);
+    expectValidHostnameLabel(result);
     expect(result).toBe("https-stackoverflow-com-questions-68349031-only");
   });
 
@@ -612,5 +317,35 @@ describe("slugify", () => {
     const result = slugify(longInput);
     expect(result.length).toBe(50);
     expect(result.endsWith("-")).toBe(false);
+    expectValidHostnameLabel(result);
+  });
+
+  it("keeps very long names within the hostname label length limit", () => {
+    const result = slugify("Beta Build ".repeat(12));
+
+    expect(result.length).toBeLessThanOrEqual(63);
+    expectValidHostnameLabel(result);
+  });
+
+  it("returns empty when names collapse to empty", () => {
+    expect(slugify("---")).toBe("");
+    expect(slugify("***")).toBe("");
+    expect(slugify("日本語")).toBe("");
+  });
+
+  it("is idempotent for representative inputs", () => {
+    const inputs = [
+      "my.app",
+      "feature/cool stuff",
+      "  Café Launch  ",
+      "__bar__",
+      "Beta Build ".repeat(12),
+      "release***candidate",
+    ];
+
+    for (const input of inputs) {
+      const slug = slugify(input);
+      expect(slugify(slug)).toBe(slug);
+    }
   });
 });

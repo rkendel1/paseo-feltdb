@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import type { ToolCallDetail } from "../../agent-sdk-types.js";
-import { stripCwdPrefix } from "../../../../shared/path-utils.js";
+import { stripCwdPrefix } from "@getpaseo/protocol/path-utils";
 import {
   ToolEditInputSchema,
   ToolEditOutputSchema,
@@ -20,9 +20,9 @@ import {
   toolDetailBranchByNameWithCwd,
 } from "../tool-call-detail-primitives.js";
 
-export type CodexToolDetailContext = {
+export interface CodexToolDetailContext {
   cwd?: string | null;
-};
+}
 
 const CodexToolEnvelopeSchema = z
   .object({

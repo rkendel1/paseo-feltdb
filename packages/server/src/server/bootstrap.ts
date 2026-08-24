@@ -1,14 +1,14 @@
 import express from "express";
-import { createServer as createHTTPServer } from "http";
-import { createReadStream, unlinkSync, existsSync } from "fs";
-import { stat } from "fs/promises";
+import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
+import { constants, existsSync, unlinkSync } from "fs";
+import { open, rm } from "fs/promises";
 import { randomUUID } from "node:crypto";
 import { hostname as getHostname } from "node:os";
 import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { Logger } from "pino";
+import { z } from "zod";
+import { createBranchChangeRouteHandler } from "./script-route-branch-handler.js";
 
 export type ListenTarget =
   | { type: "tcp"; host: string; port: number }
@@ -66,12 +66,15 @@ export function parseListenString(listen: string): ListenTarget {
   }
   // 6. host:port — TCP
   if (listen.includes(":")) {
-    const [host, portStr] = listen.split(":");
+    const lastColonIdx = listen.lastIndexOf(":");
+    const host = listen.slice(0, lastColonIdx);
+    const portStr = listen.slice(lastColonIdx + 1);
     const parsedPort = parseInt(portStr, 10);
     if (!Number.isFinite(parsedPort)) {
       throw new Error(`Invalid port in listen string: ${listen}`);
     }
-    return { type: "tcp", host: host || "127.0.0.1", port: parsedPort };
+    const cleanHost = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+    return { type: "tcp", host: cleanHost || "127.0.0.1", port: parsedPort };
   }
   throw new Error(`Invalid listen string: ${listen}`);
 }
@@ -86,93 +89,349 @@ function formatListenTarget(listenTarget: ListenTarget | null): string | null {
   return listenTarget.path;
 }
 
+export async function fanOutReconciledWorkspaceUpdates(input: {
+  sessions: Iterable<{
+    syncWorkspaceGitObserversForExternalWorkspaceIds(workspaceIds: Iterable<string>): Promise<void>;
+    emitWorkspaceUpdatesForExternalWorkspaceIds(workspaceIds: Iterable<string>): Promise<void>;
+  }>;
+  workspaceIds: readonly string[];
+  logger: Pick<Logger, "warn">;
+}): Promise<void> {
+  await Promise.all(
+    Array.from(input.sessions, async (session) => {
+      try {
+        await session.syncWorkspaceGitObserversForExternalWorkspaceIds(input.workspaceIds);
+      } catch (error) {
+        input.logger.warn(
+          { err: error },
+          "Failed to sync workspace Git observers after reconciliation",
+        );
+      }
+      try {
+        await session.emitWorkspaceUpdatesForExternalWorkspaceIds(input.workspaceIds);
+      } catch (error) {
+        input.logger.warn({ err: error }, "Failed to emit workspace updates after reconciliation");
+      }
+    }),
+  );
+}
+
 import { VoiceAssistantWebSocketServer } from "./websocket-server.js";
+import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
+import { createWorkspaceLabelService } from "./workspace-labels/index.js";
+import { createGitHubService } from "../services/github-service.js";
+import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
+import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
+import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import type { OpenAiSpeechProviderConfig } from "./speech/providers/openai/config.js";
 import type { LocalSpeechProviderConfig } from "./speech/providers/local/config.js";
 import type { RequestedSpeechProviders } from "./speech/speech-types.js";
-import { initializeSpeechRuntime } from "./speech/speech-runtime.js";
+import { createSpeechService } from "./speech/speech-runtime.js";
 import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
-import { createAllClients, shutdownProviders } from "./agent/provider-registry.js";
+import {
+  createPaseoToolCatalog,
+  type PaseoToolHostDependencies,
+} from "./agent/tools/paseo-tools.js";
+import type { PaseoToolRuntimeContext } from "./agent/tools/types.js";
+import { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
-import { FileBackedProjectRegistry, FileBackedWorkspaceRegistry } from "./workspace-registry.js";
-import { createTerminalManager, type TerminalManager } from "../terminal/terminal-manager.js";
-import { createConnectionOfferV2, encodeOfferToFragmentUrl } from "./connection-offer.js";
+import { WorkspaceReconciliationService } from "./workspace-reconciliation-service.js";
+import {
+  FileBackedProjectRegistry,
+  FileBackedWorkspaceRegistry,
+  type WorkspaceArchiveContext,
+} from "./workspace-registry.js";
+import { CheckoutDiffManager } from "./checkout-diff-manager.js";
+import { ScheduleService } from "./schedule/service.js";
+import { DaemonConfigStore, type MutableDaemonConfig } from "./daemon-config-store.js";
+import { createOrchestrationSkills } from "./orchestration-skills/index.js";
+import { resolveConfigFromPersisted, type CliConfigOverrides } from "./config.js";
+import { BrowserToolsBroker } from "./browser-tools/broker.js";
+import { DaemonConfigBrowserToolsPolicy } from "./browser-tools/policy.js";
+import { WorkspaceGitServiceImpl } from "./workspace-git-service.js";
+import { resolveWorkspaceIdForPath } from "./resolve-workspace-id-for-path.js";
+import {
+  archiveByScope,
+  archivePersistedWorkspaceRecord,
+  killTerminalsForWorkspace,
+  type ActiveWorkspaceRef,
+} from "./workspace-archive-service.js";
+import { setupAutoArchiveOnMerge } from "./auto-archive-on-merge/index.js";
+import { wrapSessionMessage, type SessionOutboundMessage } from "./messages.js";
+import type { TerminalManager } from "../terminal/terminal-manager.js";
+import { createConfiguredTerminalManager } from "../terminal/terminal-manager-factory.js";
+import { applyTerminalAgentHookSetting } from "../terminal/agent-hooks/terminal-agent-hook-setting.js";
 import { loadOrCreateDaemonKeyPair } from "./daemon-keypair.js";
-import { generateLocalPairingOffer } from "./pairing-offer.js";
-import { startRelayTransport, type RelayTransportController } from "./relay-transport.js";
+import { createRelayRuntime, type RelayRuntime } from "./relay-runtime.js";
+import type { PushNotificationSender } from "./push/index.js";
 import { getOrCreateServerId } from "./server-id.js";
 import { resolveDaemonVersion } from "./daemon-version.js";
 import type { AgentClient, AgentProvider } from "./agent/agent-sdk-types.js";
-import type { AgentProviderRuntimeSettingsMap } from "./agent/provider-launch-config.js";
-import { acquirePidLock, releasePidLock } from "./pid-lock.js";
-import { isHostAllowed, type AllowedHostsConfig } from "./allowed-hosts.js";
+import type {
+  AgentProfile,
+  AgentSkillSelection,
+  FirstAgentContext,
+  PluginSource,
+  TerminalProfile,
+} from "@getpaseo/protocol/messages";
+import type {
+  AgentProviderRuntimeSettingsMap,
+  ProviderOverride,
+} from "./agent/provider-launch-config.js";
+import { loadPersistedConfig, type PersistedConfig } from "./persisted-config.js";
+import { createServiceProxySubsystem, type ServiceProxySubsystem } from "./service-proxy.js";
+import { releaseWorkspaceServicePortPlan } from "./workspace-service-port-registry.js";
+import { ScriptHealthMonitor } from "./script-health-monitor.js";
+import { createScriptStatusEmitter } from "./script-status-projection.js";
+import { WorkspaceScriptRuntimeStore } from "./workspace-script-runtime-store.js";
+import { createWorkspaceScriptsService } from "./session/workspace-scripts/workspace-scripts-service.js";
+import { spawnWorkspaceScript } from "./worktree-bootstrap.js";
 import {
-  createVoiceMcpSocketBridgeManager,
-  type VoiceMcpSocketBridgeManager,
-} from "./voice-mcp-bridge.js";
-import { resolveVoiceMcpBridgeFromRuntime } from "./voice-mcp-bridge-command.js";
-import { initializeState, type PaseoState, createAgentContextService } from "./state/index.js";
-import { RunManager } from "./state/run-manager.js";
-import { RunRecoveryManager } from "./state/run-recovery.js";
+  createManagedProcessRegistry,
+  createSystemManagedProcessTable,
+  type ManagedProcessRegistry,
+} from "./managed-processes/managed-processes.js";
+import { terminateWithTreeKill } from "../utils/tree-kill.js";
+import { isHostnameAllowed, type HostnamesConfig } from "./hostnames.js";
+import {
+  createRequireBearerMiddleware,
+  isAgentMcpRequestAuthorized,
+  type DaemonAuthConfig,
+} from "./auth.js";
+import { createWebUiMiddleware } from "./web-ui.js";
+import { WorkspaceAutoName } from "./workspace-auto-name.js";
+import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
+import { workspaceIdsOnCheckout } from "./workspace-directory.js";
+import { configureGitProcessPolicy } from "../utils/run-git-command.js";
+import { resolveGitProcessPolicy } from "../utils/git-process-scheduler.js";
+import { resolveFirstAgentPromptTitle } from "./agent/create-agent-title.js";
+import {
+  createAgentCommand,
+  type CreateAgentCommandDependencies,
+} from "./agent/create-agent/create.js";
+import { archiveAgentCommand, cancelAgentRunCommand } from "./agent/lifecycle-command.js";
+import { CreateAgentLifecycleDispatch } from "./agent/create-agent-lifecycle-dispatch.js";
+import {
+  HubRelationshipController,
+  type HubRelationshipClock,
+  type HubRelationshipRetryPolicy,
+} from "./hub/relationship-controller.js";
+import {
+  DirectHubRelationshipRemote,
+  type HubRelationshipRemote,
+} from "./hub/relationship-remote.js";
+import { DaemonExecutions } from "./hub/daemon-executions.js";
+import { PluginService } from "./plugins/index.js";
 
-type AgentMcpTransportMap = Map<string, StreamableHTTPServerTransport>;
+const MAX_MCP_DEBUG_BATCH_ITEMS = 10;
+const REDACTED_LOG_VALUE = "[redacted]";
+const DOWNLOAD_OPEN_FLAGS =
+  process.platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW;
 
-function resolveVoiceMcpBridgeCommand(logger: Logger): { command: string; baseArgs: string[] } {
-  const decision = resolveVoiceMcpBridgeFromRuntime({
-    bootstrapModuleUrl: import.meta.url,
-    execPath: process.execPath,
-    explicitScriptPath: process.env.PASEO_MCP_STDIO_SOCKET_BRIDGE_SCRIPT,
-  });
-  logger.info(
-    {
-      source: decision.source,
-      command: decision.resolved.command,
-      baseArgs: decision.resolved.baseArgs,
-    },
-    "Resolved voice MCP bridge command",
-  );
-  return decision.resolved;
+function formatHostForHttpUrl(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+function resolveAgentMcpClientHost(host: string): string {
+  if (host === "0.0.0.0") {
+    return "127.0.0.1";
+  }
+  if (host === "::" || host === "[::]") {
+    return "::1";
+  }
+  return host;
+}
+
+function createAgentMcpBaseUrl(listenTarget: ListenTarget | null): string | null {
+  if (!listenTarget || listenTarget.type !== "tcp") {
+    return null;
+  }
+  const host = resolveAgentMcpClientHost(listenTarget.host);
+  return new URL(
+    "/mcp/agents",
+    `http://${formatHostForHttpUrl(host)}:${listenTarget.port}`,
+  ).toString();
+}
+
+function createTerminalActivityUrl(listenTarget: ListenTarget | null): string | null {
+  if (!listenTarget || listenTarget.type !== "tcp") {
+    return null;
+  }
+  const host = resolveAgentMcpClientHost(listenTarget.host);
+  return new URL(
+    "/api/terminal-activity",
+    `http://${formatHostForHttpUrl(host)}:${listenTarget.port}`,
+  ).toString();
+}
+
+const TerminalActivityReportSchema = z.object({
+  terminalId: z.string().min(1),
+  token: z.string().min(1),
+  state: z.enum(["running", "idle", "needs-input"]),
+});
+
+const TERMINAL_ACTIVITY_STATE_MAP = {
+  running: "working",
+  idle: "idle",
+  "needs-input": "attention",
+} as const;
+
+const LOOPBACK_REMOTE_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+function isLoopbackRemoteAddress(remoteAddress: string | undefined): boolean {
+  return remoteAddress !== undefined && LOOPBACK_REMOTE_ADDRESSES.has(remoteAddress);
+}
+
+export function createTerminalActivityRouteHandler(
+  terminalManager: TerminalManager,
+): express.RequestHandler {
+  return async (req, res) => {
+    if (!isLoopbackRemoteAddress(req.socket.remoteAddress)) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const parsed = TerminalActivityReportSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid terminal activity report" });
+      return;
+    }
+
+    const validation = terminalManager.validateTerminalActivityToken(
+      parsed.data.terminalId,
+      parsed.data.token,
+    );
+    if (validation !== "valid") {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    try {
+      const updated = await terminalManager.setTerminalActivity(
+        parsed.data.terminalId,
+        TERMINAL_ACTIVITY_STATE_MAP[parsed.data.state],
+      );
+      if (!updated) {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      res.status(204).end();
+    } catch {
+      res.status(500).json({ error: "Failed to update terminal activity" });
+    }
+  };
+}
+
+function summarizeAgentMcpDebugMessage(body: unknown): Record<string, unknown> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return {
+      type: body === null ? "null" : typeof body,
+    };
+  }
+
+  const record = body as Record<string, unknown>;
+  const method = typeof record.method === "string" ? record.method : undefined;
+  return {
+    type: "object",
+    ...(typeof record.jsonrpc === "string" ? { jsonrpc: record.jsonrpc } : {}),
+    ...(method ? { method } : {}),
+    hasId: Object.prototype.hasOwnProperty.call(record, "id"),
+    hasParams: Object.prototype.hasOwnProperty.call(record, "params"),
+  };
+}
+
+function summarizeAgentMcpDebugBody(body: unknown): Record<string, unknown> {
+  if (!Array.isArray(body)) {
+    return summarizeAgentMcpDebugMessage(body);
+  }
+
+  const messages = body.slice(0, MAX_MCP_DEBUG_BATCH_ITEMS).map(summarizeAgentMcpDebugMessage);
+  return {
+    type: "batch",
+    count: body.length,
+    messages,
+    ...(body.length > messages.length ? { omitted: body.length - messages.length } : {}),
+  };
 }
 
 export type PaseoOpenAIConfig = OpenAiSpeechProviderConfig;
 export type PaseoLocalSpeechConfig = LocalSpeechProviderConfig;
 
-export type PaseoSpeechConfig = {
+export interface PaseoSpeechSttLanguages {
+  dictation: string;
+  voice: string;
+}
+
+export interface PaseoSpeechConfig {
   providers: RequestedSpeechProviders;
+  sttLanguages?: PaseoSpeechSttLanguages;
   local?: PaseoLocalSpeechConfig;
-};
+}
 
 export type DaemonLifecycleIntent =
   | {
       type: "shutdown";
       clientId: string;
       requestId: string;
+      reason: string;
     }
   | {
       type: "restart";
       clientId: string;
       requestId: string;
-      reason?: string;
+      reason: string;
     };
 
-export type PaseoDaemonConfig = {
+export interface PaseoDaemonConfig {
   listen: string;
   paseoHome: string;
+  daemonVersion?: string;
+  desktopManaged?: boolean;
+  worktreesRoot?: string;
   corsAllowedOrigins: string[];
-  allowedHosts?: AllowedHostsConfig;
+  allowedHosts?: HostnamesConfig;
+  hostnames?: HostnamesConfig;
+  trustedProxies?: true | string[];
   mcpEnabled?: boolean;
+  mcpInjectIntoAgents?: boolean;
+  browserToolsEnabled?: boolean;
+  git?: {
+    maxProcessesPerSecond: number;
+    maxProcessConcurrency: number;
+  };
+  autoArchiveAfterMerge?: boolean;
+  enableTerminalAgentHooks?: boolean;
+  appendSystemPrompt?: string;
+  terminalProfiles?: TerminalProfile[];
+  agentProfiles?: AgentProfile[];
+  skillSelection?: AgentSkillSelection;
+  pluginsEnabled?: boolean;
+  plugins?: Record<string, PluginSource>;
   staticDir: string;
   mcpDebug: boolean;
+  isDev?: boolean;
   agentClients: Partial<Record<AgentProvider, AgentClient>>;
   agentStoragePath: string;
   relayEnabled?: boolean;
+  relayEnabledMutable?: boolean;
   relayEndpoint?: string;
   relayPublicEndpoint?: string;
+  relayUseTls?: boolean;
+  relayPublicUseTls?: boolean;
+  serviceProxy?: {
+    publicBaseUrl: string | null;
+    standaloneListen: string | null;
+  };
+  webUi?: {
+    enabled: boolean;
+    distDir: string | null;
+  };
   appBaseUrl?: string;
+  auth?: DaemonAuthConfig;
   openai?: PaseoOpenAIConfig;
   speech?: PaseoSpeechConfig;
   voiceLlmProvider?: AgentProvider | null;
@@ -181,511 +440,1093 @@ export type PaseoDaemonConfig = {
   dictationFinalTimeoutMs?: number;
   downloadTokenTtlMs?: number;
   agentProviderSettings?: AgentProviderRuntimeSettingsMap;
-  onLifecycleIntent?: (intent: DaemonLifecycleIntent) => void;
-  pidLock?: {
-    mode?: "self" | "external";
-    ownerPid?: number;
+  providerCatalogRefreshTimeoutMs?: number;
+  metadataGeneration?: {
+    providers?: Array<{
+      provider: string;
+      model?: string;
+      thinkingOptionId?: string;
+    }>;
   };
-};
+  providerOverrides?: Record<string, ProviderOverride>;
+  log?: PersistedConfig["log"];
+  onLifecycleIntent?: (intent: DaemonLifecycleIntent) => void;
+  pushNotificationSender?: PushNotificationSender;
+  managedProcesses?: ManagedProcessRegistry;
+  configReload?: {
+    env: NodeJS.ProcessEnv;
+    cli?: CliConfigOverrides;
+    overrideControlledPaths: string[];
+    relayEnabledFallback: boolean;
+    startupPersisted: PersistedConfig;
+  };
+}
 
 export interface PaseoDaemon {
   config: PaseoDaemonConfig;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   terminalManager: TerminalManager;
-  paseoState: PaseoState;
+  serviceProxy: ServiceProxySubsystem;
+  scriptRuntimeStore: WorkspaceScriptRuntimeStore;
+  browserToolsBroker: BrowserToolsBroker;
   start(): Promise<void>;
   stop(): Promise<void>;
   getListenTarget(): ListenTarget | null;
 }
 
+export interface PaseoDaemonDependencies {
+  hubRelationshipRemote?: HubRelationshipRemote;
+  hubRelationshipClock?: HubRelationshipClock;
+  hubRelationshipRetryPolicy?: HubRelationshipRetryPolicy;
+  createHubDaemonId?: () => string;
+  serverFeatureOverrides?: {
+    daemonStatusRpc?: boolean;
+    relayConfig?: boolean;
+  };
+}
+
+function createBootstrapManagedProcessRegistry(
+  config: Pick<PaseoDaemonConfig, "paseoHome" | "managedProcesses">,
+  logger: Logger,
+): ManagedProcessRegistry {
+  if (config.managedProcesses) {
+    return config.managedProcesses;
+  }
+
+  return createManagedProcessRegistry({
+    paseoHome: config.paseoHome,
+    processTable: createSystemManagedProcessTable(),
+    terminateProcess: terminateWithTreeKill,
+    logger,
+  });
+}
+
+async function reconcileManagedProcessLedger(
+  managedProcesses: ManagedProcessRegistry,
+  logger: Logger,
+): Promise<void> {
+  const reapResult = await managedProcesses.reapStale();
+  if (reapResult.checked > 0 || reapResult.errors.length > 0) {
+    logger.info(reapResult, "Managed helper process ledger reconciled");
+  }
+}
+
+function mountWebUi(app: express.Application, config: PaseoDaemonConfig, logger: Logger): void {
+  app.use(
+    createWebUiMiddleware({
+      enabled: config.webUi?.enabled ?? false,
+      distDir: config.webUi?.distDir ?? null,
+      label: getHostname(),
+      logger,
+    }),
+  );
+}
+
+function resolveExpressTrustProxySetting(config: PaseoDaemonConfig): true | string[] {
+  return config.trustedProxies ?? ["loopback"];
+}
+
+function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
+  const providers = config.providerOverrides ?? {};
+
+  const initialConfig: MutableDaemonConfig = {
+    relay: { enabled: config.relayEnabled ?? true },
+    mcp: {
+      enabled: config.mcpEnabled ?? true,
+      injectIntoAgents: config.mcpInjectIntoAgents ?? true,
+    },
+    ...(config.hostnames !== undefined ? { hostnames: config.hostnames } : {}),
+    cors: { allowedOrigins: config.corsAllowedOrigins },
+    trustedProxies: config.trustedProxies ?? ["loopback"],
+    git: config.git ?? resolveGitProcessPolicy({ env: process.env }),
+    app: { baseUrl: config.appBaseUrl ?? "https://app.paseo.sh" },
+    ...(config.providerCatalogRefreshTimeoutMs !== undefined
+      ? { catalogRefreshTimeoutMs: config.providerCatalogRefreshTimeoutMs }
+      : {}),
+    browserTools: { enabled: config.browserToolsEnabled ?? false },
+    providers,
+    metadataGeneration: {
+      providers: config.metadataGeneration?.providers ?? [],
+    },
+    autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
+    enableTerminalAgentHooks: config.enableTerminalAgentHooks ?? false,
+    appendSystemPrompt: config.appendSystemPrompt ?? "",
+    pluginsEnabled: config.pluginsEnabled ?? false,
+    plugins: config.plugins ?? {},
+    skills: { selection: config.skillSelection },
+  };
+
+  if (config.terminalProfiles !== undefined) {
+    initialConfig.terminalProfiles = config.terminalProfiles;
+  }
+
+  if (config.agentProfiles !== undefined) {
+    initialConfig.agentProfiles = config.agentProfiles;
+  }
+
+  return initialConfig;
+}
+
 export async function createPaseoDaemon(
   config: PaseoDaemonConfig,
   rootLogger: Logger,
+  dependencies: PaseoDaemonDependencies = {},
 ): Promise<PaseoDaemon> {
+  configureGitProcessPolicy(config.git ?? resolveGitProcessPolicy({ env: process.env }));
   const logger = rootLogger.child({ module: "bootstrap" });
+  const obsoleteTimelineDirectory = path.join(config.paseoHome, "agent-timelines");
+  await rm(obsoleteTimelineDirectory, { recursive: true, force: true }).catch((error) => {
+    logger.warn(
+      { err: error, path: obsoleteTimelineDirectory },
+      "Failed to remove obsolete agent timeline data",
+    );
+  });
   const bootstrapStart = performance.now();
   const elapsed = () => `${(performance.now() - bootstrapStart).toFixed(0)}ms`;
-  const daemonVersion = resolveDaemonVersion(import.meta.url);
-  const pidLockMode = config.pidLock?.mode ?? "self";
-  const pidLockOwnerPid = config.pidLock?.ownerPid;
-  const ownsPidLock = pidLockMode === "self";
+  const daemonVersion = config.daemonVersion ?? resolveDaemonVersion(import.meta.url);
+  const initialMutableConfig = createInitialMutableDaemonConfig(config);
+  const daemonConfigStore = new DaemonConfigStore(config.paseoHome, initialMutableConfig, logger, {
+    relayEnabledMutable: config.relayEnabledMutable ?? true,
+    startupPersisted: config.configReload?.startupPersisted,
+    reloadSource: {
+      resolve: (persisted) => {
+        const reloaded = resolveConfigFromPersisted(config.paseoHome, persisted, {
+          env: config.configReload?.env ?? process.env,
+          cli: config.configReload?.cli,
+          relayEnabledFallback: config.configReload?.relayEnabledFallback,
+        });
+        return {
+          mutable: createInitialMutableDaemonConfig(reloaded),
+          overrideControlledPaths: reloaded.configReload?.overrideControlledPaths ?? [],
+        };
+      },
+    },
+  });
+  const orchestrationSkills = createOrchestrationSkills(daemonConfigStore);
+  void orchestrationSkills.autoUpdate().catch((error) => {
+    logger.error({ err: error }, "Failed to maintain orchestration skills at startup");
+  });
+  const browserToolsPolicy = new DaemonConfigBrowserToolsPolicy(daemonConfigStore);
+  const browserToolsBroker = new BrowserToolsBroker({});
+  const pluginRuntime = new PluginService(logger, daemonConfigStore);
 
-  // Acquire PID lock before expensive bootstrap work so duplicate starts fail immediately.
-  if (ownsPidLock) {
-    await acquirePidLock(config.paseoHome, config.listen, {
-      ownerPid: pidLockOwnerPid,
-    });
-    logger.info({ elapsed: elapsed() }, "PID lock acquired");
-  }
+  const serverId = getOrCreateServerId(config.paseoHome, { logger });
+  const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
+  const managedProcesses = createBootstrapManagedProcessRegistry(config, logger);
+  // Reconcile the helper-process ledger in the background so it never blocks the
+  // daemon from coming up; terminating a live leftover can take a few seconds.
+  // Best-effort, so a failure is logged here rather than crashing startup.
+  void reconcileManagedProcessLedger(managedProcesses, logger).catch((error) => {
+    logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
+  });
+  let relayRuntime: RelayRuntime | null = null;
 
-  try {
-    // Initialize Paseo state (FeltDB) early, before other services
-    const paseoStateInit = await initializeState({
-      paseoHome: config.paseoHome,
+  const staticDir = config.staticDir;
+  const downloadTokenTtlMs = config.downloadTokenTtlMs ?? 60000;
+
+  const downloadTokenStore = new DownloadTokenStore({
+    ttlMs: downloadTokenTtlMs,
+  });
+
+  // Capability token authenticating the daemon's own agents to the loopback
+  // Agent MCP endpoint (/mcp/agents). Random per daemon run, injected only into
+  // local agent configs and the daemon's own MCP client — never sent to remote
+  // clients — so it cannot be replayed off-box. This lets the injected MCP
+  // authenticate even when the daemon password is set via the app (hash only,
+  // no plaintext available). Mirrors the /api/files/download capability-token
+  // pattern.
+  const agentMcpAuthToken = randomUUID();
+
+  const listenTarget = parseListenString(config.listen);
+
+  const app = express();
+  app.set("trust proxy", resolveExpressTrustProxySetting(config));
+  daemonConfigStore.onFieldChange("trustedProxies", (value) => {
+    app.set("trust proxy", value ?? ["loopback"]);
+  });
+  let boundListenTarget: ListenTarget | null = null;
+  let workspaceRegistry: FileBackedWorkspaceRegistry | null = null;
+  const terminalManager = createConfiguredTerminalManager({
+    getTerminalActivityUrl: () => createTerminalActivityUrl(boundListenTarget),
+  });
+  applyTerminalAgentHookSetting({ store: daemonConfigStore, logger });
+
+  const serviceProxyPublicBaseUrl = config.serviceProxy?.publicBaseUrl
+    ? config.serviceProxy.publicBaseUrl
+    : null;
+  const serviceProxy = createServiceProxySubsystem({
+    logger,
+    publicBaseUrl: serviceProxyPublicBaseUrl,
+  });
+  const scriptRuntimeStore = new WorkspaceScriptRuntimeStore();
+  const workspaceSetupRuntime = new WorkspaceSetupRuntime();
+  let configuredHostnames = config.hostnames ?? config.allowedHosts;
+  let appBaseUrl = config.appBaseUrl ?? "https://app.paseo.sh";
+  daemonConfigStore.onFieldChange("hostnames", (value) => {
+    configuredHostnames = value as HostnamesConfig | undefined;
+  });
+  daemonConfigStore.onFieldChange("app.baseUrl", (value) => {
+    appBaseUrl = typeof value === "string" ? value : "https://app.paseo.sh";
+  });
+  let wsServer: VoiceAssistantWebSocketServer | null = null;
+  let serviceProxyListenTarget: ListenTarget | null = null;
+  const scriptHealthMonitor = new ScriptHealthMonitor({
+    serviceProxy,
+    onChange: createScriptStatusEmitter({
+      sessions: () =>
+        wsServer?.listTrustedSessions().map((session) => ({
+          emit: (message) => session.emitServerMessage(message),
+        })) ?? [],
+      serviceProxy,
+      runtimeStore: scriptRuntimeStore,
+      daemonPort: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
+      resolveWorkspaceDirectory: async (workspaceId) =>
+        (await workspaceRegistry?.get(workspaceId))?.cwd ?? null,
       logger,
-    });
-    const paseoState = paseoStateInit.state;
-    logger.info({ elapsed: elapsed() }, "Paseo state initialized");
+      serviceProxyPublicBaseUrl,
+    }),
+  });
+  const handleBranchChange = createBranchChangeRouteHandler({
+    serviceProxy,
+    onRoutesChanged: (workspaceId) => {
+      scriptHealthMonitor.invalidateWorkspace(workspaceId);
+    },
+    logger,
+  });
 
-    const serverId = getOrCreateServerId(config.paseoHome, { logger });
-    const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
-    let relayTransport: RelayTransportController | null = null;
+  // Service proxy classifies service hosts before daemon auth/route fallthrough.
+  // Registered service hosts proxy directly; known service namespaces without a
+  // route return 404 and never reach daemon APIs.
+  app.use(serviceProxy.middleware());
 
-    const staticDir = config.staticDir;
-    const downloadTokenTtlMs = config.downloadTokenTtlMs ?? 60000;
-
-    const downloadTokenStore = new DownloadTokenStore({ ttlMs: downloadTokenTtlMs });
-
-    const listenTarget = parseListenString(config.listen);
-
-    const app = express();
-    let boundListenTarget: ListenTarget | null = null;
-
-    // Host allowlist / DNS rebinding protection (vite-like semantics).
-    // For non-TCP (unix sockets), skip host validation.
-    if (listenTarget.type === "tcp") {
-      app.use((req, res, next) => {
-        const hostHeader = typeof req.headers.host === "string" ? req.headers.host : undefined;
-        if (!isHostAllowed(hostHeader, config.allowedHosts)) {
-          res.status(403).json({ error: "Invalid Host header" });
-          return;
-        }
-        next();
-      });
-    }
-
-    // CORS - allow same-origin + configured origins
-    const allowedOrigins = new Set([
-      ...config.corsAllowedOrigins,
-      // Packaged desktop renderers use the custom paseo:// protocol scheme.
-      "paseo://app",
-      // For TCP, add localhost variants
-      ...(listenTarget.type === "tcp"
-        ? [
-            `http://${listenTarget.host}:${listenTarget.port}`,
-            `http://localhost:${listenTarget.port}`,
-            `http://127.0.0.1:${listenTarget.port}`,
-          ]
-        : []),
-    ]);
-
+  // Host allowlist / DNS rebinding protection (vite-like semantics).
+  // For non-TCP (unix sockets), skip host validation.
+  if (listenTarget.type === "tcp") {
     app.use((req, res, next) => {
-      const origin = req.headers.origin;
-      if (origin && allowedOrigins.has(origin)) {
-        res.setHeader("Access-Control-Allow-Origin", origin);
-        res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-        res.setHeader("Access-Control-Allow-Credentials", "true");
-      }
-      if (req.method === "OPTIONS") {
-        res.status(204).end();
+      const hostHeader = typeof req.headers.host === "string" ? req.headers.host : undefined;
+      if (!isHostnameAllowed(hostHeader, configuredHostnames)) {
+        res.status(403).json({ error: "Invalid Host header" });
         return;
       }
       next();
     });
+  }
 
-    // Serve static files from public directory
-    app.use("/public", express.static(staticDir));
+  // CORS - allow same-origin + configured origins
+  const fixedAllowedOrigins = [
+    // Packaged desktop renderers use the custom paseo:// protocol scheme.
+    "paseo://app",
+    // For TCP, add localhost variants
+    ...(listenTarget.type === "tcp"
+      ? [
+          `http://${listenTarget.host}:${listenTarget.port}`,
+          `http://localhost:${listenTarget.port}`,
+          `http://127.0.0.1:${listenTarget.port}`,
+        ]
+      : []),
+  ];
+  const allowedOrigins = new Set([...config.corsAllowedOrigins, ...fixedAllowedOrigins]);
+  daemonConfigStore.onFieldChange("cors.allowedOrigins", (value) => {
+    allowedOrigins.clear();
+    for (const origin of [...((value as string[] | undefined) ?? []), ...fixedAllowedOrigins]) {
+      allowedOrigins.add(origin);
+    }
+  });
 
-    // Middleware
-    app.use(express.json());
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && (allowedOrigins.has("*") || allowedOrigins.has(origin))) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
+    if (req.method === "OPTIONS") {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
 
-    // Health check endpoint
-    app.get("/api/health", (_req, res) => {
-      res.json({ status: "ok", timestamp: new Date().toISOString() });
+  // Local, harmless, and token-gated; deliberately skips daemon auth.
+  app.post(
+    "/api/terminal-activity",
+    express.json(),
+    createTerminalActivityRouteHandler(terminalManager),
+  );
+
+  // Serve the bundled browser web UI when enabled. Mounted after service-proxy
+  // classification and host/CORS handling, but before daemon bearer auth, so
+  // static app files load without the daemon password while API/WebSocket calls
+  // remain protected.
+  mountWebUi(app, config, logger);
+
+  app.use(
+    createRequireBearerMiddleware(config.auth, (context) => {
+      logger.warn(context, "Rejected HTTP request with invalid daemon password");
+    }),
+  );
+
+  app.use(express.json());
+
+  // Serve static files from public directory
+  app.use("/public", express.static(staticDir));
+
+  // Health check endpoint
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  app.get("/api/status", (_req, res) => {
+    res.json({
+      status: "server_info",
+      serverId,
+      hostname: getHostname(),
+      version: daemonVersion,
+      listen: formatListenTarget(boundListenTarget ?? listenTarget),
     });
+  });
 
-    app.get("/api/status", (_req, res) => {
-      res.json({
-        status: "server_info",
-        serverId,
-        hostname: getHostname(),
-        version: daemonVersion,
-        listen: formatListenTarget(boundListenTarget ?? listenTarget),
-      });
-    });
+  const handleFileDownload = async (req: express.Request, res: express.Response): Promise<void> => {
+    const token =
+      typeof req.query.token === "string" && req.query.token.trim().length > 0
+        ? req.query.token.trim()
+        : null;
 
-    app.get("/pairing", async (_req, res) => {
-      try {
-        const offer = await generateLocalPairingOffer({
-          paseoHome: config.paseoHome,
-          relayEnabled: config.relayEnabled,
-          relayEndpoint: config.relayEndpoint,
-          relayPublicEndpoint: config.relayPublicEndpoint,
-          appBaseUrl: config.appBaseUrl,
-          logger,
-        });
-        res.json(offer);
-      } catch (error) {
-        logger.error({ err: error }, "Failed to generate pairing offer");
-        res.status(500).json({
-          relayEnabled: false,
-          url: null,
-          qr: null,
-        });
-      }
-    });
-
-    app.get("/api/files/download", async (req, res) => {
-      const token =
-        typeof req.query.token === "string" && req.query.token.trim().length > 0
-          ? req.query.token.trim()
-          : null;
-
-      if (!token) {
-        res.status(400).json({ error: "Missing download token" });
-        return;
-      }
-
-      const entry = downloadTokenStore.consumeToken(token);
-      if (!entry) {
-        res.status(403).json({ error: "Invalid or expired token" });
-        return;
-      }
-
-      try {
-        const fileStats = await stat(entry.absolutePath);
-        if (!fileStats.isFile()) {
-          res.status(404).json({ error: "File not found" });
-          return;
-        }
-
-        const safeFileName = entry.fileName.replace(/["\r\n]/g, "_");
-        res.setHeader("Content-Type", entry.mimeType);
-        res.setHeader("Content-Disposition", `attachment; filename="${safeFileName}"`);
-        res.setHeader("Content-Length", entry.size.toString());
-
-        const stream = createReadStream(entry.absolutePath);
-        stream.on("error", (err) => {
-          logger.error({ err }, "Failed to stream download");
-          if (!res.headersSent) {
-            res.status(500).json({ error: "Failed to read file" });
-          } else {
-            res.end();
-          }
-        });
-        stream.pipe(res);
-      } catch (err) {
-        logger.error({ err }, "Failed to download file");
-        if (!res.headersSent) {
-          res.status(404).json({ error: "File not found" });
-        }
-      }
-    });
-
-    const httpServer = createHTTPServer(app);
-
-    const agentStorage = new AgentStorage(config.agentStoragePath, logger);
-    const projectRegistry = new FileBackedProjectRegistry(
-      path.join(config.paseoHome, "projects", "projects.json"),
-      logger,
-    );
-    const workspaceRegistry = new FileBackedWorkspaceRegistry(
-      path.join(config.paseoHome, "projects", "workspaces.json"),
-      logger,
-    );
-
-    // Initialize agent storage before recovery
-    await agentStorage.initialize();
-    logger.info({ elapsed: elapsed() }, "Agent storage initialized");
-
-    // Create RunManager for durable run lifecycle integration
-    const runManager = new RunManager({
-      paseoState,
-      logger,
-    });
-
-    // Run crash recovery: reconcile durable Runs against runtime state
-    const runRecoveryManager = new RunRecoveryManager({
-      paseoState,
-      logger,
-    });
-    const recoverySummary = await runRecoveryManager.reconcileAll();
-    logger.info(
-      {
-        orphanedRuns: recoverySummary.orphanedRunsMarked,
-        errors: recoverySummary.recoveryErrors.length,
-      },
-      "Run recovery completed",
-    );
-
-    // Phase 2: Wire ContextResolver into agent execution
-    const contextService = createAgentContextService({
-      paseoState,
-      logger,
-    });
-    logger.info("AgentContextService initialized for context injection");
-
-    const agentManager = new AgentManager({
-      clients: {
-        ...createAllClients(logger, {
-          runtimeSettings: config.agentProviderSettings,
-        }),
-        ...config.agentClients,
-      },
-      registry: agentStorage,
-      runManager,
-      paseoState,
-      contextService,
-      logger,
-    });
-
-    const terminalManager = createTerminalManager();
-
-    const detachAgentStoragePersistence = attachAgentStoragePersistence(
-      logger,
-      agentManager,
-      agentStorage,
-    );
-    await bootstrapWorkspaceRegistries({
-      paseoHome: config.paseoHome,
-      agentStorage,
-      projectRegistry,
-      workspaceRegistry,
-      logger,
-    });
-    logger.info({ elapsed: elapsed() }, "Workspace registries bootstrapped");
-    const persistedRecords = await agentStorage.list();
-    logger.info(
-      { elapsed: elapsed() },
-      `Agent registry loaded (${persistedRecords.length} record${persistedRecords.length === 1 ? "" : "s"}); agents will initialize on demand`,
-    );
-    logger.info(
-      "Voice mode configured for agent-scoped resume flow (no dedicated voice assistant provider)",
-    );
-    let wsServer: VoiceAssistantWebSocketServer | null = null;
-    let voiceMcpBridgeManager: VoiceMcpSocketBridgeManager | null = null;
-    let unsubscribeSpeechReadiness: (() => void) | null = null;
-
-    // Create in-memory transport for Session's Agent MCP client (voice assistant tools)
-    const createInMemoryAgentMcpTransport = async (): Promise<InMemoryTransport> => {
-      const agentMcpServer = await createAgentMcpServer({
-        agentManager,
-        agentStorage,
-        terminalManager,
-        paseoHome: config.paseoHome,
-        enableVoiceTools: false,
-        resolveSpeakHandler: (callerAgentId) =>
-          wsServer?.resolveVoiceSpeakHandler(callerAgentId) ?? null,
-        resolveCallerContext: (callerAgentId) =>
-          wsServer?.resolveVoiceCallerContext(callerAgentId) ?? null,
-        logger,
-      });
-
-      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-
-      await agentMcpServer.connect(serverTransport);
-
-      return clientTransport;
-    };
-
-    const mcpEnabled = config.mcpEnabled ?? true;
-    if (mcpEnabled) {
-      const agentMcpRoute = "/mcp/agents";
-      const agentMcpTransports: AgentMcpTransportMap = new Map();
-
-      const createAgentMcpTransport = async (callerAgentId?: string) => {
-        const agentMcpServer = await createAgentMcpServer({
-          agentManager,
-          agentStorage,
-          terminalManager,
-          paseoHome: config.paseoHome,
-          callerAgentId,
-          enableVoiceTools: false,
-          resolveSpeakHandler: (agentId) => wsServer?.resolveVoiceSpeakHandler(agentId) ?? null,
-          resolveCallerContext: (agentId) => wsServer?.resolveVoiceCallerContext(agentId) ?? null,
-          logger,
-        });
-
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
-          onsessioninitialized: (sessionId) => {
-            agentMcpTransports.set(sessionId, transport);
-            logger.debug({ sessionId }, "Agent MCP session initialized");
-          },
-          onsessionclosed: (sessionId) => {
-            agentMcpTransports.delete(sessionId);
-            logger.debug({ sessionId }, "Agent MCP session closed");
-          },
-          // NOTE: We enforce a Vite-like host allowlist at the app/websocket layer.
-          // StreamableHTTPServerTransport's built-in check requires exact Host header matches.
-          enableDnsRebindingProtection: false,
-        });
-
-        transport.onclose = () => {
-          if (transport.sessionId) {
-            agentMcpTransports.delete(transport.sessionId);
-          }
-        };
-        transport.onerror = (err) => {
-          logger.error({ err }, "Agent MCP transport error");
-        };
-
-        await agentMcpServer.connect(transport);
-        return transport;
-      };
-
-      const handleAgentMcpRequest: express.RequestHandler = async (req, res) => {
-        if (config.mcpDebug) {
-          logger.debug(
-            {
-              method: req.method,
-              url: req.originalUrl,
-              sessionId: req.header("mcp-session-id"),
-              authorization: req.header("authorization"),
-              body: req.body,
-            },
-            "Agent MCP request",
-          );
-        }
-        try {
-          const sessionId = req.header("mcp-session-id");
-          let transport = sessionId ? agentMcpTransports.get(sessionId) : undefined;
-
-          if (!transport) {
-            if (req.method !== "POST") {
-              res.status(400).json({
-                jsonrpc: "2.0",
-                error: {
-                  code: -32000,
-                  message: "Missing or invalid MCP session",
-                },
-                id: null,
-              });
-              return;
-            }
-            if (!isInitializeRequest(req.body)) {
-              res.status(400).json({
-                jsonrpc: "2.0",
-                error: {
-                  code: -32000,
-                  message: "Initialization request expected",
-                },
-                id: null,
-              });
-              return;
-            }
-            const callerAgentIdRaw = req.query.callerAgentId;
-            const callerAgentId =
-              typeof callerAgentIdRaw === "string"
-                ? callerAgentIdRaw
-                : Array.isArray(callerAgentIdRaw) && typeof callerAgentIdRaw[0] === "string"
-                  ? callerAgentIdRaw[0]
-                  : undefined;
-            transport = await createAgentMcpTransport(callerAgentId);
-          }
-
-          await transport.handleRequest(req as any, res as any, req.body);
-        } catch (err) {
-          logger.error({ err }, "Failed to handle Agent MCP request");
-          if (!res.headersSent) {
-            res.status(500).json({
-              jsonrpc: "2.0",
-              error: {
-                code: -32603,
-                message: "Internal MCP server error",
-              },
-              id: null,
-            });
-          }
-        }
-      };
-
-      app.post(agentMcpRoute, handleAgentMcpRequest);
-      app.get(agentMcpRoute, handleAgentMcpRequest);
-      app.delete(agentMcpRoute, handleAgentMcpRequest);
-      logger.info({ route: agentMcpRoute }, "Agent MCP server mounted on main app");
-    } else {
-      logger.info("Agent MCP HTTP endpoint disabled");
+    if (!token) {
+      res.status(400).json({ error: "Missing download token" });
+      return;
     }
 
-    const voiceMcpSocketDir = path.join(config.paseoHome, "runtime", "voice-mcp");
-    const voiceMcpBridgeCommand = resolveVoiceMcpBridgeCommand(logger);
-    voiceMcpBridgeManager = createVoiceMcpSocketBridgeManager({
-      runtimeDir: voiceMcpSocketDir,
-      logger,
-      createAgentMcpServerForCaller: async (callerAgentId) => {
-        return createAgentMcpServer({
-          agentManager,
-          agentStorage,
-          terminalManager,
-          paseoHome: config.paseoHome,
-          callerAgentId,
-          voiceOnly: true,
-          resolveSpeakHandler: (agentId) => wsServer?.resolveVoiceSpeakHandler(agentId) ?? null,
-          resolveCallerContext: (agentId) => wsServer?.resolveVoiceCallerContext(agentId) ?? null,
-          logger,
-        });
-      },
-    });
-    const {
-      resolveVoiceTurnDetection,
-      resolveVoiceStt,
-      resolveVoiceTts,
-      resolveDictationStt,
-      getSpeechReadiness,
-      subscribeSpeechReadiness,
-      cleanup: cleanupSpeechRuntime,
-      localModelConfig,
-    } = await initializeSpeechRuntime({
-      logger,
-      openaiConfig: config.openai,
-      speechConfig: config.speech,
-    });
-    logger.info({ elapsed: elapsed() }, "Speech runtime initialized");
+    const entry = downloadTokenStore.consumeToken(token);
+    if (!entry) {
+      res.status(403).json({ error: "Invalid or expired token" });
+      return;
+    }
 
-    wsServer = new VoiceAssistantWebSocketServer(
-      httpServer,
-      logger,
-      serverId,
-      agentManager,
-      agentStorage,
-      downloadTokenStore,
-      config.paseoHome,
-      createInMemoryAgentMcpTransport,
-      { allowedOrigins, allowedHosts: config.allowedHosts },
-      { turnDetection: resolveVoiceTurnDetection, stt: resolveVoiceStt, tts: resolveVoiceTts },
-      terminalManager,
-      {
-        voiceAgentMcpStdio: {
-          command: voiceMcpBridgeCommand.command,
-          baseArgs: [...voiceMcpBridgeCommand.baseArgs],
-          env: {
-            PASEO_HOME: config.paseoHome,
-          },
-        },
-        ensureVoiceMcpSocketForAgent: (agentId) =>
-          voiceMcpBridgeManager?.ensureBridgeForCaller(agentId) ??
-          Promise.reject(new Error("Voice MCP bridge manager is not initialized")),
-        removeVoiceMcpSocketForAgent: (agentId) =>
-          voiceMcpBridgeManager?.removeBridgeForCaller(agentId) ?? Promise.resolve(),
-      },
-      {
-        finalTimeoutMs: config.dictationFinalTimeoutMs,
-        stt: resolveDictationStt,
-        localModels: localModelConfig ?? undefined,
-        getSpeechReadiness,
-      },
-      config.agentProviderSettings,
-      daemonVersion,
-      (intent) => {
-        try {
-          config.onLifecycleIntent?.(intent);
-        } catch (error) {
-          logger.error({ err: error, intent }, "Failed to handle daemon lifecycle intent");
+    let fileHandle: Awaited<ReturnType<typeof open>> | null = null;
+    try {
+      fileHandle = await open(entry.absolutePath, DOWNLOAD_OPEN_FLAGS);
+      const fileStats = await fileHandle.stat();
+      if (!fileStats.isFile()) {
+        res.status(404).json({ error: "File not found" });
+        return;
+      }
+
+      const safeFileName = entry.fileName.replace(/["\r\n]/g, "_");
+      res.setHeader("Content-Type", entry.mimeType);
+      res.setHeader("Content-Disposition", `attachment; filename="${safeFileName}"`);
+      res.setHeader("Content-Length", fileStats.size.toString());
+
+      const stream = fileHandle.createReadStream();
+      fileHandle = null;
+      stream.on("error", (err) => {
+        logger.error({ err }, "Failed to stream download");
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Failed to read file" });
+        } else {
+          res.end();
         }
-      },
-      projectRegistry,
+      });
+      stream.pipe(res);
+    } catch (err) {
+      logger.error({ err }, "Failed to download file");
+      if (!res.headersSent) {
+        res.status(404).json({ error: "File not found" });
+      }
+    } finally {
+      await fileHandle?.close().catch(() => undefined);
+    }
+  };
+
+  app.get("/api/files/download", (req, res) => {
+    void handleFileDownload(req, res);
+  });
+
+  const httpServer = createHTTPServer(app);
+
+  // Script proxy WebSocket upgrade handler — must be registered before the
+  // VoiceAssistantWebSocketServer attaches its own "upgrade" listener so that
+  // script-bound upgrades are forwarded first. The handler is a no-op for
+  // requests that don't match a registered script route.
+  httpServer.on("upgrade", serviceProxy.upgradeHandler({ passthroughUnknown: true }));
+
+  if (config.serviceProxy?.standaloneListen) {
+    serviceProxyListenTarget = parseListenString(config.serviceProxy.standaloneListen);
+  }
+
+  const agentStorage = new AgentStorage(config.agentStoragePath, logger);
+  const projectRegistry = new FileBackedProjectRegistry(
+    path.join(config.paseoHome, "projects", "projects.json"),
+    logger,
+  );
+  workspaceRegistry = new FileBackedWorkspaceRegistry(
+    path.join(config.paseoHome, "projects", "workspaces.json"),
+    logger,
+  );
+  const workspaceLabelService = createWorkspaceLabelService({
+    paseoHome: config.paseoHome,
+    workspaceRegistry,
+  });
+  const github = createGitHubService();
+  const workspaceGitService = new WorkspaceGitServiceImpl({
+    logger,
+    paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
+    deps: {
+      forgeOverrides: { github },
+    },
+  });
+  const workspaceProvisioning = createWorkspaceProvisioningService({
+    serverId,
+    projectRegistry,
+    workspaceRegistry,
+    workspaceGitService,
+    logger,
+  });
+  const providerSnapshotLogger = logger.child({ module: "provider-snapshot-manager" });
+  const providerSnapshotManager = new ProviderSnapshotManager({
+    logger: providerSnapshotLogger,
+    refreshTimeoutMs: config.providerCatalogRefreshTimeoutMs,
+    runtimeSettings: config.agentProviderSettings,
+    providerOverrides: config.providerOverrides,
+    workspaceGitService,
+    managedProcesses,
+    isDev: config.isDev === true,
+    extraClients: config.agentClients,
+  });
+  daemonConfigStore.onFieldChange("catalogRefreshTimeoutMs", (value) => {
+    providerSnapshotManager.setRefreshTimeoutMs(typeof value === "number" ? value : undefined);
+  });
+  daemonConfigStore.onFieldChange("git.maxProcessesPerSecond", () => {
+    const git = daemonConfigStore.get().git;
+    if (git) configureGitProcessPolicy(git);
+  });
+  daemonConfigStore.onFieldChange("git.maxProcessConcurrency", () => {
+    const git = daemonConfigStore.get().git;
+    if (git) configureGitProcessPolicy(git);
+  });
+  const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
+  const agentManager = new AgentManager({
+    clients: initialAgentManagerState.clients,
+    providerDefinitions: initialAgentManagerState.providerDefinitions,
+    registry: agentStorage,
+    appendSystemPrompt: config.appendSystemPrompt,
+    onWorkspaceStateMayHaveChanged: ({ cwd }) => {
+      workspaceGitService.onWorkspaceStateMayHaveChanged(cwd);
+    },
+    mcpAuthToken: agentMcpAuthToken,
+    logger,
+  });
+
+  const detachAgentStoragePersistence = attachAgentStoragePersistence(
+    logger,
+    agentManager,
+    agentStorage,
+  );
+  await agentStorage.initialize();
+  logger.info({ elapsed: elapsed() }, "Agent storage initialized");
+  await bootstrapWorkspaceRegistries({
+    serverId,
+    paseoHome: config.paseoHome,
+    agentStorage,
+    projectRegistry,
+    workspaceRegistry,
+    workspaceGitService,
+    logger,
+  });
+  await workspaceLabelService.initialize();
+  logger.info({ elapsed: elapsed() }, "Workspace registries bootstrapped");
+  const teardownArchivedWorkspaceRuntime = (workspaceId: string): void => {
+    scriptRuntimeStore.removeForWorkspace(workspaceId);
+    releaseWorkspaceServicePortPlan(workspaceId);
+  };
+  const workspaceReconciliation = new WorkspaceReconciliationService({
+    serverId,
+    projectRegistry,
+    workspaceRegistry,
+    logger,
+    workspaceGitService,
+    onProjectUpdate: (update) => wsServer?.publishProjectUpdate(update),
+    onWorkspaceArchived: teardownArchivedWorkspaceRuntime,
+    onWorkspacesChanged: async (workspaceIds) => {
+      await fanOutReconciledWorkspaceUpdates({
+        sessions: wsServer?.listTrustedSessions() ?? [],
+        workspaceIds,
+        logger,
+      });
+    },
+  });
+  await workspaceReconciliation.start();
+  void workspaceReconciliation.reconcileNow().catch((error) => {
+    logger.warn({ err: error }, "Initial workspace reconciliation failed");
+  });
+  const checkoutDiffManager = new CheckoutDiffManager({
+    logger,
+    paseoHome: config.paseoHome,
+    workspaceGitService,
+  });
+  const archiveWorkspaceRecordExternal = async (
+    workspaceId: string,
+    context?: WorkspaceArchiveContext,
+  ) => {
+    const existingWorkspace = await archivePersistedWorkspaceRecord({
+      workspaceId,
       workspaceRegistry,
-    );
-    unsubscribeSpeechReadiness = subscribeSpeechReadiness((snapshot) => {
-      wsServer?.publishSpeechReadiness(snapshot);
+      context,
     });
+    if (!existingWorkspace || existingWorkspace.archivedAt) return;
+    teardownArchivedWorkspaceRuntime(workspaceId);
+  };
+  // external path→workspace adapter, not ownership: archive-by-path requests that
+  // arrive with a worktree path and no workspaceId (old clients / CLI).
+  const findWorkspaceIdForCwdExternal = async (cwd: string): Promise<string | null> => {
+    return resolveWorkspaceIdForPath(cwd, await workspaceRegistry.list());
+  };
+  const ensureWorkspaceForCreateExternal = async (
+    cwd: string,
+    firstAgentContext?: FirstAgentContext,
+  ): Promise<string> => {
+    const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
+      cwd,
+      resolveFirstAgentPromptTitle(firstAgentContext),
+    );
+    if (firstAgentContext) {
+      workspaceAutoName.scheduleForDirectory({
+        workspaceId: workspace.workspaceId,
+        cwd: workspace.cwd,
+        firstAgentContext,
+      });
+    }
+    return workspace.workspaceId;
+  };
+  const listActiveWorkspacesExternal = async (): Promise<ActiveWorkspaceRef[]> => {
+    const workspaces = await workspaceRegistry.list();
+    return workspaces
+      .filter((workspace) => !workspace.archivedAt)
+      .map((workspace) => ({
+        workspaceId: workspace.workspaceId,
+        cwd: workspace.cwd,
+        kind: workspace.kind,
+        worktreeRoot: workspace.worktreeRoot,
+        isPaseoOwnedWorktree: workspace.isPaseoOwnedWorktree,
+        mainRepoRoot: workspace.mainRepoRoot,
+      }));
+  };
+  const markWorkspaceArchivingExternal = (workspaceIds: Iterable<string>, archivingAt: string) => {
+    const workspaceIdList = Array.from(workspaceIds);
+    for (const session of wsServer?.listTrustedSessions() ?? []) {
+      session.markWorkspaceArchivingForExternalMutation(workspaceIdList, archivingAt);
+    }
+  };
+  const clearWorkspaceArchivingExternal = (workspaceIds: Iterable<string>) => {
+    const workspaceIdList = Array.from(workspaceIds);
+    for (const session of wsServer?.listTrustedSessions() ?? []) {
+      session.clearWorkspaceArchivingForExternalMutation(workspaceIdList);
+    }
+  };
+  const emitWorkspaceUpdatesExternal = async (workspaceIds: Iterable<string>) => {
+    const workspaceIdList = Array.from(workspaceIds);
+    await Promise.all(
+      (wsServer?.listTrustedSessions() ?? []).map((session) =>
+        session.emitWorkspaceUpdatesForExternalWorkspaceIds(workspaceIdList),
+      ),
+    );
+  };
+  const ensureWorkspaceForCreateAndBroadcastExternal = async (
+    cwd: string,
+    firstAgentContext?: FirstAgentContext,
+  ): Promise<string> => {
+    const workspaceId = await ensureWorkspaceForCreateExternal(cwd, firstAgentContext);
+    await emitWorkspaceUpdatesExternal([workspaceId]);
+    return workspaceId;
+  };
+  const emitWorkspaceUpdateForCwdExternal = async (cwd: string) => {
+    const workspaceIds = workspaceIdsOnCheckout(await workspaceRegistry.list(), cwd);
+    await emitWorkspaceUpdatesExternal(workspaceIds);
+  };
+  const emitExternalSessionMessage = (message: SessionOutboundMessage) => {
+    wsServer?.broadcast(wrapSessionMessage(message));
+  };
+  const workspaceAutoName = new WorkspaceAutoName({
+    agentManager,
+    workspaceRegistry,
+    workspaceGitService,
+    providerSnapshotManager,
+    readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
+    gitMutation: createGitMutationService({
+      workspaceGitService,
+      logger,
+    }),
+    emitWorkspaceUpdateForCwd: emitWorkspaceUpdateForCwdExternal,
+    emitWorkspaceUpdateForWorkspaceId: async (workspaceId) => {
+      await emitWorkspaceUpdatesExternal([workspaceId]);
+    },
+    logger,
+  });
 
-    logger.info({ elapsed: elapsed() }, "Bootstrap complete, ready to start listening");
+  setupAutoArchiveOnMerge({
+    paseoHome: config.paseoHome,
+    paseoWorktreesBaseRoot: config.worktreesRoot,
+    daemonConfigStore,
+    workspaceGitService,
+    github,
+    agentManager,
+    agentStorage,
+    terminalManager,
+    logger,
+    findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+    listActiveWorkspaces: listActiveWorkspacesExternal,
+    getAutoArchivedChangeRequestUrl: async (workspaceId) =>
+      (await workspaceRegistry.get(workspaceId))?.autoArchivedChangeRequestUrl ?? null,
+    archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
+    markWorkspaceArchiving: markWorkspaceArchivingExternal,
+    clearWorkspaceArchiving: clearWorkspaceArchivingExternal,
+    emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
+  });
 
-    const start = async () => {
+  const createPaseoWorktreeForTools = async (
+    input: Parameters<typeof createPaseoWorktreeWorkflow>[1],
+    serviceOptions?: Parameters<typeof createPaseoWorktreeWorkflow>[2],
+  ) => {
+    return createPaseoWorktreeWorkflow(
+      {
+        paseoHome: config.paseoHome,
+        worktreesRoot: config.worktreesRoot,
+        createPaseoWorktree: async (workflowInput, workflowOptions) => {
+          return createRegisteredPaseoWorktree(workflowInput, {
+            github,
+            ...(workflowOptions?.resolveDefaultBranch
+              ? {
+                  resolveDefaultBranch: workflowOptions.resolveDefaultBranch,
+                }
+              : {}),
+            workspaceGitService,
+            workspaceProvisioning,
+          });
+        },
+        warmWorkspaceGitData: async (workspace) => {
+          await Promise.all(
+            wsServer
+              ?.listTrustedSessions()
+              .map((session) => session.warmWorkspaceGitDataForWorkspace(workspace)) ?? [],
+          );
+        },
+        autoNameWorkspaceBranchForFirstAgent: (autoNameInput) =>
+          workspaceAutoName.scheduleForWorktree(autoNameInput),
+        emitWorkspaceUpdateForWorkspaceId: async (workspaceId) => {
+          await emitWorkspaceUpdatesExternal([workspaceId]);
+        },
+        cacheWorkspaceSetupSnapshot: () => {},
+        startWorkspaceSetup: (workspaceId, operation) =>
+          workspaceSetupRuntime.start(workspaceId, operation),
+        emit: emitExternalSessionMessage,
+        sessionLogger: logger,
+        terminalManager,
+        archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
+        serviceProxy,
+        scriptRuntimeStore,
+        getDaemonTcpPort: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
+        getDaemonTcpHost: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.host : null),
+        serviceProxyPublicBaseUrl,
+        onScriptsChanged: null,
+      },
+      input,
+      serviceOptions,
+    );
+  };
+
+  const createAgentCommandDependencies: CreateAgentCommandDependencies = {
+    agentManager,
+    agentStorage,
+    logger,
+    paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
+    terminalManager,
+    providerSnapshotManager,
+    createPaseoWorktree: createPaseoWorktreeForTools,
+    ensureWorkspaceForCreate: ensureWorkspaceForCreateAndBroadcastExternal,
+  };
+  const createAgent = (input: Parameters<typeof createAgentCommand>[1]) =>
+    createAgentCommand(createAgentCommandDependencies, input);
+  const archiveWorkspaceByIdExternal = (workspaceId: string, requestId: string) =>
+    archiveByScope(
+      {
+        paseoHome: config.paseoHome,
+        paseoWorktreesBaseRoot: config.worktreesRoot,
+        github,
+        workspaceGitService,
+        agentManager,
+        agentStorage,
+        findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+        listActiveWorkspaces: listActiveWorkspacesExternal,
+        getWorkspace: (workspaceIdToGet) => workspaceRegistry.get(workspaceIdToGet),
+        archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
+        emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
+        markWorkspaceArchiving: markWorkspaceArchivingExternal,
+        clearWorkspaceArchiving: clearWorkspaceArchivingExternal,
+        killTerminalsForWorkspace: (workspaceIdToKill) =>
+          killTerminalsForWorkspace({ terminalManager, sessionLogger: logger }, workspaceIdToKill),
+        stopWorkspaceSetup: (workspaceIdToStop) => workspaceSetupRuntime.stop(workspaceIdToStop),
+        sessionLogger: logger,
+      },
+      { scope: { kind: "workspace", workspaceId }, requestId },
+    );
+  const hubAgentLifecycle = new CreateAgentLifecycleDispatch({
+    paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
+    agentManager,
+    agentStorage,
+    github,
+    workspaceGitService,
+    createPaseoWorktreeWorkflow: createPaseoWorktreeForTools,
+    archiveAgentForClose: (agentId) =>
+      archiveAgentCommand({ agentManager, agentStorage, logger }, agentId),
+    findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+    listActiveWorkspaces: listActiveWorkspacesExternal,
+    archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
+    emit: emitExternalSessionMessage,
+    emitAgentRemove: async () => undefined,
+    emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
+    markWorkspaceArchiving: markWorkspaceArchivingExternal,
+    clearWorkspaceArchiving: clearWorkspaceArchivingExternal,
+    killTerminalsForWorkspace: (workspaceId) =>
+      killTerminalsForWorkspace({ terminalManager, sessionLogger: logger }, workspaceId),
+    logger,
+  });
+  const hubRelationships = new HubRelationshipController({
+    paseoHome: config.paseoHome,
+    hostname: getHostname(),
+    serverId,
+    daemonPublicKey: daemonKeyPair.publicKeyB64,
+    logger,
+    remote: dependencies.hubRelationshipRemote ?? new DirectHubRelationshipRemote(),
+    clock: dependencies.hubRelationshipClock,
+    retryPolicy: dependencies.hubRelationshipRetryPolicy,
+    createDaemonId: dependencies.createHubDaemonId,
+    attachSocket: async (socket, options) => {
+      if (!wsServer) throw new Error("WebSocket server is not running");
+      await wsServer.attachHubSocket(socket, options);
+    },
+    createExecutionAgents: (daemonId) =>
+      new DaemonExecutions({
+        daemonId,
+        agentManager,
+        agentStorage,
+        createAgent,
+        interruptAgent: (agentId) => cancelAgentRunCommand({ agentManager, logger }, agentId),
+        archiveWorkspace: archiveWorkspaceByIdExternal,
+        cleanupFailedCreate: (input) =>
+          hubAgentLifecycle.cleanupCreatedWorktreeAfterFailedAgentCreate(input),
+      }),
+  });
+
+  const createScheduleLocalWorkspaceExternal = async (input: {
+    cwd: string;
+    firstAgentContext: FirstAgentContext;
+  }) => {
+    const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
+      input.cwd,
+      resolveFirstAgentPromptTitle(input.firstAgentContext),
+    );
+    workspaceAutoName.scheduleForDirectory({
+      workspaceId: workspace.workspaceId,
+      cwd: workspace.cwd,
+      firstAgentContext: input.firstAgentContext,
+    });
+    await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
+    return workspace;
+  };
+  const createSchedulePaseoWorktreeExternal = async (input: {
+    cwd: string;
+    firstAgentContext: FirstAgentContext;
+  }) => {
+    const result = await createPaseoWorktreeForTools({
+      cwd: input.cwd,
+      firstAgentContext: input.firstAgentContext,
+    });
+    await emitWorkspaceUpdatesExternal([result.workspace.workspaceId]);
+    return result;
+  };
+  const archiveScheduleWorkspaceExternal = async (workspaceId: string) => {
+    await archiveByScope(
+      {
+        paseoHome: config.paseoHome,
+        paseoWorktreesBaseRoot: config.worktreesRoot,
+        github,
+        workspaceGitService,
+        agentManager,
+        agentStorage,
+        findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+        listActiveWorkspaces: listActiveWorkspacesExternal,
+        getWorkspace: (workspaceIdToGet) => workspaceRegistry.get(workspaceIdToGet),
+        archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
+        emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
+        markWorkspaceArchiving: markWorkspaceArchivingExternal,
+        clearWorkspaceArchiving: clearWorkspaceArchivingExternal,
+        killTerminalsForWorkspace: (workspaceIdToKill) =>
+          killTerminalsForWorkspace(
+            {
+              terminalManager,
+              sessionLogger: logger,
+            },
+            workspaceIdToKill,
+          ),
+        stopWorkspaceSetup: (workspaceIdToStop) => workspaceSetupRuntime.stop(workspaceIdToStop),
+        sessionLogger: logger,
+      },
+      {
+        scope: { kind: "workspace", workspaceId },
+        requestId: "schedule-run-finish",
+      },
+    );
+  };
+  const scheduleService = new ScheduleService({
+    paseoHome: config.paseoHome,
+    logger,
+    agentManager,
+    agentStorage,
+    createAgent,
+    createDirectoryWorkspace: createScheduleLocalWorkspaceExternal,
+    createPaseoWorktreeWorkspace: createSchedulePaseoWorktreeExternal,
+    archiveWorkspace: archiveScheduleWorkspaceExternal,
+  });
+  await scheduleService.start();
+  agentManager.setAgentArchivedCallback(async (agentId) => {
+    try {
+      await scheduleService.completeForAgent(agentId);
+    } catch (error) {
+      logger.warn({ err: error, agentId }, "Failed to complete schedules for archived agent");
+    }
+  });
+  logger.info({ elapsed: elapsed() }, "Schedule service initialized");
+  logger.info({ elapsed: elapsed() }, "Loading persisted agent registry");
+  const persistedRecords = await agentStorage.list();
+  logger.info(
+    { elapsed: elapsed() },
+    `Agent registry loaded (${persistedRecords.length} record${persistedRecords.length === 1 ? "" : "s"}); agents will initialize on demand`,
+  );
+  logger.info(
+    "Voice mode configured for agent-scoped resume flow (no dedicated voice assistant provider)",
+  );
+  logger.info({ elapsed: elapsed() }, "Preparing voice and MCP runtime");
+
+  const createAgentToolHostDependencies = (
+    runtime: PaseoToolRuntimeContext,
+  ): PaseoToolHostDependencies => ({
+    agentManager,
+    agentStorage,
+    terminalManager,
+    getDaemonTcpPort: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
+    scheduleService,
+    providerSnapshotManager,
+    daemonConfigStore,
+    github,
+    workspaceGitService,
+    findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+    listActiveWorkspaces: listActiveWorkspacesExternal,
+    archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
+    emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
+    workspaceRegistry,
+    projectRegistry,
+    createDirectoryWorkspace: async (cwd, title, projectId) => {
+      const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
+        cwd,
+        title,
+        projectId,
+      );
+      await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
+      return workspace;
+    },
+    workspaceScripts: createWorkspaceScriptsService({
+      serviceProxy,
+      scriptRuntimeStore,
+      terminalManager,
+      workspaceRegistry,
+      projectRegistry,
+      workspaceGitService,
+      getDaemonTcpPort: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
+      getDaemonTcpHost: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.host : null),
+      serviceProxyPublicBaseUrl,
+      resolveScriptHealth: (hostname) => scriptHealthMonitor.getHealthForHostname(hostname),
+      logger,
+      // MCP operations do not belong to one WebSocket session, so lifecycle
+      // status updates fan out to every connected client.
+      emit: (message) => wsServer?.broadcast(wrapSessionMessage(message)),
+      spawnWorkspaceScript,
+      globalServicePorts: loadPersistedConfig(config.paseoHome).worktrees?.servicePorts,
+    }),
+    markWorkspaceArchiving: markWorkspaceArchivingExternal,
+    clearWorkspaceArchiving: clearWorkspaceArchivingExternal,
+    ensureWorkspaceForCreate: createAgentCommandDependencies.ensureWorkspaceForCreate,
+    createPaseoWorktree: createAgentCommandDependencies.createPaseoWorktree,
+    browserToolsEnabled: browserToolsPolicy.isEnabled(),
+    browserToolsBroker,
+    paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
+    callerAgentId: runtime.callerAgentId,
+    enableVoiceTools: runtime.enableVoiceTools,
+    voiceOnly: runtime.voiceOnly,
+    resolveSpeakHandler: (agentId) => wsServer?.resolveVoiceSpeakHandler(agentId) ?? null,
+    resolveCallerContext: (agentId) => wsServer?.resolveVoiceCallerContext(agentId) ?? null,
+    logger,
+  });
+  const createAgentToolCatalog = (runtime: PaseoToolRuntimeContext) =>
+    createPaseoToolCatalog(createAgentToolHostDependencies(runtime));
+  agentManager.setPaseoToolCatalogFactory(createAgentToolCatalog);
+  agentManager.setPaseoToolsEnabled(config.mcpInjectIntoAgents !== false);
+
+  let mcpEnabled = config.mcpEnabled ?? true;
+  let agentMcpBaseUrl: string | null = null;
+  {
+    const agentMcpRoute = "/mcp/agents";
+
+    const createAgentMcpSession = async (callerAgentId?: string) => {
+      const agentMcpServer = await createAgentMcpServer(
+        createAgentToolHostDependencies({ callerAgentId }),
+      );
+
+      // Stateless mode: each HTTP request builds a fresh server + transport that is
+      // torn down when the response closes, so no per-session state is retained between
+      // requests. The agent control plane only lists and calls tools, neither of which
+      // needs cross-request state, so sessions would only pin memory for the life of the
+      // daemon (agents that exit without a clean DELETE never get reaped).
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        // NOTE: We enforce a Vite-like host allowlist at the app/websocket layer.
+        // StreamableHTTPServerTransport's built-in check requires exact Host header matches.
+        enableDnsRebindingProtection: false,
+      });
+      Object.assign(transport, {
+        onerror: (err: Error) => {
+          logger.error({ err }, "Agent MCP transport error");
+        },
+      });
+
+      await agentMcpServer.connect(transport);
+      return { server: agentMcpServer, transport };
+    };
+
+    const runAgentMcpRequest = async (
+      req: express.Request,
+      res: express.Response,
+    ): Promise<void> => {
+      if (!mcpEnabled) {
+        res.status(404).json({ error: "Agent MCP endpoint disabled" });
+        return;
+      }
+      // This route is exempt from the global daemon-password middleware, so it
+      // authenticates here using the injected capability token (or a valid
+      // daemon password). Without this, a password-protected daemon would be
+      // wide open on its agent control plane.
+      if (
+        !(await isAgentMcpRequestAuthorized({
+          password: config.auth?.password,
+          capabilityToken: agentMcpAuthToken,
+          authorizationHeader: req.header("authorization"),
+        }))
+      ) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      if (config.mcpDebug) {
+        logger.debug(
+          {
+            method: req.method,
+            url: req.originalUrl,
+            sessionId: req.header("mcp-session-id"),
+            authorization: req.header("authorization") ? REDACTED_LOG_VALUE : undefined,
+            body: summarizeAgentMcpDebugBody(req.body),
+          },
+          "Agent MCP request",
+        );
+      }
+      try {
+        // Stateless: GET (standalone SSE) and DELETE (session termination) have no
+        // meaning without sessions. The MCP client tolerates 405 on the GET stream
+        // and never issues a DELETE because it is never handed a session id.
+        if (req.method !== "POST") {
+          res.status(405).json({
+            jsonrpc: "2.0",
+            error: {
+              code: -32000,
+              message: "Method not allowed",
+            },
+            id: null,
+          });
+          return;
+        }
+        const callerAgentIdRaw = req.query.callerAgentId;
+        let callerAgentId: string | undefined;
+        if (typeof callerAgentIdRaw === "string") {
+          callerAgentId = callerAgentIdRaw;
+        } else if (Array.isArray(callerAgentIdRaw) && typeof callerAgentIdRaw[0] === "string") {
+          callerAgentId = callerAgentIdRaw[0];
+        }
+        const { server, transport } = await createAgentMcpSession(callerAgentId);
+        res.on("close", () => {
+          void transport.close();
+          void server.close();
+        });
+
+        await transport.handleRequest(
+          req as unknown as IncomingMessage,
+          res as unknown as ServerResponse,
+          req.body,
+        );
+      } catch (err) {
+        logger.error({ err }, "Failed to handle Agent MCP request");
+        if (!res.headersSent) {
+          res.status(500).json({
+            jsonrpc: "2.0",
+            error: {
+              code: -32603,
+              message: "Internal MCP server error",
+            },
+            id: null,
+          });
+        }
+      }
+    };
+
+    const handleAgentMcpRequest: express.RequestHandler = (req, res) => {
+      void runAgentMcpRequest(req, res);
+    };
+
+    app.post(agentMcpRoute, handleAgentMcpRequest);
+    app.get(agentMcpRoute, handleAgentMcpRequest);
+    app.delete(agentMcpRoute, handleAgentMcpRequest);
+    logger.info({ route: agentMcpRoute, enabled: mcpEnabled }, "Agent MCP route mounted");
+  }
+
+  const speechService = createSpeechService({
+    logger,
+    openaiConfig: config.openai,
+    speechConfig: config.speech,
+  });
+  logger.info({ elapsed: elapsed() }, "Speech service created");
+
+  logger.info({ elapsed: elapsed() }, "Bootstrap complete, ready to start listening");
+
+  const start = async () => {
+    let mainStarted = false;
+    try {
+      if (serviceProxyListenTarget) {
+        const boundServiceProxyTarget = await serviceProxy.startStandalone({
+          listenTarget: serviceProxyListenTarget,
+        });
+        serviceProxyListenTarget = boundServiceProxyTarget;
+        logger.info(
+          {
+            listen: formatListenTarget(serviceProxyListenTarget),
+            publicBaseUrl: serviceProxyPublicBaseUrl,
+            elapsed: elapsed(),
+          },
+          "Service proxy listening",
+        );
+      }
+
       // Start main HTTP server
       await new Promise<void>((resolve, reject) => {
         const onError = (err: Error) => {
@@ -694,53 +1535,149 @@ export async function createPaseoDaemon(
         };
         const onListening = () => {
           httpServer.off("error", onError);
+          mainStarted = true;
           const logAndResolve = async () => {
             boundListenTarget = resolveBoundListenTarget(listenTarget, httpServer);
+            const mcpBaseUrl = createAgentMcpBaseUrl(boundListenTarget);
+            agentMcpBaseUrl =
+              !mcpEnabled || config.mcpInjectIntoAgents === false ? null : mcpBaseUrl;
+            agentManager.setMcpBaseUrl(agentMcpBaseUrl);
+            agentManager.setPaseoToolsEnabled(mcpEnabled && config.mcpInjectIntoAgents !== false);
+            daemonConfigStore.onFieldChange("mcp.enabled", (value) => {
+              mcpEnabled = value !== false;
+              const inject = daemonConfigStore.get().mcp.injectIntoAgents !== false;
+              agentManager.setMcpBaseUrl(mcpEnabled && inject ? mcpBaseUrl : null);
+              agentManager.setPaseoToolsEnabled(mcpEnabled && inject);
+            });
+            daemonConfigStore.onFieldChange("mcp.injectIntoAgents", (value) => {
+              agentManager.setMcpBaseUrl(mcpEnabled && value ? mcpBaseUrl : null);
+              agentManager.setPaseoToolsEnabled(mcpEnabled && value !== false);
+            });
+            daemonConfigStore.onFieldChange("appendSystemPrompt", (value) => {
+              agentManager.setAppendSystemPrompt(typeof value === "string" ? value : "");
+            });
             const relayEnabled = config.relayEnabled ?? true;
             const relayEndpoint = config.relayEndpoint ?? "relay.paseo.sh:443";
             const relayPublicEndpoint = config.relayPublicEndpoint ?? relayEndpoint;
-            const appBaseUrl = config.appBaseUrl ?? "https://app.paseo.sh";
-
+            const relayUseTls = config.relayUseTls ?? relayEndpoint === "relay.paseo.sh:443";
+            const relayPublicUseTls = config.relayPublicUseTls ?? relayUseTls;
             if (boundListenTarget.type === "tcp") {
               logger.info(
                 {
                   host: boundListenTarget.host,
                   port: boundListenTarget.port,
+                  authRequired: !!config.auth?.password,
                   elapsed: elapsed(),
                 },
                 `Server listening on http://${boundListenTarget.host}:${boundListenTarget.port}`,
               );
             } else {
               logger.info(
-                { path: boundListenTarget.path, elapsed: elapsed() },
+                {
+                  path: boundListenTarget.path,
+                  authRequired: !!config.auth?.password,
+                  elapsed: elapsed(),
+                },
                 `Server listening on ${boundListenTarget.path}`,
               );
             }
-
-            if (relayEnabled) {
-              const offer = await createConnectionOfferV2({
-                serverId,
-                daemonPublicKeyB64: daemonKeyPair.publicKeyB64,
-                relay: { endpoint: relayPublicEndpoint },
-              });
-
-              const url = encodeOfferToFragmentUrl({ offer, appBaseUrl });
-              logger.info({ url }, "pairing_offer");
-
-              relayTransport?.stop().catch(() => undefined);
-              relayTransport = startRelayTransport({
-                logger,
-                attachSocket: (ws, metadata) => {
-                  if (!wsServer) {
-                    throw new Error("WebSocket server not initialized");
-                  }
-                  return wsServer.attachExternalSocket(ws, metadata);
-                },
-                relayEndpoint,
-                serverId,
-                daemonKeyPair: daemonKeyPair.keyPair,
-              });
+            if (config.auth?.password) {
+              logger.info("Daemon password authentication enabled");
             }
+
+            wsServer = new VoiceAssistantWebSocketServer(
+              httpServer,
+              logger,
+              serverId,
+              agentManager,
+              agentStorage,
+              downloadTokenStore,
+              config.paseoHome,
+              daemonConfigStore,
+              mcpBaseUrl,
+              {
+                getAllowedOrigins: () => allowedOrigins,
+                getHostnames: () => configuredHostnames,
+                daemonStatusRpc: dependencies.serverFeatureOverrides?.daemonStatusRpc,
+                relayConfig: dependencies.serverFeatureOverrides?.relayConfig,
+                startPaused: true,
+              },
+              workspaceAutoName,
+              config.auth,
+              speechService,
+              terminalManager,
+              {
+                finalTimeoutMs: config.dictationFinalTimeoutMs,
+              },
+              daemonVersion,
+              (intent) => {
+                try {
+                  config.onLifecycleIntent?.(intent);
+                } catch (error) {
+                  logger.error({ err: error, intent }, "Failed to handle daemon lifecycle intent");
+                }
+              },
+              projectRegistry,
+              workspaceRegistry,
+              scheduleService,
+              checkoutDiffManager,
+              serviceProxy,
+              scriptRuntimeStore,
+              handleBranchChange,
+              () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
+              () => (boundListenTarget?.type === "tcp" ? boundListenTarget.host : null),
+              (hostname) => scriptHealthMonitor.getHealthForHostname(hostname),
+              workspaceGitService,
+              github,
+              config.pushNotificationSender,
+              providerSnapshotManager,
+              {
+                listen: formatListenTarget(boundListenTarget ?? listenTarget),
+                worktreesRoot: config.worktreesRoot,
+                get appBaseUrl() {
+                  return appBaseUrl;
+                },
+                desktopManaged: config.desktopManaged === true,
+                getRelayConfig: () =>
+                  relayRuntime?.getConfig() ?? {
+                    enabled: daemonConfigStore.get().relay?.enabled ?? relayEnabled,
+                    endpoint: relayEndpoint,
+                    publicEndpoint: relayPublicEndpoint,
+                    useTls: relayUseTls,
+                    publicUseTls: relayPublicUseTls,
+                  },
+              },
+              serviceProxyPublicBaseUrl,
+              browserToolsBroker,
+              hubRelationships,
+              workspaceSetupRuntime,
+              pluginRuntime,
+              orchestrationSkills,
+              workspaceLabelService,
+            );
+            pluginRuntime.bindPaseoSessionHost(wsServer);
+            await pluginRuntime.start();
+            wsServer.beginAcceptingConnections();
+            relayRuntime = createRelayRuntime({
+              config: {
+                enabled: relayEnabled,
+                endpoint: relayEndpoint,
+                publicEndpoint: relayPublicEndpoint,
+                useTls: relayUseTls,
+                publicUseTls: relayPublicUseTls,
+              },
+              logger,
+              attachSocket: async (ws, metadata) => {
+                if (!wsServer) throw new Error("WebSocket server is not ready");
+                await wsServer.attachExternalSocket(ws, metadata);
+              },
+              serverId,
+              daemonKeyPair: daemonKeyPair.keyPair,
+            });
+            daemonConfigStore.onFieldChange("relay.enabled", (value) => {
+              relayRuntime?.setEnabled(value === true);
+            });
+            await hubRelationships.start();
           };
 
           logAndResolve().then(resolve, reject);
@@ -757,69 +1694,83 @@ export async function createPaseoDaemon(
           httpServer.listen(listenTarget.path);
         }
       });
-    };
 
-    const stop = async () => {
-      await closeAllAgents(logger, agentManager);
-      await agentManager.flush().catch(() => undefined);
-      detachAgentStoragePersistence();
-      await agentStorage.flush().catch(() => undefined);
-      await shutdownProviders(logger, {
-        runtimeSettings: config.agentProviderSettings,
-      });
-      terminalManager.killAll();
-      unsubscribeSpeechReadiness?.();
-      unsubscribeSpeechReadiness = null;
-      cleanupSpeechRuntime();
-      await relayTransport?.stop().catch(() => undefined);
-      if (wsServer) {
-        await wsServer.close();
+      // Start speech service after listening so synchronous Sherpa native
+      // model loading doesn't block the server from accepting connections.
+      speechService.start();
+      scriptHealthMonitor.start();
+    } catch (error) {
+      await pluginRuntime.stopAllPlugins().catch(() => undefined);
+      await serviceProxy.stopStandalone().catch(() => undefined);
+      if (mainStarted) {
+        httpServer.closeAllConnections();
+        await new Promise<void>((resolve) => httpServer.close(() => resolve()));
       }
-      if (voiceMcpBridgeManager) {
-        await voiceMcpBridgeManager.stop().catch(() => undefined);
-      }
-      await new Promise<void>((resolve) => {
-        httpServer.close(() => resolve());
-      });
-      // Clean up socket files
-      if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
-        unlinkSync(listenTarget.path);
-      }
-      // Release PID lock
-      if (ownsPidLock) {
-        await releasePidLock(config.paseoHome, {
-          ownerPid: pidLockOwnerPid,
-        });
-      }
-    };
-
-    return {
-      config,
-      agentManager,
-      agentStorage,
-      terminalManager,
-      paseoState,
-      start,
-      stop,
-      getListenTarget: () => boundListenTarget,
-    };
-  } catch (err) {
-    if (ownsPidLock) {
-      await releasePidLock(config.paseoHome, {
-        ownerPid: pidLockOwnerPid,
-      }).catch(() => undefined);
+      throw error;
     }
-    throw err;
-  }
+  };
+
+  const stop = async () => {
+    await pluginRuntime.stopAllPlugins();
+    await hubRelationships.stop();
+    workspaceReconciliation.dispose();
+    scriptHealthMonitor.stop();
+    // Freeze both ingress and registration before taking the agent closure snapshot.
+    wsServer?.prepareForShutdown();
+    agentManager.prepareForShutdown();
+    await closeAllAgents(logger, agentManager);
+    await agentManager.flushForShutdown().catch(() => undefined);
+    detachAgentStoragePersistence();
+    await agentStorage.flush().catch(() => undefined);
+    await providerSnapshotManager.shutdown();
+    terminalManager.killAll();
+    await speechService.stop();
+    await scheduleService.stop().catch(() => undefined);
+    await relayRuntime?.stop().catch(() => undefined);
+    if (wsServer) {
+      await wsServer.close();
+    }
+    await serviceProxy.stopStandalone();
+    // Force-drop remaining sockets so httpServer.close() resolves promptly.
+    // We've already closed wsServer (which sent ws-layer close frames) and
+    // stopped every other service, so anything still attached is a TCP
+    // socket whose higher-level shutdown hasn't fully released it (e.g.
+    // upgraded WS sockets in the closing handshake, or HTTP keep-alive
+    // sockets in CLOSE_WAIT). closeIdleConnections() does not catch
+    // upgraded sockets, so we use closeAllConnections() here.
+    httpServer.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      httpServer.close(() => resolve());
+    });
+    // Clean up socket files
+    if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
+      unlinkSync(listenTarget.path);
+    }
+  };
+
+  return {
+    config,
+    agentManager,
+    agentStorage,
+    terminalManager,
+    serviceProxy,
+    scriptRuntimeStore,
+    browserToolsBroker,
+    start,
+    stop,
+    getListenTarget: () => boundListenTarget,
+  };
 }
 
 async function closeAllAgents(logger: Logger, agentManager: AgentManager): Promise<void> {
   const agents = agentManager.listAgents();
-  for (const agent of agents) {
-    try {
-      await agentManager.closeAgent(agent.id);
-    } catch (err) {
-      logger.error({ err, agentId: agent.id }, "Failed to close agent");
-    }
-  }
+  await Promise.all(
+    agents.map(async (agent) => {
+      try {
+        await agentManager.closeAgent(agent.id);
+      } catch (err) {
+        logger.error({ err, agentId: agent.id }, "Failed to close agent");
+      }
+    }),
+  );
 }

@@ -1,44 +1,73 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, test } from "vitest";
 
 import {
-  findExecutable,
+  checkProviderLaunchAvailable,
+  createProviderEnv,
+  migrateProviderSettings,
+  ProviderOverrideSchema,
+  resolveProviderLaunch,
   resolveProviderCommandPrefix,
-  applyProviderEnv,
   type ProviderRuntimeSettings,
 } from "./provider-launch-config.js";
 
-type FindExecutableDependencies = NonNullable<Parameters<typeof findExecutable>[1]>;
+const originalPath = process.env.PATH;
+const tempDirs: string[] = [];
 
-function createFindExecutableDependencies(): FindExecutableDependencies {
+afterEach(() => {
+  process.env.PATH = originalPath;
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function makeTempDir(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "paseo-provider-launch-"));
+  tempDirs.push(dir);
+  return dir;
+}
+
+interface TestExecutable {
+  command: string;
+  path: string;
+}
+
+function createExecutable(dir: string, name: string, body = "echo test-version\n"): TestExecutable {
+  const command = process.platform === "win32" ? `${name}.cmd` : name;
+  const file = path.join(dir, command);
+  const contents = process.platform === "win32" ? "@echo test-version\r\n" : `#!/bin/sh\n${body}`;
+  writeFileSync(file, contents, "utf8");
+  chmodSync(file, 0o755);
   return {
-    execFileSync: vi.fn(),
-    execSync: vi.fn(),
-    existsSync: vi.fn(),
-    platform: vi.fn(() => "darwin"),
-    shell: undefined,
+    command,
+    path: file,
   };
 }
 
-let findExecutableDependencies: FindExecutableDependencies;
-
-beforeEach(() => {
-  findExecutableDependencies = createFindExecutableDependencies();
-});
-
 describe("resolveProviderCommandPrefix", () => {
-  test("uses resolved default command in default mode", () => {
-    const resolveDefault = vi.fn(() => "/usr/local/bin/claude");
+  test("uses resolved default command in default mode", async () => {
+    let calls = 0;
+    const resolveDefault = () => {
+      calls += 1;
+      return "/usr/local/bin/claude";
+    };
 
-    const resolved = resolveProviderCommandPrefix(undefined, resolveDefault);
+    const resolved = await resolveProviderCommandPrefix(undefined, resolveDefault);
 
-    expect(resolveDefault).toHaveBeenCalledTimes(1);
+    expect(calls).toBe(1);
     expect(resolved).toEqual({ command: "/usr/local/bin/claude", args: [] });
   });
 
-  test("appends args in append mode", () => {
-    const resolveDefault = vi.fn(() => "/usr/local/bin/claude");
+  test("appends args in append mode", async () => {
+    let calls = 0;
+    const resolveDefault = () => {
+      calls += 1;
+      return "/usr/local/bin/claude";
+    };
 
-    const resolved = resolveProviderCommandPrefix(
+    const resolved = await resolveProviderCommandPrefix(
       {
         mode: "append",
         args: ["--chrome"],
@@ -46,17 +75,21 @@ describe("resolveProviderCommandPrefix", () => {
       resolveDefault,
     );
 
-    expect(resolveDefault).toHaveBeenCalledTimes(1);
+    expect(calls).toBe(1);
     expect(resolved).toEqual({
       command: "/usr/local/bin/claude",
       args: ["--chrome"],
     });
   });
 
-  test("replaces command in replace mode without resolving default", () => {
-    const resolveDefault = vi.fn(() => "/usr/local/bin/claude");
+  test("replaces command in replace mode without resolving default", async () => {
+    let calls = 0;
+    const resolveDefault = () => {
+      calls += 1;
+      return "/usr/local/bin/claude";
+    };
 
-    const resolved = resolveProviderCommandPrefix(
+    const resolved = await resolveProviderCommandPrefix(
       {
         mode: "replace",
         argv: ["docker", "run", "--rm", "my-wrapper"],
@@ -64,7 +97,7 @@ describe("resolveProviderCommandPrefix", () => {
       resolveDefault,
     );
 
-    expect(resolveDefault).not.toHaveBeenCalled();
+    expect(calls).toBe(0);
     expect(resolved).toEqual({
       command: "docker",
       args: ["run", "--rm", "my-wrapper"],
@@ -72,7 +105,118 @@ describe("resolveProviderCommandPrefix", () => {
   });
 });
 
-describe("applyProviderEnv", () => {
+describe("resolveProviderLaunch", () => {
+  test("uses replace override as the spawned command", async () => {
+    const binDir = makeTempDir();
+    const shim = createExecutable(binDir, "custom-provider");
+
+    const launch = await resolveProviderLaunch({
+      commandConfig: { mode: "replace", argv: [shim.command, "--wrapped"] },
+      defaultBinary: "provider",
+    });
+
+    expect(launch).toEqual({
+      command: shim.command,
+      args: ["--wrapped"],
+      source: "override",
+    });
+  });
+
+  test("keeps an absolute replace override when the path exists", async () => {
+    const binDir = makeTempDir();
+    const shim = createExecutable(binDir, "custom-provider", "exit 42\n");
+
+    const launch = await resolveProviderLaunch({
+      commandConfig: { mode: "replace", argv: [shim.path, "--wrapped"] },
+      defaultBinary: "provider",
+    });
+
+    expect(launch).toEqual({
+      command: shim.path,
+      args: ["--wrapped"],
+      source: "override",
+    });
+  });
+
+  test("resolves append mode through the default binary", async () => {
+    const binDir = makeTempDir();
+    const binary = createExecutable(binDir, "default-provider");
+    process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ""}`;
+
+    const launch = await resolveProviderLaunch({
+      commandConfig: { mode: "append", args: ["--profile", "work"] },
+      defaultBinary: binary.command,
+    });
+
+    expect(launch).toEqual({
+      command: binary.command,
+      args: ["--profile", "work"],
+      source: "append",
+    });
+  });
+
+  test("resolves the default binary when no override is configured", async () => {
+    const binDir = makeTempDir();
+    const binary = createExecutable(binDir, "default-provider");
+    process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ""}`;
+
+    const launch = await resolveProviderLaunch({
+      defaultBinary: binary.command,
+    });
+
+    expect(launch).toEqual({
+      command: binary.command,
+      args: [],
+      source: "default",
+    });
+  });
+
+  test("keeps the default command when the default binary is missing", async () => {
+    process.env.PATH = makeTempDir();
+
+    const launch = await resolveProviderLaunch({
+      defaultBinary: "paseo-provider-missing",
+    });
+
+    expect(launch).toEqual({
+      command: "paseo-provider-missing",
+      args: [],
+      source: "default",
+    });
+  });
+});
+
+describe("checkProviderLaunchAvailable", () => {
+  test("reports available with a resolved path", async () => {
+    const binDir = makeTempDir();
+    const binary = createExecutable(binDir, "default-provider");
+    process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ""}`;
+
+    const launch = await resolveProviderLaunch({
+      defaultBinary: binary.command,
+    });
+
+    await expect(checkProviderLaunchAvailable(launch)).resolves.toEqual({
+      available: true,
+      resolvedPath: binary.path,
+    });
+  });
+
+  test("reports missing override commands as unavailable", async () => {
+    process.env.PATH = makeTempDir();
+    const launch = await resolveProviderLaunch({
+      commandConfig: { mode: "replace", argv: ["paseo-provider-missing"] },
+      defaultBinary: "provider",
+    });
+
+    await expect(checkProviderLaunchAvailable(launch)).resolves.toEqual({
+      available: false,
+      resolvedPath: null,
+    });
+  });
+});
+
+describe("createProviderEnv", () => {
   test("merges provider env overrides", () => {
     const base = {
       PATH: "/usr/bin",
@@ -85,7 +229,7 @@ describe("applyProviderEnv", () => {
       },
     };
 
-    const env = applyProviderEnv(base, runtime, {});
+    const env = createProviderEnv({ baseEnv: base, runtimeSettings: runtime });
 
     expect(env.PATH).toBe("/usr/bin");
     expect(env.HOME).toBe("/custom/home");
@@ -93,26 +237,16 @@ describe("applyProviderEnv", () => {
     expect(Object.keys(env).length).toBeGreaterThanOrEqual(3);
   });
 
-  test("shell env PATH wins over base env PATH", () => {
-    const base = { PATH: "/usr/bin:/bin" };
-    const shellEnv = { PATH: "/usr/local/bin:/usr/bin:/bin:/home/user/.nvm/bin" };
-
-    const env = applyProviderEnv(base, undefined, shellEnv);
-
-    expect(env.PATH).toBe("/usr/local/bin:/usr/bin:/bin:/home/user/.nvm/bin");
-  });
-
-  test("runtimeSettings env wins over shell env", () => {
+  test("runtimeSettings env wins over base env", () => {
     const base = { PATH: "/usr/bin" };
-    const shellEnv = { PATH: "/usr/local/bin:/usr/bin" };
     const runtime: ProviderRuntimeSettings = { env: { PATH: "/custom/path" } };
 
-    const env = applyProviderEnv(base, runtime, shellEnv);
+    const env = createProviderEnv({ baseEnv: base, runtimeSettings: runtime });
 
     expect(env.PATH).toBe("/custom/path");
   });
 
-  test("strips parent Claude Code session env vars", () => {
+  test("strips parent Claude Code session env vars without removing SDK child flags", () => {
     const base = {
       PATH: "/usr/bin",
       CLAUDECODE: "1",
@@ -122,47 +256,185 @@ describe("applyProviderEnv", () => {
       CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: "true",
     };
 
-    const env = applyProviderEnv(base, undefined, {});
+    const env = createProviderEnv({ baseEnv: base });
 
     expect(env.PATH).toBe("/usr/bin");
     expect(env.CLAUDECODE).toBeUndefined();
     expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined();
     expect(env.CLAUDE_CODE_SSE_PORT).toBeUndefined();
     expect(env.CLAUDE_AGENT_SDK_VERSION).toBeUndefined();
-    expect(env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING).toBeUndefined();
+    expect(env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING).toBe("true");
   });
 });
 
-describe("findExecutable", () => {
-  test("uses the last line from login-shell which output", () => {
-    findExecutableDependencies.shell = "/bin/zsh";
-    findExecutableDependencies.execSync.mockReturnValue(
-      "echo from profile\n/usr/local/bin/codex\n",
-    );
+describe("ProviderOverrideSchema", () => {
+  test("accepts built-in override fields", () => {
+    const parsed = ProviderOverrideSchema.parse({
+      command: ["custom-claude", "--json"],
+      env: {
+        FOO: "bar",
+      },
+      enabled: false,
+      order: 2,
+    });
 
-    expect(findExecutable("codex", findExecutableDependencies)).toBe("/usr/local/bin/codex");
-    expect(findExecutableDependencies.execSync).toHaveBeenCalledOnce();
-    expect(findExecutableDependencies.execFileSync).not.toHaveBeenCalled();
+    expect(parsed.command).toEqual(["custom-claude", "--json"]);
+    expect(parsed.env?.FOO).toBe("bar");
+    expect(parsed.enabled).toBe(false);
+    expect(parsed.order).toBe(2);
   });
 
-  test("warns and returns null when the final which line is not an absolute path", () => {
-    findExecutableDependencies.shell = "/bin/zsh";
-    findExecutableDependencies.execSync.mockReturnValue("profile noise\ncodex\n");
-    findExecutableDependencies.execFileSync.mockReturnValue("codex\n");
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  test("accepts models with thinking options", () => {
+    const parsed = ProviderOverrideSchema.parse({
+      models: [
+        {
+          id: "zai-fast",
+          label: "ZAI Fast",
+          isDefault: true,
+          thinkingOptions: [
+            {
+              id: "deep",
+              label: "Deep",
+              description: "Higher effort",
+            },
+          ],
+        },
+      ],
+    });
 
-    expect(findExecutable("codex", findExecutableDependencies)).toBeNull();
-    expect(warnSpy).toHaveBeenCalledTimes(2);
+    expect(parsed.models).toEqual([
+      {
+        id: "zai-fast",
+        label: "ZAI Fast",
+        isDefault: true,
+        thinkingOptions: [
+          {
+            id: "deep",
+            label: "Deep",
+            description: "Higher effort",
+          },
+        ],
+      },
+    ]);
+  });
+});
 
-    warnSpy.mockRestore();
+describe("migrateProviderSettings", () => {
+  const builtinProviderIds = ["claude", "codex", "copilot", "opencode", "pi", "omp"];
+
+  test("passes through entries already in the new format", () => {
+    const migrated = migrateProviderSettings(
+      {
+        zai: {
+          extends: "claude",
+          label: "ZAI",
+          command: ["zai"],
+          env: {
+            ZAI_KEY: "secret",
+          },
+        },
+      },
+      builtinProviderIds,
+    );
+
+    expect(migrated).toEqual({
+      zai: {
+        extends: "claude",
+        label: "ZAI",
+        command: ["zai"],
+        env: {
+          ZAI_KEY: "secret",
+        },
+      },
+    });
   });
 
-  test("returns direct paths when they exist", () => {
-    findExecutableDependencies.existsSync.mockReturnValue(true);
-
-    expect(findExecutable("/usr/local/bin/codex", findExecutableDependencies)).toBe(
-      "/usr/local/bin/codex",
+  test("migrates mode replace to command argv", () => {
+    const migrated = migrateProviderSettings(
+      {
+        claude: {
+          command: {
+            mode: "replace",
+            argv: ["docker", "run", "--rm", "claude"],
+          },
+        },
+      },
+      builtinProviderIds,
     );
-    expect(findExecutableDependencies.existsSync).toHaveBeenCalledWith("/usr/local/bin/codex");
+
+    expect(migrated).toEqual({
+      claude: {
+        command: ["docker", "run", "--rm", "claude"],
+      },
+    });
+  });
+
+  test("migrates mode default by dropping command", () => {
+    const migrated = migrateProviderSettings(
+      {
+        codex: {
+          command: {
+            mode: "default",
+          },
+          env: {
+            FOO: "bar",
+          },
+        },
+      },
+      builtinProviderIds,
+    );
+
+    expect(migrated).toEqual({
+      codex: {
+        env: {
+          FOO: "bar",
+        },
+      },
+    });
+  });
+
+  test("drops append mode entries because they cannot be auto-migrated", () => {
+    const migrated = migrateProviderSettings(
+      {
+        claude: {
+          command: {
+            mode: "append",
+            args: ["--debug"],
+          },
+          env: {
+            FOO: "bar",
+          },
+        },
+      },
+      builtinProviderIds,
+    );
+
+    expect(migrated).toEqual({});
+  });
+
+  test("preserves legacy env while migrating old entries", () => {
+    const migrated = migrateProviderSettings(
+      {
+        opencode: {
+          command: {
+            mode: "replace",
+            argv: ["opencode"],
+          },
+          env: {
+            PATH: "/custom/bin",
+          },
+        },
+      },
+      builtinProviderIds,
+    );
+
+    expect(migrated).toEqual({
+      opencode: {
+        command: ["opencode"],
+        env: {
+          PATH: "/custom/bin",
+        },
+      },
+    });
   });
 });

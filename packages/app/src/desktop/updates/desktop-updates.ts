@@ -1,13 +1,16 @@
-import { Platform } from "react-native";
-import { isDesktop } from "@/desktop/host";
+import { isElectronRuntime } from "@/desktop/host";
 import { invokeDesktopCommand } from "@/desktop/electron/invoke";
+import { isWeb } from "@/constants/platform";
+import { i18n } from "@/i18n/i18next";
 
 export interface DesktopAppUpdateCheckResult {
   hasUpdate: boolean;
+  readyToInstall: boolean;
   currentVersion: string | null;
   latestVersion: string | null;
   body: string | null;
   date: string | null;
+  errorMessage: string | null;
 }
 
 export interface DesktopAppUpdateInstallResult {
@@ -15,6 +18,14 @@ export interface DesktopAppUpdateInstallResult {
   version: string | null;
   message: string;
 }
+
+export interface DesktopRuntimeInfo {
+  appVersion: string | null;
+  runningUnderARM64Translation: boolean;
+}
+
+export type DesktopReleaseChannel = "stable" | "beta";
+export type DesktopAppUpdateCheckIntent = "automatic" | "manual";
 
 export interface LocalDaemonUpdateResult {
   exitCode: number;
@@ -26,6 +37,8 @@ export interface LocalDaemonVersionResult {
   version: string | null;
   error: string | null;
 }
+
+const RELEASE_DOWNLOAD_BASE_URL = "https://github.com/getpaseo/paseo/releases/download";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -49,7 +62,7 @@ function toNumberOr(defaultValue: number, value: unknown): number {
 }
 
 export function shouldShowDesktopUpdateSection(): boolean {
-  return Platform.OS === "web" && isDesktop();
+  return isWeb && isElectronRuntime();
 }
 
 export function parseLocalDaemonVersionResult(raw: unknown): LocalDaemonVersionResult {
@@ -68,23 +81,57 @@ export async function getLocalDaemonVersion(): Promise<LocalDaemonVersionResult>
   return parseLocalDaemonVersionResult(result);
 }
 
-export async function checkDesktopAppUpdate(): Promise<DesktopAppUpdateCheckResult> {
-  const result = await invokeDesktopCommand<unknown>("check_app_update");
+export function parseDesktopRuntimeInfo(raw: unknown): DesktopRuntimeInfo {
+  if (!isRecord(raw)) {
+    return {
+      appVersion: null,
+      runningUnderARM64Translation: false,
+    };
+  }
+
+  return {
+    appVersion: toStringOrNull(raw.appVersion),
+    runningUnderARM64Translation: raw.runningUnderARM64Translation === true,
+  };
+}
+
+export async function getDesktopRuntimeInfo(): Promise<DesktopRuntimeInfo> {
+  const result = await invokeDesktopCommand<unknown>("desktop_get_runtime_info");
+  return parseDesktopRuntimeInfo(result);
+}
+
+export async function checkDesktopAppUpdate({
+  releaseChannel,
+  intent,
+}: {
+  releaseChannel: DesktopReleaseChannel;
+  intent: DesktopAppUpdateCheckIntent;
+}): Promise<DesktopAppUpdateCheckResult> {
+  const result = await invokeDesktopCommand<unknown>("check_app_update", {
+    releaseChannel,
+    intent,
+  });
   if (!isRecord(result)) {
     throw new Error("Unexpected response while checking desktop updates.");
   }
 
   return {
     hasUpdate: result.hasUpdate === true,
+    readyToInstall: result.readyToInstall === true,
     currentVersion: toStringOrNull(result.currentVersion),
     latestVersion: toStringOrNull(result.latestVersion),
     body: toStringOrNull(result.body),
     date: toStringOrNull(result.date),
+    errorMessage: toStringOrNull(result.errorMessage),
   };
 }
 
-export async function installDesktopAppUpdate(): Promise<DesktopAppUpdateInstallResult> {
-  const result = await invokeDesktopCommand<unknown>("install_app_update");
+export async function installDesktopAppUpdate({
+  releaseChannel,
+}: {
+  releaseChannel: DesktopReleaseChannel;
+}): Promise<DesktopAppUpdateInstallResult> {
+  const result = await invokeDesktopCommand<unknown>("install_app_update", { releaseChannel });
   if (!isRecord(result)) {
     throw new Error("Unexpected response while installing desktop update.");
   }
@@ -92,7 +139,7 @@ export async function installDesktopAppUpdate(): Promise<DesktopAppUpdateInstall
   return {
     installed: result.installed === true,
     version: toStringOrNull(result.version),
-    message: toStringOrNull(result.message) ?? "Update completed.",
+    message: toStringOrNull(result.message) ?? i18n.t("desktop.updates.status.installed"),
   };
 }
 
@@ -139,6 +186,15 @@ export function formatVersionWithPrefix(version: string | null | undefined): str
   }
 
   return value.startsWith("v") ? value : `v${value}`;
+}
+
+export function buildMacAppleSiliconDownloadUrl(version: string | null | undefined): string | null {
+  const normalizedVersion = normalizeVersionForComparison(version);
+  if (!normalizedVersion) {
+    return null;
+  }
+
+  return `${RELEASE_DOWNLOAD_BASE_URL}/v${normalizedVersion}/Paseo-${normalizedVersion}-arm64.dmg`;
 }
 
 export function buildDaemonUpdateDiagnostics(result: LocalDaemonUpdateResult): string {

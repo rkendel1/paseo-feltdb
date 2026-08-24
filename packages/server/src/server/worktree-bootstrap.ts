@@ -1,14 +1,14 @@
 import { v4 as uuidv4 } from "uuid";
 import type { Logger } from "pino";
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
-import { sep } from "node:path";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type { TerminalSession } from "../terminal/terminal.js";
 import {
-  createWorktree,
+  getScriptConfigs,
   getWorktreeTerminalSpecs,
-  listPaseoWorktrees,
+  isServiceScript,
+  paseoConfigParseError,
+  processCarriageReturns,
+  readPaseoConfig,
   resolveWorktreeRuntimeEnv,
   runWorktreeSetupCommands,
   WorktreeSetupError,
@@ -16,7 +16,21 @@ import {
   type WorktreeSetupCommandResult,
   type WorktreeRuntimeEnv,
 } from "../utils/worktree.js";
-import type { AgentTimelineItem } from "./agent/agent-sdk-types.js";
+import type { ServiceProxySubsystem } from "./service-proxy.js";
+import { allocateWorkspaceServicePort } from "./workspace-service-port-allocator.js";
+import type { WorkspaceScriptRuntimeStore } from "./workspace-script-runtime-store.js";
+import type { AgentTimelineItem, ToolCallDetail } from "./agent/agent-sdk-types.js";
+import {
+  assertNoServiceEnvNameCollisions,
+  buildWorkspaceServiceEnv,
+  type WorkspaceServicePeer,
+} from "./workspace-service-env.js";
+import {
+  ensureWorkspaceServicePortPlan,
+  requirePlannedWorkspaceServicePort,
+  refreshWorkspaceServicePort,
+} from "./workspace-service-port-registry.js";
+import type { PaseoServicePortAllocation } from "@getpaseo/protocol/paseo-config-schema";
 
 export interface WorktreeBootstrapTerminalResult {
   name: string | null;
@@ -28,37 +42,34 @@ export interface WorktreeBootstrapTerminalResult {
 
 export interface RunAsyncWorktreeBootstrapOptions {
   agentId: string;
+  // Workspace the bootstrapped terminals belong to. Stamping it lets
+  // workspaceId-scoped archive tear these terminals down.
+  workspaceId: string;
   worktree: WorktreeConfig;
+  workspaceCwd?: string;
+  shouldBootstrap?: boolean;
   terminalManager: TerminalManager | null;
   appendTimelineItem: (item: AgentTimelineItem) => Promise<boolean>;
   emitLiveTimelineItem?: (item: AgentTimelineItem) => Promise<boolean>;
   logger?: Logger;
 }
 
-export interface CreateAgentWorktreeOptions {
-  cwd: string;
-  branchName: string;
-  baseBranch: string;
-  worktreeSlug: string;
-  paseoHome?: string;
-}
-
 const MAX_WORKTREE_SETUP_COMMAND_OUTPUT_BYTES = 64 * 1024;
 const WORKTREE_SETUP_TRUNCATION_MARKER = "\n...<output truncated in the middle>...\n";
 const WORKTREE_BOOTSTRAP_TERMINAL_READY_TIMEOUT_MS = 1_500;
-const READ_ONLY_GIT_ENV: NodeJS.ProcessEnv = {
-  ...process.env,
-  GIT_OPTIONAL_LOCKS: "0",
-};
-const execAsync = promisify(exec);
-const worktreeSetupEligibility = new WeakMap<WorktreeConfig, boolean>();
 
-type MiddleTruncationAccumulator = {
+interface MiddleTruncationAccumulator {
   totalBytes: number;
   head: string;
   tail: string;
   truncated: boolean;
-};
+}
+
+export type WorktreeSetupOutputAccumulator = MiddleTruncationAccumulator;
+export interface WorktreeSetupProgressAccumulator {
+  resultsByIndex: Map<number, WorktreeSetupCommandResult>;
+  outputAccumulatorsByIndex: Map<number, WorktreeSetupOutputAccumulator>;
+}
 
 function byteLength(text: string): number {
   return Buffer.byteLength(text, "utf8");
@@ -86,7 +97,7 @@ function sliceLastBytes(text: string, maxBytes: number): string {
   return bytes.subarray(bytes.length - maxBytes).toString("utf8");
 }
 
-function createMiddleTruncationAccumulator(): MiddleTruncationAccumulator {
+export function createWorktreeSetupOutputAccumulator(): WorktreeSetupOutputAccumulator {
   return {
     totalBytes: 0,
     head: "",
@@ -103,8 +114,8 @@ function getHeadTailBudgets(maxBytes: number): { headBytes: number; tailBytes: n
   return { headBytes, tailBytes };
 }
 
-function appendToMiddleTruncationAccumulator(
-  accumulator: MiddleTruncationAccumulator,
+export function appendWorktreeSetupOutputAccumulator(
+  accumulator: WorktreeSetupOutputAccumulator,
   chunk: string,
 ): void {
   if (!chunk) {
@@ -159,53 +170,6 @@ function renderMiddleTruncationAccumulator(accumulator: MiddleTruncationAccumula
   };
 }
 
-export async function createAgentWorktree(
-  options: CreateAgentWorktreeOptions,
-): Promise<WorktreeConfig> {
-  const existingWorktree = await findExistingPaseoWorktreeBySlug(options);
-  if (existingWorktree) {
-    const branchName = await resolveBranchNameForWorktreePath(existingWorktree.path);
-    const reusedWorktree = {
-      branchName,
-      worktreePath: existingWorktree.path,
-    };
-    worktreeSetupEligibility.set(reusedWorktree, false);
-    return reusedWorktree;
-  }
-
-  const createdWorktree = await createWorktree({
-    branchName: options.branchName,
-    cwd: options.cwd,
-    baseBranch: options.baseBranch,
-    worktreeSlug: options.worktreeSlug,
-    runSetup: false,
-    paseoHome: options.paseoHome,
-  });
-  worktreeSetupEligibility.set(createdWorktree, true);
-  return createdWorktree;
-}
-
-async function findExistingPaseoWorktreeBySlug(options: CreateAgentWorktreeOptions) {
-  const worktrees = await listPaseoWorktrees({
-    cwd: options.cwd,
-    paseoHome: options.paseoHome,
-  });
-  const slugSuffix = `${sep}${options.worktreeSlug}`;
-  return worktrees.find((worktree) => worktree.path.endsWith(slugSuffix));
-}
-
-async function resolveBranchNameForWorktreePath(worktreePath: string): Promise<string> {
-  const { stdout } = await execAsync("git branch --show-current", {
-    cwd: worktreePath,
-    env: READ_ONLY_GIT_ENV,
-  });
-  const branchName = stdout.trim();
-  if (!branchName) {
-    throw new Error(`Unable to resolve branch for existing worktree: ${worktreePath}`);
-  }
-  return branchName;
-}
-
 function formatDurationMs(durationMs: number): string {
   return `${(durationMs / 1000).toFixed(2)}s`;
 }
@@ -221,7 +185,7 @@ function commandStatusFromResult(
 
 function buildWorktreeSetupLog(input: {
   results: WorktreeSetupCommandResult[];
-  outputAccumulatorsByIndex?: Map<number, MiddleTruncationAccumulator>;
+  outputAccumulatorsByIndex?: Map<number, WorktreeSetupOutputAccumulator>;
 }): { log: string; truncated: boolean } {
   const { results, outputAccumulatorsByIndex } = input;
   if (results.length === 0) {
@@ -236,15 +200,13 @@ function buildWorktreeSetupLog(input: {
   const total = results.length;
   for (const [index, result] of results.entries()) {
     lines.push(`==> [${index + 1}/${total}] Running: ${result.command}`);
-    const accumulator = outputAccumulatorsByIndex?.get(index + 1);
-    const output = accumulator
-      ? renderMiddleTruncationAccumulator(accumulator)
-      : truncateTextInMiddle(
-          `${result.stdout ?? ""}${result.stderr ?? ""}`,
-          MAX_WORKTREE_SETUP_COMMAND_OUTPUT_BYTES,
-        );
-    if (output.text.length > 0) {
-      lines.push(output.text.replace(/\n$/, ""));
+    const output = buildWorktreeSetupCommandLog({
+      index: index + 1,
+      result,
+      outputAccumulatorsByIndex,
+    });
+    if (output.log.length > 0) {
+      lines.push(output.log.replace(/\n$/, ""));
     }
     if (output.truncated) {
       anyTruncated = true;
@@ -261,34 +223,136 @@ function buildWorktreeSetupLog(input: {
   };
 }
 
+function buildWorktreeSetupCommandLog(input: {
+  index: number;
+  result: WorktreeSetupCommandResult;
+  outputAccumulatorsByIndex?: Map<number, WorktreeSetupOutputAccumulator>;
+}): { log: string; truncated: boolean } {
+  const { index, result, outputAccumulatorsByIndex } = input;
+  const accumulator = outputAccumulatorsByIndex?.get(index);
+  const rendered = accumulator
+    ? renderMiddleTruncationAccumulator(accumulator)
+    : truncateTextInMiddle(
+        `${result.stdout ?? ""}${result.stderr ?? ""}`,
+        MAX_WORKTREE_SETUP_COMMAND_OUTPUT_BYTES,
+      );
+
+  return {
+    log: processCarriageReturns(rendered.text),
+    truncated: rendered.truncated,
+  };
+}
+
+export function createWorktreeSetupProgressAccumulator(): WorktreeSetupProgressAccumulator {
+  return {
+    resultsByIndex: new Map(),
+    outputAccumulatorsByIndex: new Map(),
+  };
+}
+
+export function applyWorktreeSetupProgressEvent(
+  accumulator: WorktreeSetupProgressAccumulator,
+  event: Parameters<NonNullable<Parameters<typeof runWorktreeSetupCommands>[0]["onEvent"]>>[0],
+): void {
+  const existing = accumulator.resultsByIndex.get(event.index);
+  const baseResult: WorktreeSetupCommandResult = existing ?? {
+    command: event.command,
+    cwd: event.cwd,
+    stdout: "",
+    stderr: "",
+    exitCode: null,
+    durationMs: 0,
+  };
+
+  if (event.type === "output") {
+    const outputAccumulator =
+      accumulator.outputAccumulatorsByIndex.get(event.index) ??
+      createWorktreeSetupOutputAccumulator();
+    appendWorktreeSetupOutputAccumulator(outputAccumulator, event.chunk);
+    accumulator.outputAccumulatorsByIndex.set(event.index, outputAccumulator);
+    accumulator.resultsByIndex.set(event.index, {
+      ...baseResult,
+      stdout: baseResult.stdout,
+      stderr: baseResult.stderr,
+    });
+    return;
+  }
+
+  if (event.type === "command_completed") {
+    accumulator.resultsByIndex.set(event.index, {
+      ...baseResult,
+      stdout: event.stdout,
+      stderr: event.stderr,
+      exitCode: event.exitCode,
+      durationMs: event.durationMs,
+    });
+    return;
+  }
+
+  accumulator.resultsByIndex.set(event.index, baseResult);
+}
+
+export function getWorktreeSetupProgressResults(
+  accumulator: WorktreeSetupProgressAccumulator,
+): WorktreeSetupCommandResult[] {
+  return Array.from(accumulator.resultsByIndex.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([, result]) => result);
+}
+
+export function buildWorktreeSetupDetail(input: {
+  worktree: WorktreeConfig;
+  results: WorktreeSetupCommandResult[];
+  outputAccumulatorsByIndex?: Map<number, WorktreeSetupOutputAccumulator>;
+}): Extract<ToolCallDetail, { type: "worktree_setup" }> {
+  let anyCommandTruncated = false;
+  const commands = input.results.map((result, index) => {
+    const renderedLog = buildWorktreeSetupCommandLog({
+      index: index + 1,
+      result,
+      outputAccumulatorsByIndex: input.outputAccumulatorsByIndex,
+    });
+    if (renderedLog.truncated) {
+      anyCommandTruncated = true;
+    }
+    return {
+      index: index + 1,
+      command: result.command,
+      cwd: result.cwd,
+      log: renderedLog.log,
+      status: commandStatusFromResult(result),
+      exitCode: result.exitCode,
+      ...(result.durationMs > 0 ? { durationMs: result.durationMs } : {}),
+    };
+  });
+  const renderedLog = buildWorktreeSetupLog({
+    results: input.results,
+    outputAccumulatorsByIndex: input.outputAccumulatorsByIndex,
+  });
+
+  return {
+    type: "worktree_setup",
+    worktreePath: input.worktree.worktreePath,
+    branchName: input.worktree.branchName,
+    log: renderedLog.log,
+    commands,
+    ...(renderedLog.truncated || anyCommandTruncated ? { truncated: true } : {}),
+  };
+}
+
 function buildSetupTimelineItem(input: {
   callId: string;
   status: "running" | "completed" | "failed";
   worktree: WorktreeConfig;
   results: WorktreeSetupCommandResult[];
-  outputAccumulatorsByIndex?: Map<number, MiddleTruncationAccumulator>;
+  outputAccumulatorsByIndex?: Map<number, WorktreeSetupOutputAccumulator>;
   errorMessage: string | null;
 }): AgentTimelineItem {
-  const commands = input.results.map((result, index) => ({
-    index: index + 1,
-    command: result.command,
-    cwd: result.cwd,
-    status: commandStatusFromResult(result),
-    exitCode: result.exitCode,
-    ...(result.durationMs > 0 ? { durationMs: result.durationMs } : {}),
-  }));
-  const renderedLog = buildWorktreeSetupLog({
+  const detail = buildWorktreeSetupDetail({
+    worktree: input.worktree,
     results: input.results,
     outputAccumulatorsByIndex: input.outputAccumulatorsByIndex,
   });
-  const detail = {
-    type: "worktree_setup" as const,
-    worktreePath: input.worktree.worktreePath,
-    branchName: input.worktree.branchName,
-    log: renderedLog.log,
-    commands,
-    ...(renderedLog.truncated ? { truncated: true } : {}),
-  };
 
   if (input.status === "running") {
     return {
@@ -390,15 +454,16 @@ async function waitForTerminalBootstrapReadiness(
   }
 
   await new Promise<void>((resolve) => {
-    let settled = false;
+    let pendingResolve: (() => void) | null = resolve;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let unsubscribe: (() => void) | null = null;
 
     const finish = () => {
-      if (settled) {
+      if (!pendingResolve) {
         return;
       }
-      settled = true;
+      const fn = pendingResolve;
+      pendingResolve = null;
       if (timeout) {
         clearTimeout(timeout);
         timeout = null;
@@ -407,7 +472,7 @@ async function waitForTerminalBootstrapReadiness(
         unsubscribe();
         unsubscribe = null;
       }
-      resolve();
+      fn();
     };
 
     unsubscribe = terminal.subscribe((message) => {
@@ -441,7 +506,8 @@ async function runWorktreeTerminalBootstrap(
   options: RunAsyncWorktreeBootstrapOptions,
   runtimeEnv: WorktreeRuntimeEnv,
 ): Promise<void> {
-  const terminalSpecs = getWorktreeTerminalSpecs(options.worktree.worktreePath);
+  const workspaceCwd = options.workspaceCwd ?? options.worktree.worktreePath;
+  const terminalSpecs = getWorktreeTerminalSpecs(workspaceCwd);
   if (terminalSpecs.length === 0) {
     return;
   }
@@ -473,41 +539,44 @@ async function runWorktreeTerminalBootstrap(
     return;
   }
 
-  const results: WorktreeBootstrapTerminalResult[] = [];
-  for (const spec of terminalSpecs) {
-    try {
-      const terminal = await options.terminalManager.createTerminal({
-        cwd: options.worktree.worktreePath,
-        name: spec.name,
-        env: runtimeEnv,
-      });
-      await waitForTerminalBootstrapReadiness(terminal);
-      terminal.send({
-        type: "input",
-        data: `${spec.command}\r`,
-      });
-      results.push({
-        name: terminal.name ?? spec.name ?? null,
-        command: spec.command,
-        status: "started",
-        terminalId: terminal.id,
-        error: null,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      options.logger?.warn(
-        { agentId: options.agentId, command: spec.command, err: error },
-        "Failed to bootstrap worktree terminal",
-      );
-      results.push({
-        name: spec.name ?? null,
-        command: spec.command,
-        status: "failed",
-        terminalId: null,
-        error: message,
-      });
-    }
-  }
+  const terminalManager = options.terminalManager;
+  const results = await Promise.all(
+    terminalSpecs.map(async (spec): Promise<WorktreeBootstrapTerminalResult> => {
+      try {
+        const terminal = await terminalManager.createTerminal({
+          cwd: workspaceCwd,
+          name: spec.name,
+          env: runtimeEnv,
+          workspaceId: options.workspaceId,
+        });
+        await waitForTerminalBootstrapReadiness(terminal);
+        terminal.send({
+          type: "input",
+          data: `${spec.command}\r`,
+        });
+        return {
+          name: terminal.name ?? spec.name ?? null,
+          command: spec.command,
+          status: "started",
+          terminalId: terminal.id,
+          error: null,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        options.logger?.warn(
+          { agentId: options.agentId, command: spec.command, err: error },
+          "Failed to bootstrap worktree terminal",
+        );
+        return {
+          name: spec.name ?? null,
+          command: spec.command,
+          status: "failed",
+          terminalId: null,
+          error: message,
+        };
+      }
+    }),
+  );
 
   await options.appendTimelineItem(
     buildTerminalTimelineItem({
@@ -523,7 +592,7 @@ async function runWorktreeTerminalBootstrap(
 export async function runAsyncWorktreeBootstrap(
   options: RunAsyncWorktreeBootstrapOptions,
 ): Promise<void> {
-  if (worktreeSetupEligibility.get(options.worktree) === false) {
+  if (options.shouldBootstrap === false) {
     return;
   }
 
@@ -531,17 +600,15 @@ export async function runAsyncWorktreeBootstrap(
   let setupResults: WorktreeSetupCommandResult[] = [];
   let runtimeEnv: WorktreeRuntimeEnv | null = null;
   const emitLiveTimelineItem = options.emitLiveTimelineItem;
-  const runningResultsByIndex = new Map<number, WorktreeSetupCommandResult>();
-  const outputAccumulatorsByIndex = new Map<number, MiddleTruncationAccumulator>();
+  const progressAccumulator = createWorktreeSetupProgressAccumulator();
+  const workspaceCwd = options.workspaceCwd ?? options.worktree.worktreePath;
   let liveEmitQueue = Promise.resolve();
 
   const queueLiveRunningEmit = () => {
     if (!emitLiveTimelineItem) {
       return;
     }
-    const runningResults = Array.from(runningResultsByIndex.entries())
-      .sort((a, b) => a[0] - b[0])
-      .map(([, result]) => result);
+    const runningResults = getWorktreeSetupProgressResults(progressAccumulator);
     liveEmitQueue = liveEmitQueue.then(async () => {
       try {
         await emitLiveTimelineItem(
@@ -550,7 +617,7 @@ export async function runAsyncWorktreeBootstrap(
             status: "running",
             worktree: options.worktree,
             results: runningResults,
-            outputAccumulatorsByIndex,
+            outputAccumulatorsByIndex: progressAccumulator.outputAccumulatorsByIndex,
             errorMessage: null,
           }),
         );
@@ -560,6 +627,7 @@ export async function runAsyncWorktreeBootstrap(
           "Failed to emit live worktree setup timeline update",
         );
       }
+      return;
     });
   };
 
@@ -569,52 +637,17 @@ export async function runAsyncWorktreeBootstrap(
       branchName: options.worktree.branchName,
     });
     options.terminalManager?.registerCwdEnv({
-      cwd: options.worktree.worktreePath,
+      cwd: workspaceCwd,
       env: runtimeEnv,
     });
 
     setupResults = await runWorktreeSetupCommands({
-      worktreePath: options.worktree.worktreePath,
+      worktreePath: workspaceCwd,
       branchName: options.worktree.branchName,
       cleanupOnFailure: false,
       runtimeEnv,
       onEvent: (event) => {
-        const existing = runningResultsByIndex.get(event.index);
-        const baseResult: WorktreeSetupCommandResult = existing ?? {
-          command: event.command,
-          cwd: event.cwd,
-          stdout: "",
-          stderr: "",
-          exitCode: null,
-          durationMs: 0,
-        };
-        if (event.type === "output") {
-          const outputAccumulator =
-            outputAccumulatorsByIndex.get(event.index) ?? createMiddleTruncationAccumulator();
-          appendToMiddleTruncationAccumulator(outputAccumulator, event.chunk);
-          outputAccumulatorsByIndex.set(event.index, outputAccumulator);
-          runningResultsByIndex.set(event.index, {
-            ...baseResult,
-            // Keep the timeline command model lightweight; output is carried in
-            // outputAccumulatorsByIndex.
-            stdout: baseResult.stdout,
-            stderr: baseResult.stderr,
-          });
-          queueLiveRunningEmit();
-          return;
-        }
-        if (event.type === "command_completed") {
-          runningResultsByIndex.set(event.index, {
-            ...baseResult,
-            stdout: event.stdout,
-            stderr: event.stderr,
-            exitCode: event.exitCode,
-            durationMs: event.durationMs,
-          });
-          queueLiveRunningEmit();
-          return;
-        }
-        runningResultsByIndex.set(event.index, baseResult);
+        applyWorktreeSetupProgressEvent(progressAccumulator, event);
         queueLiveRunningEmit();
       },
     });
@@ -626,7 +659,7 @@ export async function runAsyncWorktreeBootstrap(
         status: "completed",
         worktree: options.worktree,
         results: setupResults,
-        outputAccumulatorsByIndex,
+        outputAccumulatorsByIndex: progressAccumulator.outputAccumulatorsByIndex,
         errorMessage: null,
       }),
     );
@@ -645,7 +678,7 @@ export async function runAsyncWorktreeBootstrap(
         status: "failed",
         worktree: options.worktree,
         results: setupResults,
-        outputAccumulatorsByIndex,
+        outputAccumulatorsByIndex: progressAccumulator.outputAccumulatorsByIndex,
         errorMessage: message,
       }),
     );
@@ -653,4 +686,372 @@ export async function runAsyncWorktreeBootstrap(
   }
 
   await runWorktreeTerminalBootstrap(options, runtimeEnv);
+}
+
+// ---------------------------------------------------------------------------
+// Script lifecycle helpers
+// ---------------------------------------------------------------------------
+
+export interface WorktreeScriptResult {
+  scriptName: string;
+  hostname: string | null;
+  port: number | null;
+  terminalId: string;
+}
+
+export interface SpawnWorkspaceScriptOptions {
+  repoRoot: string;
+  workspaceId: string;
+  projectSlug: string;
+  branchName: string | null;
+  scriptName: string;
+  daemonPort?: number | null;
+  daemonListenHost?: string | null;
+  serviceProxyPublicBaseUrl?: string | null;
+  serviceProxy: ServiceProxySubsystem;
+  runtimeStore: WorkspaceScriptRuntimeStore;
+  terminalManager: TerminalManager;
+  globalServicePorts?: PaseoServicePortAllocation;
+  logger?: Logger;
+  onLifecycleChanged?: () => void;
+}
+
+interface ServiceScriptSetupResult {
+  hostname: string;
+  port: number;
+  env: Record<string, string>;
+}
+
+async function setupServiceScriptRoute(params: {
+  repoRoot: string;
+  scriptConfigs: ReturnType<typeof getScriptConfigs>;
+  config: { port?: number };
+  scriptName: string;
+  projectSlug: string;
+  branchName: string | null;
+  workspaceId: string;
+  daemonPort: number | null | undefined;
+  daemonListenHost: string | null | undefined;
+  serviceProxyPublicBaseUrl: string | null | undefined;
+  existingRuntimeEntry: ReturnType<WorkspaceScriptRuntimeStore["get"]>;
+  serviceProxy: ServiceProxySubsystem;
+  servicePortAllocation: PaseoServicePortAllocation | undefined;
+}): Promise<ServiceScriptSetupResult> {
+  const {
+    scriptConfigs,
+    repoRoot,
+    config,
+    scriptName,
+    projectSlug,
+    branchName,
+    workspaceId,
+    daemonPort,
+    daemonListenHost,
+    serviceProxyPublicBaseUrl,
+    existingRuntimeEntry,
+    serviceProxy,
+    servicePortAllocation,
+  } = params;
+
+  const serviceDeclarations: Array<{ scriptName: string; port?: number }> = [];
+  for (const [configuredScriptName, scriptConfig] of scriptConfigs) {
+    if (isServiceScript(scriptConfig)) {
+      serviceDeclarations.push({
+        scriptName: configuredScriptName,
+        port: scriptConfig.port,
+      });
+    }
+  }
+  assertNoServiceEnvNameCollisions(
+    serviceDeclarations.map((serviceDeclaration) => serviceDeclaration.scriptName),
+  );
+
+  const plannedPorts = await ensureWorkspaceServicePortPlan({
+    workspaceId,
+    services: serviceDeclarations,
+    allocatePort: ({ scriptName: serviceScriptName, reservedPorts }) =>
+      allocateWorkspaceServicePort({
+        allocation: servicePortAllocation,
+        cwd: repoRoot,
+        scriptName: serviceScriptName,
+        workspaceId,
+        branchName,
+        reservedPorts,
+      }),
+  });
+  const port =
+    existingRuntimeEntry?.lifecycle === "stopped"
+      ? await refreshWorkspaceServicePort({
+          workspaceId,
+          service: { scriptName, port: config.port },
+          allocatePort: ({ scriptName: serviceScriptName, reservedPorts }) =>
+            allocateWorkspaceServicePort({
+              allocation: servicePortAllocation,
+              cwd: repoRoot,
+              scriptName: serviceScriptName,
+              workspaceId,
+              branchName,
+              reservedPorts,
+            }),
+        })
+      : requirePlannedWorkspaceServicePort(plannedPorts, scriptName);
+
+  const peers: WorkspaceServicePeer[] = [];
+  for (const [peerScriptName, peerPort] of plannedPorts) {
+    peers.push({
+      scriptName: peerScriptName,
+      port: peerScriptName === scriptName ? port : peerPort,
+    });
+  }
+
+  const env = buildWorkspaceServiceEnv({
+    scriptName,
+    projectSlug,
+    branchName,
+    daemonPort,
+    daemonListenHost,
+    serviceProxyPublicBaseUrl,
+    peers,
+  });
+
+  const registeredRoute = serviceProxy.registerWorkspaceService({
+    port,
+    workspaceId,
+    projectSlug,
+    branchName,
+    scriptName,
+    publicBaseUrl: serviceProxyPublicBaseUrl ?? null,
+  });
+  return { hostname: registeredRoute.hostname, port, env };
+}
+
+async function acquireWorkspaceScriptTerminal(params: {
+  serviceScript: boolean;
+  existingRuntimeEntry: ReturnType<WorkspaceScriptRuntimeStore["get"]>;
+  terminalManager: TerminalManager;
+  repoRoot: string;
+  workspaceId: string;
+  scriptName: string;
+  env: Record<string, string> | undefined;
+}): Promise<{ terminal: TerminalSession; reusableTerminal: TerminalSession | null }> {
+  const {
+    serviceScript,
+    existingRuntimeEntry,
+    terminalManager,
+    repoRoot,
+    workspaceId,
+    scriptName,
+    env,
+  } = params;
+  let reusableTerminal: TerminalSession | null = null;
+  if (!serviceScript && existingRuntimeEntry?.terminalId) {
+    reusableTerminal = terminalManager.getTerminal(existingRuntimeEntry.terminalId) ?? null;
+  }
+  const terminal =
+    reusableTerminal ??
+    (await terminalManager.createTerminal({
+      cwd: repoRoot,
+      workspaceId,
+      name: scriptName,
+      title: scriptName,
+      env,
+    }));
+  return { terminal, reusableTerminal };
+}
+
+export async function spawnWorkspaceScript(
+  options: SpawnWorkspaceScriptOptions,
+): Promise<WorktreeScriptResult> {
+  const {
+    repoRoot,
+    workspaceId,
+    projectSlug,
+    branchName,
+    scriptName,
+    daemonPort,
+    daemonListenHost,
+    serviceProxyPublicBaseUrl,
+    serviceProxy,
+    runtimeStore,
+    terminalManager,
+    globalServicePorts,
+    logger,
+    onLifecycleChanged,
+  } = options;
+  const configResult = readPaseoConfig(repoRoot);
+  if (!configResult.ok) {
+    throw paseoConfigParseError(configResult);
+  }
+  const scriptConfigs = getScriptConfigs(configResult.config);
+  const config = scriptConfigs.get(scriptName);
+  if (!config) {
+    throw new Error(`Script '${scriptName}' is not configured in paseo.json`);
+  }
+
+  const serviceScript = isServiceScript(config);
+  const scriptType = serviceScript ? "service" : "script";
+  let hostname: string | null = null;
+  let port: number | null = null;
+  let runtimeRegistered = false;
+  let routeRegistered = false;
+  let disposeLifecycleListeners: (() => void) | null = null;
+
+  try {
+    if (runtimeStore.isRunning({ workspaceId, scriptName })) {
+      throw new Error(`Script '${scriptName}' is already running`);
+    }
+
+    const existingRuntimeEntry = runtimeStore.get({ workspaceId, scriptName });
+    let env: Record<string, string> | undefined;
+    if (serviceScript) {
+      const serviceSetup = await setupServiceScriptRoute({
+        repoRoot,
+        scriptConfigs,
+        config,
+        scriptName,
+        projectSlug,
+        branchName,
+        workspaceId,
+        daemonPort,
+        daemonListenHost,
+        serviceProxyPublicBaseUrl,
+        existingRuntimeEntry,
+        serviceProxy,
+        servicePortAllocation: configResult.config?.worktree?.servicePorts ?? globalServicePorts,
+      });
+      hostname = serviceSetup.hostname;
+      port = serviceSetup.port;
+      env = serviceSetup.env;
+      routeRegistered = true;
+    }
+
+    const { terminal, reusableTerminal } = await acquireWorkspaceScriptTerminal({
+      serviceScript,
+      existingRuntimeEntry,
+      terminalManager,
+      repoRoot,
+      workspaceId,
+      scriptName,
+      env,
+    });
+
+    runtimeStore.set({
+      workspaceId,
+      scriptName,
+      type: scriptType,
+      lifecycle: "running",
+      terminalId: terminal.id,
+      exitCode: null,
+    });
+    runtimeRegistered = true;
+
+    const stopRuntimeIfCurrent = (input: { exitCode: number | null; removeRoute: boolean }) => {
+      const current = runtimeStore.get({ workspaceId, scriptName });
+      if (current?.terminalId !== terminal.id || current.lifecycle !== "running") {
+        return;
+      }
+
+      disposeLifecycleListeners?.();
+      disposeLifecycleListeners = null;
+
+      if (input.removeRoute && hostname) {
+        serviceProxy.removeWorkspaceService({ workspaceId, scriptName });
+      }
+      runtimeStore.set({
+        workspaceId,
+        scriptName,
+        type: scriptType,
+        lifecycle: "stopped",
+        terminalId: terminal.id,
+        exitCode: input.exitCode,
+      });
+      onLifecycleChanged?.();
+      logger?.info(
+        {
+          scriptName,
+          hostname,
+          exitCode: input.exitCode,
+          terminalId: terminal.id,
+        },
+        "Stopped worktree script",
+      );
+    };
+
+    const unsubscribeExit = terminal.onExit((info) => {
+      stopRuntimeIfCurrent({
+        exitCode: info.exitCode,
+        removeRoute: true,
+      });
+    });
+
+    let unsubscribeCommandFinished: (() => void) | null = null;
+    if (!serviceScript) {
+      unsubscribeCommandFinished = terminal.onCommandFinished((info) => {
+        stopRuntimeIfCurrent({ exitCode: info.exitCode, removeRoute: false });
+      });
+    }
+    disposeLifecycleListeners = () => {
+      unsubscribeExit();
+      unsubscribeCommandFinished?.();
+    };
+
+    if (!reusableTerminal) {
+      await waitForTerminalBootstrapReadiness(terminal);
+    }
+    terminal.send({ type: "input", data: `${config.command}\r` });
+
+    logger?.info(
+      {
+        scriptName,
+        hostname,
+        port,
+        terminalId: terminal.id,
+        type: scriptType,
+      },
+      serviceScript
+        ? `Registered script proxy: ${hostname} -> 127.0.0.1:${port}`
+        : "Started workspace script",
+    );
+
+    onLifecycleChanged?.();
+    return {
+      scriptName,
+      hostname,
+      port,
+      terminalId: terminal.id,
+    };
+  } catch (error) {
+    disposeLifecycleListeners?.();
+    if (routeRegistered && hostname) {
+      serviceProxy.removeServiceRoutesByHostnames([hostname]);
+    }
+    if (runtimeRegistered) {
+      runtimeStore.remove({ workspaceId, scriptName });
+    }
+    logger?.error(
+      {
+        err: error,
+        scriptName,
+        repoRoot,
+        branchName,
+        hostname,
+        port,
+        command: config.command,
+      },
+      "Failed to spawn worktree script",
+    );
+    throw error;
+  }
+}
+
+export function teardownWorktreeScripts(options: {
+  hostnames: string[];
+  serviceProxy: Pick<ServiceProxySubsystem, "removeServiceRoutesByHostnames">;
+  logger: Logger;
+}): void {
+  const { hostnames, serviceProxy, logger } = options;
+  serviceProxy.removeServiceRoutesByHostnames(hostnames);
+  for (const hostname of hostnames) {
+    logger.info({ hostname }, "Removed script proxy route");
+  }
 }

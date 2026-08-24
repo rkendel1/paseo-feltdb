@@ -2,7 +2,7 @@ import "dotenv/config";
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import OpenAI from "openai";
+import { OpenAI } from "openai";
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -32,9 +32,9 @@ async function main(): Promise<void> {
   }
 
   const apiKey = requireEnv("OPENAI_API_KEY");
-  const transcriptionModel = process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL ?? "gpt-4o-transcribe";
+  const transcriptionModel = process.env.STT_MODEL ?? "gpt-4o-transcribe";
   const prompt =
-    process.env.OPENAI_REALTIME_DICTATION_TRANSCRIPTION_PROMPT ??
+    process.env.PASEO_DICTATION_TRANSCRIPTION_PROMPT ??
     "Transcribe only what the speaker says. Do not add words. Preserve punctuation and casing. If the audio is silence or non-speech noise, return an empty transcript.";
 
   const openai = new OpenAI({ apiKey });

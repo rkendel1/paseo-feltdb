@@ -4,15 +4,20 @@ on:
   push:
     branches: [main]
     paths:
-      - 'packages/website/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'patches/**'
-      - '.github/workflows/deploy-website.yml'
+      - "CHANGELOG.md"
+      - "public-docs/**"
+      - "packages/website/**"
+      - "package.json"
+      - "package-lock.json"
+      - "patches/**"
+      - ".github/workflows/deploy-website.yml"
+  release:
+    types: [published]
   workflow_dispatch:
 
 jobs:
   deploy:
+    if: ${{ github.event_name != 'release' || (!github.event.release.prerelease && !github.event.release.draft) }}
     runs-on: ubuntu-latest
 
     steps:
@@ -20,11 +25,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
-          cache: 'npm'
+          node-version: "22"
+          cache: "npm"
 
       - name: Install dependencies
-        run: npm install --workspace=@getpaseo/website --include-workspace-root
+        run: node scripts/npm-retry.mjs ci --workspace=@getpaseo/website --include-workspace-root
 
       - name: Typecheck
         run: npm run typecheck --workspace=@getpaseo/website

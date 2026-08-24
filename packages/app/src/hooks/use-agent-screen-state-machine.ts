@@ -1,11 +1,32 @@
 import { useRef } from "react";
+import type {
+  AgentCapabilityFlags,
+  AgentFeature,
+  AgentProvider,
+} from "@getpaseo/protocol/agent-types";
+import type { ViewedTimelineStatus } from "@/timeline/viewed-timeline-sync";
 
 export interface AgentScreenAgent {
   serverId: string;
   id: string;
+  provider?: AgentProvider;
   status: "initializing" | "idle" | "running" | "error" | "closed";
   cwd: string;
+  workspaceId?: string;
+  capabilities?: AgentCapabilityFlags;
+  currentModeId?: string | null;
+  model?: string | null;
+  thinkingOptionId?: string | null;
+  runtimeInfo?: {
+    model?: string | null;
+    modeId?: string | null;
+    thinkingOptionId?: string | null;
+  } | null;
+  features?: readonly AgentFeature[];
+  lastError?: string | null;
   projectPlacement?: {
+    projectKey?: string;
+    projectName?: string;
     checkout?: {
       cwd?: string;
       isGit?: boolean;
@@ -21,30 +42,37 @@ export type AgentScreenMissingState =
 
 export interface AgentScreenMachineInput {
   agent: AgentScreenAgent | null;
-  placeholderAgent: AgentScreenAgent | null;
+  isArchived: boolean;
   missingAgentState: AgentScreenMissingState;
   isConnected: boolean;
   isArchivingCurrentAgent: boolean;
   isHistorySyncing: boolean;
   needsAuthoritativeSync: boolean;
-  shouldUseOptimisticStream: boolean;
+  visibilityCatchUpStatus: ViewedTimelineStatus;
+  continuity: AgentScreenContinuity;
   hasHydratedHistoryBefore: boolean;
+}
+
+export type AgentScreenContinuity =
+  | { kind: "none" }
+  | { kind: "optimistic-create"; agent: AgentScreenAgent };
+
+function hasOptimisticCreateContinuity(input: AgentScreenMachineInput): boolean {
+  return input.continuity.kind === "optimistic-create";
 }
 
 function shouldBlockInitialAuthoritativeReadyState(input: AgentScreenMachineInput): boolean {
   return (
-    !input.shouldUseOptimisticStream &&
+    !input.isArchived &&
+    !hasOptimisticCreateContinuity(input) &&
     !input.hasHydratedHistoryBefore &&
     (input.needsAuthoritativeSync || input.isHistorySyncing)
   );
 }
 
-export type AgentScreenToastLatch = "none" | "history_refresh" | "sync_error";
-
 export interface AgentScreenMachineMemory {
   hasRenderedReady: boolean;
   lastReadyAgent: AgentScreenAgent | null;
-  activeToastLatch: AgentScreenToastLatch;
   hadInitialSyncFailure: boolean;
 }
 
@@ -54,17 +82,8 @@ export type AgentScreenReadySyncState =
   | {
       status: "catching_up";
       ui: "overlay" | "silent";
-      shouldEmitHistoryRefreshToast: false;
     }
-  | {
-      status: "catching_up";
-      ui: "toast";
-      shouldEmitHistoryRefreshToast: boolean;
-    }
-  | {
-      status: "sync_error";
-      shouldEmitSyncErrorToast: boolean;
-    };
+  | { status: "sync_error"; isRetrying: boolean };
 
 export type AgentScreenViewState =
   | {
@@ -88,6 +107,96 @@ export type AgentScreenViewState =
       isArchiving: boolean;
     };
 
+function updateInitialSyncFailureMemory(args: {
+  input: AgentScreenMachineInput;
+  nextMemory: AgentScreenMachineMemory;
+}): void {
+  if (args.input.hasHydratedHistoryBefore) {
+    args.nextMemory.hadInitialSyncFailure = false;
+  }
+  if (args.input.missingAgentState.kind === "error" && !args.input.hasHydratedHistoryBefore) {
+    args.nextMemory.hadInitialSyncFailure = true;
+  }
+}
+
+function shouldUseOptimisticCreateFlowAgent(input: AgentScreenMachineInput): boolean {
+  return (
+    input.continuity.kind === "optimistic-create" && (!input.agent || input.agent.status === "idle")
+  );
+}
+
+function resolveCandidateAgent(args: {
+  input: AgentScreenMachineInput;
+  useOptimisticCreateFlowAgent: boolean;
+}): AgentScreenAgent | null {
+  const { input, useOptimisticCreateFlowAgent } = args;
+  const continuityAgent =
+    input.continuity.kind === "optimistic-create" ? input.continuity.agent : null;
+  if (input.agent && useOptimisticCreateFlowAgent && continuityAgent) {
+    return { ...input.agent, status: continuityAgent.status };
+  }
+  return input.agent ?? continuityAgent;
+}
+
+function resolveAgentScreenSource(args: {
+  useOptimisticCreateFlowAgent: boolean;
+  hasAgent: boolean;
+  hasOptimisticCreateContinuity: boolean;
+}): "authoritative" | "optimistic" | "stale" {
+  if (args.useOptimisticCreateFlowAgent) return "optimistic";
+  if (args.hasAgent) return "authoritative";
+  if (args.hasOptimisticCreateContinuity) return "optimistic";
+  return "stale";
+}
+
+function resolveCatchingUpUi(args: {
+  hasOptimisticCreateContinuity: boolean;
+  isVisibilityCatchUpPending: boolean;
+  hasHydratedHistoryBefore: boolean;
+  hadInitialSyncFailure: boolean;
+}): "overlay" | "silent" {
+  if (args.hasOptimisticCreateContinuity) return "silent";
+  if (args.hasHydratedHistoryBefore) return "silent";
+  if (args.isVisibilityCatchUpPending) return "overlay";
+  if (args.hadInitialSyncFailure) return "silent";
+  return "overlay";
+}
+
+function resolveAgentScreenSync(args: {
+  input: AgentScreenMachineInput;
+  hadInitialSyncFailure: boolean;
+}): AgentScreenReadySyncState {
+  const { input, hadInitialSyncFailure } = args;
+  if (input.isArchived) {
+    return { status: "idle" };
+  }
+  if (!input.isConnected) {
+    return { status: "reconnecting" };
+  }
+  if (input.missingAgentState.kind === "error") {
+    return { status: "sync_error", isRetrying: input.visibilityCatchUpStatus === "retrying" };
+  }
+  if (input.visibilityCatchUpStatus === "error" || input.visibilityCatchUpStatus === "retrying") {
+    return { status: "sync_error", isRetrying: input.visibilityCatchUpStatus === "retrying" };
+  }
+  if (
+    input.visibilityCatchUpStatus === "pending" ||
+    input.needsAuthoritativeSync ||
+    input.isHistorySyncing
+  ) {
+    return {
+      status: "catching_up",
+      ui: resolveCatchingUpUi({
+        hasOptimisticCreateContinuity: hasOptimisticCreateContinuity(input),
+        isVisibilityCatchUpPending: input.visibilityCatchUpStatus === "pending",
+        hasHydratedHistoryBefore: input.hasHydratedHistoryBefore,
+        hadInitialSyncFailure,
+      }),
+    };
+  }
+  return { status: "idle" };
+}
+
 export function deriveAgentScreenViewState({
   input,
   memory,
@@ -98,27 +207,13 @@ export function deriveAgentScreenViewState({
   const nextMemory: AgentScreenMachineMemory = {
     hasRenderedReady: memory.hasRenderedReady,
     lastReadyAgent: memory.lastReadyAgent,
-    activeToastLatch: memory.activeToastLatch,
     hadInitialSyncFailure: memory.hadInitialSyncFailure,
   };
 
-  if (input.hasHydratedHistoryBefore) {
-    nextMemory.hadInitialSyncFailure = false;
-  }
+  updateInitialSyncFailureMemory({ input, nextMemory });
 
-  if (input.missingAgentState.kind === "error" && !input.hasHydratedHistoryBefore) {
-    nextMemory.hadInitialSyncFailure = true;
-  }
-
-  const useOptimisticCreateFlowAgent =
-    input.shouldUseOptimisticStream &&
-    Boolean(input.placeholderAgent) &&
-    (!input.agent || input.agent.status === "initializing" || input.agent.status === "idle");
-
-  const candidateAgent =
-    input.agent && useOptimisticCreateFlowAgent && input.placeholderAgent
-      ? { ...input.agent, status: input.placeholderAgent.status }
-      : (input.agent ?? input.placeholderAgent);
+  const useOptimisticCreateFlowAgent = shouldUseOptimisticCreateFlowAgent(input);
+  const candidateAgent = resolveCandidateAgent({ input, useOptimisticCreateFlowAgent });
   const shouldBlockReadyState = shouldBlockInitialAuthoritativeReadyState(input);
 
   if (input.missingAgentState.kind === "not_found") {
@@ -170,57 +265,16 @@ export function deriveAgentScreenViewState({
     };
   }
 
-  const source: "authoritative" | "optimistic" | "stale" = useOptimisticCreateFlowAgent
-    ? "optimistic"
-    : input.agent
-      ? "authoritative"
-      : input.shouldUseOptimisticStream
-        ? "optimistic"
-        : "stale";
+  const source = resolveAgentScreenSource({
+    useOptimisticCreateFlowAgent,
+    hasAgent: Boolean(input.agent),
+    hasOptimisticCreateContinuity: hasOptimisticCreateContinuity(input),
+  });
 
-  let sync: AgentScreenReadySyncState;
-  if (!input.isConnected) {
-    nextMemory.activeToastLatch = "none";
-    sync = { status: "reconnecting" };
-  } else if (input.missingAgentState.kind === "error") {
-    const shouldEmitSyncErrorToast = memory.activeToastLatch !== "sync_error";
-    nextMemory.activeToastLatch = "sync_error";
-    sync = {
-      status: "sync_error",
-      shouldEmitSyncErrorToast,
-    };
-  } else if (input.needsAuthoritativeSync || input.isHistorySyncing) {
-    let ui: "overlay" | "toast" | "silent";
-    if (input.shouldUseOptimisticStream) {
-      ui = "silent";
-    } else if (input.hasHydratedHistoryBefore) {
-      ui = "toast";
-    } else if (nextMemory.hadInitialSyncFailure) {
-      ui = "silent";
-    } else {
-      ui = "overlay";
-    }
-
-    if (ui === "toast") {
-      const shouldEmitHistoryRefreshToast = memory.activeToastLatch !== "history_refresh";
-      nextMemory.activeToastLatch = "history_refresh";
-      sync = {
-        status: "catching_up",
-        ui,
-        shouldEmitHistoryRefreshToast,
-      };
-    } else {
-      nextMemory.activeToastLatch = "none";
-      sync = {
-        status: "catching_up",
-        ui,
-        shouldEmitHistoryRefreshToast: false,
-      };
-    }
-  } else {
-    nextMemory.activeToastLatch = "none";
-    sync = { status: "idle" };
-  }
+  const sync = resolveAgentScreenSync({
+    input,
+    hadInitialSyncFailure: nextMemory.hadInitialSyncFailure,
+  });
 
   return {
     state: {
@@ -245,7 +299,6 @@ export function useAgentScreenStateMachine({
   const memoryRef = useRef<AgentScreenMachineMemory>({
     hasRenderedReady: false,
     lastReadyAgent: null,
-    activeToastLatch: "none",
     hadInitialSyncFailure: false,
   });
 
@@ -254,7 +307,6 @@ export function useAgentScreenStateMachine({
     memoryRef.current = {
       hasRenderedReady: false,
       lastReadyAgent: null,
-      activeToastLatch: "none",
       hadInitialSyncFailure: false,
     };
   }

@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import type { AgentPermissionRequest } from "@getpaseo/server";
+import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
 import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
 import type { CommandOptions, ListResult, CommandError } from "../../output/index.js";
 import { permitResponseSchema, type PermissionResponseItem } from "./allow.js";
@@ -45,7 +45,7 @@ export async function runDenyCommand(
   }
 
   try {
-    const fetchResult = await client.fetchAgent(agentIdOrPrefix);
+    const fetchResult = await client.fetchAgent({ agentId: agentIdOrPrefix });
     if (!fetchResult) {
       await client.close();
       const error: CommandError = {
@@ -89,21 +89,22 @@ export async function runDenyCommand(
     }
 
     // Deny permissions
-    const results: PermissionResponseItem[] = [];
-    for (const permission of permissionsToDeny) {
-      await client.respondToPermission(resolvedAgentId, permission.id, {
-        behavior: "deny",
-        ...(options.message ? { message: options.message } : {}),
-        ...(options.interrupt ? { interrupt: true } : {}),
-      });
-      results.push({
-        requestId: permission.id.slice(0, 8),
-        agentId: resolvedAgentId,
-        agentShortId: resolvedAgentId.slice(0, 7),
-        name: permission.name,
-        result: "denied",
-      });
-    }
+    const results: PermissionResponseItem[] = await Promise.all(
+      permissionsToDeny.map(async (permission) => {
+        await client.respondToPermission(resolvedAgentId, permission.id, {
+          behavior: "deny",
+          ...(options.message ? { message: options.message } : {}),
+          ...(options.interrupt ? { interrupt: true } : {}),
+        });
+        return {
+          requestId: permission.id.slice(0, 8),
+          agentId: resolvedAgentId,
+          agentShortId: resolvedAgentId.slice(0, 7),
+          name: permission.name,
+          result: "denied",
+        };
+      }),
+    );
 
     await client.close();
 

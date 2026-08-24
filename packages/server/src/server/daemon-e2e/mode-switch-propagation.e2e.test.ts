@@ -24,10 +24,13 @@ function collectAgentUpdates(client: DaemonClient): {
   return { updates, unsub };
 }
 
-function lastUpsertFor(updates: AgentUpdatePayload[], agentId: string): AgentUpsertPayload | undefined {
-  return updates
-    .filter((u): u is AgentUpsertPayload => u.kind === "upsert" && u.agent.id === agentId)
-    .at(-1);
+function lastUpsertFor(
+  updates: AgentUpdatePayload[],
+  agentId: string,
+): AgentUpsertPayload | undefined {
+  return updates.findLast(
+    (u): u is AgentUpsertPayload => u.kind === "upsert" && u.agent.id === agentId,
+  );
 }
 
 describe("mode-switch update propagation", () => {
@@ -125,9 +128,7 @@ describe("mode-switch update propagation", () => {
 
     const modeUpdate = client2Updates.find(
       (u): u is AgentUpsertPayload =>
-        u.kind === "upsert" &&
-        u.agent.id === agent.id &&
-        u.agent.currentModeId === "acceptEdits",
+        u.kind === "upsert" && u.agent.id === agent.id && u.agent.currentModeId === "acceptEdits",
     );
     expect(modeUpdate).toBeDefined();
 

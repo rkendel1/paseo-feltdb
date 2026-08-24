@@ -6,6 +6,7 @@ import path from "node:path";
 import type {
   AgentCapabilityFlags,
   AgentClient,
+  AgentFeature,
   AgentLaunchContext,
   AgentMode,
   AgentModelDefinition,
@@ -18,10 +19,10 @@ import type {
   AgentStreamEvent,
   AgentSlashCommand,
   AgentUsage,
-  ListModelsOptions,
+  FetchCatalogOptions,
 } from "../agent/agent-sdk-types.js";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "../agent/agent-sdk-types.js";
-import { isLikelyExternalToolName } from "../agent/tool-name-normalization.js";
+import { isLikelyExternalToolName } from "@getpaseo/protocol/tool-name-normalization";
 
 const TEST_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
@@ -30,13 +31,41 @@ const TEST_CAPABILITIES: AgentCapabilityFlags = {
   supportsMcpServers: false,
   supportsReasoningStream: true,
   supportsToolInvocations: true,
+  supportsRewindConversation: false,
+  supportsRewindFiles: false,
+  supportsRewindBoth: false,
 };
 
-type Deferred<T> = {
+const TEST_FEATURE_ID = "test_feature";
+const TEST_MODES: AgentMode[] = [
+  { id: "bypassPermissions", label: "Bypass", description: "No permissions" },
+  { id: "default", label: "Default", description: "Ask for permissions" },
+  { id: "full-access", label: "Full access", description: "No prompts" },
+  { id: "auto", label: "Auto", description: "Ask/allow based on policy" },
+  { id: "always-ask", label: "Always Ask", description: "Always prompt" },
+];
+
+interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
   reject: (err: unknown) => void;
-};
+}
+
+interface FakeAgentSessionOptions {
+  providerName: string;
+  config: AgentSessionConfig;
+  supportsMcpServers?: boolean;
+  sessionId?: string;
+  memoryMarker?: string | null;
+  closeSession?: () => Promise<void>;
+  onStartTurn?: (prompt: AgentPromptInput) => void;
+}
+
+export interface TestAgentClientOptions {
+  closeSession?: () => Promise<void>;
+  onStartTurn?: (prompt: AgentPromptInput) => void;
+  supportsMcpServers?: boolean;
+}
 
 function createDeferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
@@ -50,7 +79,10 @@ function createDeferred<T>(): Deferred<T> {
 
 function isAskMode(config: AgentSessionConfig): boolean {
   const mode = (config.modeId ?? "").toLowerCase();
-  const policy = (config.approvalPolicy ?? "").toLowerCase();
+  const policy =
+    typeof config.providerOptions?.approval_policy === "string"
+      ? config.providerOptions.approval_policy.toLowerCase()
+      : "";
 
   // Default behavior for tests: ask unless explicitly bypassed.
   if (!mode && !policy) {
@@ -88,9 +120,71 @@ function buildPersistence(
   metadata?: Record<string, unknown>,
 ): AgentPersistenceHandle {
   if (provider === "codex") {
-    return { provider, sessionId, metadata: { conversationId: sessionId, ...(metadata ?? {}) } };
+    return { provider, sessionId, metadata: { conversationId: sessionId, ...metadata } };
   }
   return { provider, sessionId, ...(metadata ? { metadata } : {}) };
+}
+
+function buildClaudeToolCall(text: string) {
+  if (text.includes("read") && text.includes("/etc/hosts")) {
+    return { name: "Read", input: { path: "/etc/hosts" }, output: undefined };
+  }
+  if (text.includes("rm -f permission.txt")) {
+    return { name: "Bash", input: { command: "rm -f permission.txt" }, output: { ok: true } };
+  }
+  if (text.includes("rm -f mcp-smoke.txt")) {
+    return { name: "Bash", input: { command: "rm -f mcp-smoke.txt" }, output: { ok: true } };
+  }
+  if (text.includes("echo hello")) {
+    return { name: "Bash", input: { command: "echo hello" }, output: { stdout: "hello\n" } };
+  }
+  if (text.includes("edit") && text.includes(".txt")) {
+    return { name: "Edit", input: { file: "test.txt" }, output: { applied: true } };
+  }
+  return null;
+}
+
+function buildCodexToolCall(text: string) {
+  if (text.includes("echo hello")) {
+    return { name: "shell", input: { command: "echo hello" }, output: { stdout: "hello\n" } };
+  }
+  if (text.includes("read") && text.includes("/etc/hosts")) {
+    return { name: "read_file", input: { path: "/etc/hosts" }, output: undefined };
+  }
+  if (text.includes("read") && text.includes("tool-create.txt")) {
+    return { name: "read_file", input: { path: "tool-create.txt" }, output: undefined };
+  }
+  if (text.includes("edit") && text.includes(".txt")) {
+    const output = text.includes("tool-create.txt")
+      ? { applied: true, file: "tool-create.txt" }
+      : { applied: true };
+    return { name: "apply_patch", input: { patch: "*** Begin Patch\n*** End Patch\n" }, output };
+  }
+  const printfMatch =
+    /printf\s+"ok"\s*>\s*([^\s`]+)/i.exec(text) ?? /printf\s+ok\s*>\s*([^\s`]+)/i.exec(text);
+  if (printfMatch) {
+    const fileName = printfMatch[1] ?? "permission.txt";
+    return {
+      name: "shell",
+      input: { command: `printf "ok" > ${fileName}` },
+      output: { ok: true },
+    };
+  }
+  if (text.includes("sleep")) {
+    return { name: "shell", input: { command: "sleep 30" }, output: null };
+  }
+  return null;
+}
+
+function buildOpenCodeToolCall(text: string) {
+  if (text.includes("reason")) {
+    return {
+      name: "shell",
+      input: { command: "echo reasoning" },
+      output: { stdout: "reasoning\n" },
+    };
+  }
+  return null;
 }
 
 function buildToolCallForPrompt(provider: string, prompt: string) {
@@ -115,74 +209,120 @@ function buildToolCallForPrompt(provider: string, prompt: string) {
     };
   }
   if (provider === "claude") {
-    if (text.includes("read") && text.includes("/etc/hosts")) {
-      return { name: "Read", input: { path: "/etc/hosts" }, output: undefined };
-    }
-    if (text.includes("rm -f permission.txt")) {
-      return { name: "Bash", input: { command: "rm -f permission.txt" }, output: { ok: true } };
-    }
-    if (text.includes("rm -f mcp-smoke.txt")) {
-      return { name: "Bash", input: { command: "rm -f mcp-smoke.txt" }, output: { ok: true } };
-    }
-    if (text.includes("echo hello")) {
-      return { name: "Bash", input: { command: "echo hello" }, output: { stdout: "hello\n" } };
-    }
-    if (text.includes("edit") && text.includes(".txt")) {
-      return { name: "Edit", input: { file: "test.txt" }, output: { applied: true } };
-    }
-    return null;
+    return buildClaudeToolCall(text);
   }
-
   if (provider === "codex") {
-    if (text.includes("echo hello")) {
-      return { name: "shell", input: { command: "echo hello" }, output: { stdout: "hello\n" } };
-    }
-    if (text.includes("read") && text.includes("/etc/hosts")) {
-      return { name: "read_file", input: { path: "/etc/hosts" }, output: undefined };
-    }
-    if (text.includes("read") && text.includes("tool-create.txt")) {
-      return { name: "read_file", input: { path: "tool-create.txt" }, output: undefined };
-    }
-    if (text.includes("edit") && text.includes(".txt")) {
-      const output = text.includes("tool-create.txt")
-        ? { applied: true, file: "tool-create.txt" }
-        : { applied: true };
-      return { name: "apply_patch", input: { patch: "*** Begin Patch\n*** End Patch\n" }, output };
-    }
-    const printfMatch =
-      /printf\s+\"ok\"\s*>\s*([^\s`]+)/i.exec(text) ?? /printf\s+ok\s*>\s*([^\s`]+)/i.exec(text);
-    if (printfMatch) {
-      const fileName = printfMatch[1] ?? "permission.txt";
-      return {
-        name: "shell",
-        input: { command: `printf "ok" > ${fileName}` },
-        output: { ok: true },
-      };
-    }
-    if (text.includes("sleep")) {
-      // Long-running command to test cancellation/overlap.
-      return { name: "shell", input: { command: "sleep 30" }, output: null };
-    }
-    return null;
+    return buildCodexToolCall(text);
   }
-
-  // opencode: used by a small set of tests
   if (provider === "opencode") {
-    if (text.includes("reason")) {
-      return {
-        name: "shell",
-        input: { command: "echo reasoning" },
-        output: { stdout: "reasoning\n" },
-      };
-    }
-    return null;
+    return buildOpenCodeToolCall(text);
   }
-
   return null;
 }
 
+function parseAgentStreamStressPrompt(prompt: string): {
+  count: number;
+  coalesced: boolean;
+} | null {
+  const match = /emit\s+(\d+)\s+(coalesced\s+)?agent stream updates/i.exec(prompt);
+  if (!match) {
+    return null;
+  }
+  const count = Number(match[1]);
+  if (!Number.isFinite(count) || count <= 0) {
+    return null;
+  }
+  return {
+    count: Math.min(count, 5000),
+    coalesced: Boolean(match[2]),
+  };
+}
+
+function parseLargeAgentStreamPayloadPrompt(prompt: string): {
+  bytes: number;
+  kind: "diff" | "file" | "image";
+} | null {
+  const match =
+    /emit\s+(\d+)\s+(?:byte\s+)?(?:large\s+)?(diff|file|image)\s+agent stream (?:update|payload)/i.exec(
+      prompt,
+    );
+  if (!match) {
+    return null;
+  }
+  const bytes = Number(match[1]);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return null;
+  }
+  return {
+    bytes: Math.min(bytes, 1_000_000),
+    kind: match[2]?.toLowerCase() as "diff" | "file" | "image",
+  };
+}
+
+function buildRepeatedPayload(bytes: number, prefix: string): string {
+  const line = `${prefix} ${"x".repeat(96)}\n`;
+  let output = "";
+  while (output.length < bytes) {
+    output += line;
+  }
+  return output.slice(0, bytes);
+}
+
+function buildLargeTimelineItem(input: {
+  bytes: number;
+  kind: "diff" | "file" | "image";
+  callId: string;
+  provider: AgentStreamEvent["provider"];
+}): AgentStreamEvent {
+  const payload = buildRepeatedPayload(input.bytes, input.kind);
+  if (input.kind === "diff") {
+    return {
+      type: "timeline",
+      provider: input.provider,
+      item: {
+        type: "tool_call",
+        name: "apply_patch",
+        callId: input.callId,
+        status: "completed",
+        detail: {
+          type: "edit",
+          filePath: "src/large-diff.ts",
+          unifiedDiff: `diff --git a/src/large-diff.ts b/src/large-diff.ts\n${payload}`,
+        },
+        error: null,
+      },
+    };
+  }
+  if (input.kind === "file") {
+    return {
+      type: "timeline",
+      provider: input.provider,
+      item: {
+        type: "tool_call",
+        name: "read_file",
+        callId: input.callId,
+        status: "completed",
+        detail: {
+          type: "read",
+          filePath: "src/large-file.txt",
+          content: payload,
+        },
+        error: null,
+      },
+    };
+  }
+  return {
+    type: "timeline",
+    provider: input.provider,
+    item: {
+      type: "assistant_message",
+      text: `data:image/png;base64,${payload}`,
+    },
+  };
+}
+
 class FakeAgentSession implements AgentSession {
-  readonly capabilities = TEST_CAPABILITIES;
+  readonly capabilities: AgentCapabilityFlags;
   readonly id: string;
   private readonly providerName: string;
   private readonly config: AgentSessionConfig;
@@ -195,16 +335,20 @@ class FakeAgentSession implements AgentSession {
   private nextTurnOrdinal = 0;
   private activeForegroundTurnId: string | null = null;
 
-  constructor(
-    providerName: string,
-    config: AgentSessionConfig,
-    sessionId?: string,
-    memoryMarker?: string | null,
-  ) {
-    this.providerName = providerName;
-    this.config = config;
-    this.id = sessionId ?? randomUUID();
-    this.memoryMarker = memoryMarker ?? null;
+  private readonly closeSession: (() => Promise<void>) | undefined;
+  private readonly onStartTurn: ((prompt: AgentPromptInput) => void) | undefined;
+
+  constructor(options: FakeAgentSessionOptions) {
+    this.capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsMcpServers: options.supportsMcpServers === true,
+    };
+    this.providerName = options.providerName;
+    this.config = options.config;
+    this.id = options.sessionId ?? randomUUID();
+    this.memoryMarker = options.memoryMarker ?? null;
+    this.closeSession = options.closeSession;
+    this.onStartTurn = options.onStartTurn;
     this.historyPath = path.join(
       tmpdir(),
       "paseo-fake-provider-history",
@@ -215,6 +359,18 @@ class FakeAgentSession implements AgentSession {
 
   get provider() {
     return this.providerName;
+  }
+
+  get features(): AgentFeature[] {
+    return [
+      {
+        type: "toggle",
+        id: TEST_FEATURE_ID,
+        label: "Test feature",
+        description: "Deterministic provider feature used by MCP integration tests.",
+        value: this.config.featureValues?.[TEST_FEATURE_ID] === true,
+      },
+    ];
   }
 
   private async appendHistoryEvent(event: AgentStreamEvent): Promise<void> {
@@ -243,7 +399,10 @@ class FakeAgentSession implements AgentSession {
   private async resolveSlashCommandInput(
     prompt: AgentPromptInput,
   ): Promise<{ commandName: string; args?: string } | null> {
-    if (this.providerName !== "codex" || typeof prompt !== "string") {
+    if (
+      (this.providerName !== "codex" && this.providerName !== "opencode") ||
+      typeof prompt !== "string"
+    ) {
       return null;
     }
     const parsed = this.parseSlashCommandInput(prompt);
@@ -280,6 +439,7 @@ class FakeAgentSession implements AgentSession {
 
     const turnId = `fake-turn-${this.nextTurnOrdinal++}`;
     this.activeForegroundTurnId = turnId;
+    this.onStartTurn?.(prompt);
 
     void this.emitTurnEvents(prompt);
 
@@ -305,45 +465,253 @@ class FakeAgentSession implements AgentSession {
     }
   }
 
+  private async emitSlashCommandTurn(slashCommand: {
+    commandName: string;
+    args?: string;
+  }): Promise<void> {
+    const threadStarted: AgentStreamEvent = {
+      type: "thread_started",
+      provider: this.providerName,
+      sessionId: this.id,
+    };
+    await this.appendHistoryEvent(threadStarted);
+    this.notifySubscribers(threadStarted);
+
+    const turnStarted: AgentStreamEvent = {
+      type: "turn_started",
+      provider: this.providerName,
+    };
+    await this.appendHistoryEvent(turnStarted);
+    this.notifySubscribers(turnStarted);
+
+    const result = await this.runSlashCommand(slashCommand.commandName, slashCommand.args);
+    for (const item of result.timeline) {
+      const timelineEvent: AgentStreamEvent = {
+        type: "timeline",
+        provider: this.providerName,
+        item,
+      };
+      await this.appendHistoryEvent(timelineEvent);
+      this.notifySubscribers(timelineEvent);
+    }
+
+    const completed: AgentStreamEvent = {
+      type: "turn_completed",
+      provider: this.providerName,
+      usage: result.usage ?? { inputTokens: 1, outputTokens: 1 },
+    };
+    await this.appendHistoryEvent(completed);
+    this.notifySubscribers(completed);
+  }
+
+  private async emitStressTurn(stress: { count: number; coalesced: boolean }): Promise<void> {
+    for (let index = 0; index < stress.count; index += 1) {
+      const stressUpdate: AgentStreamEvent = {
+        type: "timeline",
+        provider: this.providerName,
+        item: stress.coalesced
+          ? {
+              type: "assistant_message",
+              text: `stress-update-${index}`,
+            }
+          : {
+              type: "todo",
+              items: [{ text: `stress-update-${index}`, completed: index % 2 === 0 }],
+            },
+      };
+      await this.appendHistoryEvent(stressUpdate);
+      this.notifySubscribers(stressUpdate);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    const completed: AgentStreamEvent = {
+      type: "turn_completed",
+      provider: this.providerName,
+      usage: { inputTokens: 1, outputTokens: stress.count },
+    };
+    await this.appendHistoryEvent(completed);
+    this.notifySubscribers(completed);
+  }
+
+  private async emitLargePayloadTurn(
+    largePayload: ReturnType<typeof parseLargeAgentStreamPayloadPrompt> & object,
+  ): Promise<void> {
+    const largeUpdate = buildLargeTimelineItem({
+      ...largePayload,
+      callId: randomUUID(),
+      provider: this.providerName,
+    });
+    await this.appendHistoryEvent(largeUpdate);
+    this.notifySubscribers(largeUpdate);
+
+    const completed: AgentStreamEvent = {
+      type: "turn_completed",
+      provider: this.providerName,
+      usage: { inputTokens: 1, outputTokens: largePayload.bytes },
+    };
+    await this.appendHistoryEvent(completed);
+    this.notifySubscribers(completed);
+  }
+
+  private async resolveToolPermission(tool: {
+    name: string;
+    input?: Record<string, unknown>;
+  }): Promise<{ denied: boolean; interrupted: boolean }> {
+    const request: AgentPermissionRequest = {
+      id: randomUUID(),
+      provider: this.providerName,
+      name: tool.name,
+      kind: "tool",
+      title: "Permission required",
+      description: "Test permission request",
+      input: tool.input ?? {},
+    };
+    this.pendingPermissions = [request];
+    this.permissionGate = createDeferred<AgentPermissionResponse>();
+    const permissionRequested: AgentStreamEvent = {
+      type: "permission_requested",
+      provider: this.providerName,
+      request,
+    };
+    await this.appendHistoryEvent(permissionRequested);
+    this.notifySubscribers(permissionRequested);
+
+    const response = await Promise.race([
+      this.permissionGate.promise,
+      this.interruptSignal.promise.then(
+        () =>
+          ({
+            behavior: "deny",
+            interrupt: true,
+            message: "Interrupted",
+          }) satisfies AgentPermissionResponse,
+      ),
+    ]);
+    this.pendingPermissions = [];
+    this.permissionGate = null;
+    const permissionResolved: AgentStreamEvent = {
+      type: "permission_resolved",
+      provider: this.providerName,
+      requestId: request.id,
+      resolution: response,
+    };
+    await this.appendHistoryEvent(permissionResolved);
+    this.notifySubscribers(permissionResolved);
+
+    return {
+      denied: response.behavior === "deny",
+      interrupted: response.behavior === "deny" && response.interrupt === true,
+    };
+  }
+
+  private async emitDeniedToolTurn(interrupted: boolean): Promise<void> {
+    if (interrupted) {
+      const canceled: AgentStreamEvent = {
+        type: "turn_canceled",
+        provider: this.providerName,
+        reason: "permission denied",
+      };
+      await this.appendHistoryEvent(canceled);
+      this.notifySubscribers(canceled);
+      return;
+    }
+
+    const deniedCompleted: AgentStreamEvent = {
+      type: "turn_completed",
+      provider: this.providerName,
+      usage: { inputTokens: 1, outputTokens: 0 },
+    };
+    await this.appendHistoryEvent(deniedCompleted);
+    this.notifySubscribers(deniedCompleted);
+  }
+
+  private resolveReadToolOutput(tool: {
+    name: string;
+    input?: Record<string, unknown>;
+    output?: unknown;
+  }): unknown {
+    if (tool.output) {
+      return tool.output;
+    }
+    if (tool.name !== "Read" && tool.name !== "read_file") {
+      return undefined;
+    }
+    const pathInput = typeof tool.input?.path === "string" ? tool.input.path : "/etc/hosts";
+    const resolvedPath = path.isAbsolute(pathInput)
+      ? pathInput
+      : path.join(this.config.cwd ?? process.cwd(), pathInput);
+    try {
+      const content = readFileSync(resolvedPath, "utf8");
+      return { path: pathInput, content };
+    } catch {
+      return { path: pathInput, content: "" };
+    }
+  }
+
+  private async emitToolCallTurn(
+    tool: NonNullable<ReturnType<typeof buildToolCallForPrompt>>,
+    textPrompt: string,
+  ): Promise<boolean> {
+    const needsPermission = this.needsPermissionForTool(tool.name, tool.input ?? {});
+    const callId = randomUUID();
+    const toolRunning: AgentStreamEvent = {
+      type: "timeline",
+      provider: this.providerName,
+      item: {
+        type: "tool_call",
+        name: tool.name,
+        callId,
+        status: "running",
+        detail: {
+          type: "unknown",
+          input: tool.input ?? null,
+          output: null,
+        },
+        error: null,
+      },
+    };
+    await this.appendHistoryEvent(toolRunning);
+    this.notifySubscribers(toolRunning);
+
+    if (needsPermission) {
+      const permission = await this.resolveToolPermission(tool);
+      if (permission.denied) {
+        await this.emitDeniedToolTurn(permission.interrupted);
+        return true;
+      }
+    }
+
+    await this.applyToolSideEffects(tool.name, tool.input ?? {}, textPrompt);
+
+    const toolOutput = this.resolveReadToolOutput(tool);
+    const toolCompleted: AgentStreamEvent = {
+      type: "timeline",
+      provider: this.providerName,
+      item: {
+        type: "tool_call",
+        name: tool.name,
+        callId,
+        status: "completed",
+        detail: {
+          type: "unknown",
+          input: tool.input ?? null,
+          output: toolOutput ?? { ok: true },
+        },
+        error: null,
+      },
+    };
+    await this.appendHistoryEvent(toolCompleted);
+    this.notifySubscribers(toolCompleted);
+    return false;
+  }
+
   private async emitTurnEvents(prompt: AgentPromptInput): Promise<void> {
     this.interruptSignal = createDeferred<void>();
     const slashCommand = await this.resolveSlashCommandInput(prompt);
     const textPrompt = typeof prompt === "string" ? prompt : JSON.stringify(prompt);
     try {
       if (slashCommand) {
-        const threadStarted: AgentStreamEvent = {
-          type: "thread_started",
-          provider: this.providerName,
-          sessionId: this.id,
-        };
-        await this.appendHistoryEvent(threadStarted);
-        this.notifySubscribers(threadStarted);
-
-        const turnStarted: AgentStreamEvent = {
-          type: "turn_started",
-          provider: this.providerName,
-        };
-        await this.appendHistoryEvent(turnStarted);
-        this.notifySubscribers(turnStarted);
-
-        const result = await this.runSlashCommand(slashCommand.commandName, slashCommand.args);
-        for (const item of result.timeline) {
-          const timelineEvent: AgentStreamEvent = {
-            type: "timeline",
-            provider: this.providerName,
-            item,
-          };
-          await this.appendHistoryEvent(timelineEvent);
-          this.notifySubscribers(timelineEvent);
-        }
-
-        const completed: AgentStreamEvent = {
-          type: "turn_completed",
-          provider: this.providerName,
-          usage: result.usage ?? { inputTokens: 1, outputTokens: 1 },
-        };
-        await this.appendHistoryEvent(completed);
-        this.notifySubscribers(completed);
+        await this.emitSlashCommandTurn(slashCommand);
         return;
       }
 
@@ -369,128 +737,35 @@ class FakeAgentSession implements AgentSession {
       await this.appendHistoryEvent(turnStarted);
       this.notifySubscribers(turnStarted);
 
+      if (textPrompt.toLowerCase().includes("emit a turn failure")) {
+        const failed: AgentStreamEvent = {
+          type: "turn_failed",
+          provider: this.providerName,
+          error: "Requested fake provider failure",
+        };
+        await this.appendHistoryEvent(failed);
+        this.notifySubscribers(failed);
+        return;
+      }
+
+      const stress = parseAgentStreamStressPrompt(textPrompt);
+      if (stress !== null) {
+        await this.emitStressTurn(stress);
+        return;
+      }
+
+      const largePayload = parseLargeAgentStreamPayloadPrompt(textPrompt);
+      if (largePayload !== null) {
+        await this.emitLargePayloadTurn(largePayload);
+        return;
+      }
+
       const tool = buildToolCallForPrompt(this.providerName, textPrompt);
       if (tool) {
-        const needsPermission = this.needsPermissionForTool(tool.name, tool.input ?? {});
-        const callId = randomUUID();
-        const toolRunning: AgentStreamEvent = {
-          type: "timeline",
-          provider: this.providerName,
-          item: {
-            type: "tool_call",
-            name: tool.name,
-            callId,
-            status: "running",
-            detail: {
-              type: "unknown",
-              input: tool.input ?? null,
-              output: null,
-            },
-            error: null,
-          },
-        };
-        await this.appendHistoryEvent(toolRunning);
-        this.notifySubscribers(toolRunning);
-
-        if (needsPermission) {
-          const request: AgentPermissionRequest = {
-            id: randomUUID(),
-            provider: this.providerName,
-            name: tool.name,
-            kind: "tool",
-            title: "Permission required",
-            description: "Test permission request",
-            input: tool.input ?? {},
-          };
-          this.pendingPermissions = [request];
-          this.permissionGate = createDeferred<AgentPermissionResponse>();
-          const permissionRequested: AgentStreamEvent = {
-            type: "permission_requested",
-            provider: this.providerName,
-            request,
-          };
-          await this.appendHistoryEvent(permissionRequested);
-          this.notifySubscribers(permissionRequested);
-
-          const response = await Promise.race([
-            this.permissionGate.promise,
-            this.interruptSignal.promise.then(
-              () =>
-                ({
-                  behavior: "deny",
-                  interrupt: true,
-                  message: "Interrupted",
-                }) satisfies AgentPermissionResponse,
-            ),
-          ]);
-          this.pendingPermissions = [];
-          this.permissionGate = null;
-          const permissionResolved: AgentStreamEvent = {
-            type: "permission_resolved",
-            provider: this.providerName,
-            requestId: request.id,
-            resolution: response,
-          };
-          await this.appendHistoryEvent(permissionResolved);
-          this.notifySubscribers(permissionResolved);
-
-          if (response.behavior === "deny") {
-            if (response.interrupt) {
-              const canceled: AgentStreamEvent = {
-                type: "turn_canceled",
-                provider: this.providerName,
-                reason: "permission denied",
-              };
-              await this.appendHistoryEvent(canceled);
-              this.notifySubscribers(canceled);
-              return;
-            }
-
-            const deniedCompleted: AgentStreamEvent = {
-              type: "turn_completed",
-              provider: this.providerName,
-              usage: { inputTokens: 1, outputTokens: 0 },
-            };
-            await this.appendHistoryEvent(deniedCompleted);
-            this.notifySubscribers(deniedCompleted);
-            return;
-          }
+        const returnedEarly = await this.emitToolCallTurn(tool, textPrompt);
+        if (returnedEarly) {
+          return;
         }
-
-        await this.applyToolSideEffects(tool.name, tool.input ?? {}, textPrompt);
-
-        let toolOutput: unknown = tool.output;
-        if (!toolOutput && (tool.name === "Read" || tool.name === "read_file")) {
-          const pathInput = typeof tool.input?.path === "string" ? tool.input.path : "/etc/hosts";
-          const resolvedPath = path.isAbsolute(pathInput)
-            ? pathInput
-            : path.join(this.config.cwd ?? process.cwd(), pathInput);
-          try {
-            const content = readFileSync(resolvedPath, "utf8");
-            toolOutput = { path: pathInput, content };
-          } catch {
-            toolOutput = { path: pathInput, content: "" };
-          }
-        }
-
-        const toolCompleted: AgentStreamEvent = {
-          type: "timeline",
-          provider: this.providerName,
-          item: {
-            type: "tool_call",
-            name: tool.name,
-            callId,
-            status: "completed",
-            detail: {
-              type: "unknown",
-              input: tool.input ?? null,
-              output: toolOutput ?? { ok: true },
-            },
-            error: null,
-          },
-        };
-        await this.appendHistoryEvent(toolCompleted);
-        this.notifySubscribers(toolCompleted);
       }
 
       const assistantText = this.buildAssistantText(textPrompt);
@@ -502,13 +777,16 @@ class FakeAgentSession implements AgentSession {
       await this.appendHistoryEvent(assistantChunkA);
       this.notifySubscribers(assistantChunkA);
 
-      const assistantChunkB: AgentStreamEvent = {
-        type: "timeline",
-        provider: this.providerName,
-        item: { type: "assistant_message", text: assistantText.slice(6) },
-      };
-      await this.appendHistoryEvent(assistantChunkB);
-      this.notifySubscribers(assistantChunkB);
+      const assistantChunkBText = assistantText.slice(6);
+      if (assistantChunkBText.length > 0) {
+        const assistantChunkB: AgentStreamEvent = {
+          type: "timeline",
+          provider: this.providerName,
+          item: { type: "assistant_message", text: assistantChunkBText },
+        };
+        await this.appendHistoryEvent(assistantChunkB);
+        this.notifySubscribers(assistantChunkB);
+      }
 
       const completed: AgentStreamEvent = {
         type: "turn_completed",
@@ -551,13 +829,7 @@ class FakeAgentSession implements AgentSession {
   }
 
   async getAvailableModes(): Promise<AgentMode[]> {
-    return [
-      { id: "bypassPermissions", label: "Bypass", description: "No permissions" },
-      { id: "default", label: "Default", description: "Ask for permissions" },
-      { id: "full-access", label: "Full access", description: "No prompts" },
-      { id: "auto", label: "Auto", description: "Ask/allow based on policy" },
-      { id: "always-ask", label: "Always Ask", description: "Always prompt" },
-    ];
+    return TEST_MODES;
   }
 
   async getCurrentMode(): Promise<string | null> {
@@ -566,6 +838,13 @@ class FakeAgentSession implements AgentSession {
 
   async setMode(modeId: string): Promise<void> {
     this.config.modeId = modeId;
+  }
+
+  async setFeature(featureId: string, value: unknown): Promise<void> {
+    this.config.featureValues = {
+      ...this.config.featureValues,
+      [featureId]: value,
+    };
   }
 
   getPendingPermissions(): AgentPermissionRequest[] {
@@ -581,10 +860,14 @@ class FakeAgentSession implements AgentSession {
   }
 
   describePersistence(): AgentPersistenceHandle | null {
+    const metadata = {
+      ...(this.memoryMarker ? { marker: this.memoryMarker } : {}),
+      ...(this.config.mcpServers ? { mcpServers: this.config.mcpServers } : {}),
+    };
     return buildPersistence(
       this.providerName,
       this.id,
-      this.memoryMarker ? { marker: this.memoryMarker } : undefined,
+      Object.keys(metadata).length > 0 ? metadata : undefined,
     );
   }
 
@@ -592,7 +875,9 @@ class FakeAgentSession implements AgentSession {
     this.interruptSignal.resolve();
   }
 
-  async close(): Promise<void> {}
+  async close(): Promise<void> {
+    await this.closeSession?.();
+  }
 
   async listCommands(): Promise<AgentSlashCommand[]> {
     if (this.providerName === "codex") {
@@ -712,133 +997,167 @@ class FakeAgentSession implements AgentSession {
     return "Hello world";
   }
 
+  private async applyReadToolSideEffect(toolInput: Record<string, unknown>): Promise<void> {
+    const p = typeof toolInput.path === "string" ? toolInput.path : "/etc/hosts";
+    try {
+      readFileSync(p, "utf8");
+    } catch {
+      // ignore - tests only assert tool call presence
+    }
+  }
+
+  private async applyBashRemovalSideEffect(fileName: string): Promise<void> {
+    const dest = path.join(this.config.cwd ?? process.cwd(), fileName);
+    try {
+      rmSync(dest, { force: true });
+    } catch {
+      // ignore
+    }
+  }
+
+  private async applyBashSleepSideEffect(): Promise<"completed" | "interrupted"> {
+    const interrupt = this.interruptSignal.promise.then(() => "interrupted" as const);
+    const completed = new Promise<"completed">((resolve) =>
+      setTimeout(() => resolve("completed"), 250),
+    );
+    return await Promise.race([interrupt, completed]);
+  }
+
+  private async applyBashAbortableWriteSideEffect(fileName: string): Promise<void> {
+    const dest = path.join(this.config.cwd ?? process.cwd(), fileName);
+    let interrupted = false;
+    const interrupt = this.interruptSignal.promise.then(() => {
+      interrupted = true;
+      return;
+    });
+    await Promise.race([interrupt, new Promise((r) => setTimeout(r, 500))]);
+    if (!interrupted) {
+      writeFileSync(dest, "ok");
+    }
+  }
+
+  private applyBashPrintfRedirectSideEffect(command: string, lower: string): void {
+    if (!(lower.includes("printf") && lower.includes(">") && lower.includes(".txt"))) {
+      return;
+    }
+    const destMatch = />\s*([^\s`]+)\s*$/i.exec(command) ?? />\s*([^\s`]+)/i.exec(lower);
+    const fileName = destMatch?.[1];
+    if (!fileName) {
+      return;
+    }
+    const dest = path.join(this.config.cwd ?? process.cwd(), fileName);
+    writeFileSync(dest, "ok");
+  }
+
+  private async applyBashSpecialCommandSideEffect(
+    lower: string,
+    command: string,
+  ): Promise<"handled" | "not-handled"> {
+    if (lower.includes("rm -f permission.txt") || command.includes("rm -f permission.txt")) {
+      await this.applyBashRemovalSideEffect("permission.txt");
+      return "handled";
+    }
+    if (lower.includes("rm -f mcp-smoke.txt") || command.includes("rm -f mcp-smoke.txt")) {
+      await this.applyBashRemovalSideEffect("mcp-smoke.txt");
+      return "handled";
+    }
+    if (lower.includes("printf") && lower.includes("permission.txt")) {
+      const dest = path.join(this.config.cwd ?? process.cwd(), "permission.txt");
+      writeFileSync(dest, "ok");
+      return "handled";
+    }
+    return "not-handled";
+  }
+
+  private async applyBashSideEffect(
+    toolInput: Record<string, unknown>,
+    prompt: string,
+    createFileMatch: RegExpExecArray | null,
+  ): Promise<void> {
+    const lower = prompt.toLowerCase();
+    const command = typeof toolInput.command === "string" ? toolInput.command : "";
+
+    if (createFileMatch) {
+      const fileName = createFileMatch[1] ?? "test.txt";
+      const content = createFileMatch[2] ?? "";
+      const dest = path.join(this.config.cwd ?? process.cwd(), fileName);
+      writeFileSync(dest, content);
+      return;
+    }
+
+    const special = await this.applyBashSpecialCommandSideEffect(lower, command);
+    if (special === "handled") {
+      return;
+    }
+
+    if (command.includes("sleep")) {
+      const outcome = await this.applyBashSleepSideEffect();
+      if (outcome === "interrupted") {
+        return;
+      }
+    }
+
+    if (lower.includes("abort-test-file.txt")) {
+      await this.applyBashAbortableWriteSideEffect("abort-test-file.txt");
+      return;
+    }
+
+    this.applyBashPrintfRedirectSideEffect(command, lower);
+  }
+
+  private async applyEditSideEffect(prompt: string): Promise<void> {
+    const lowerPrompt = prompt.toLowerCase();
+    const match = /edit the file\s+([^\s]+)\s+and change/i.exec(prompt);
+    const filePath =
+      match?.[1] ?? (lowerPrompt.includes("tool-create.txt") ? "tool-create.txt" : null);
+    if (!filePath) {
+      return;
+    }
+    try {
+      const resolved = path.isAbsolute(filePath)
+        ? filePath
+        : path.join(this.config.cwd ?? process.cwd(), filePath);
+      const before = readFileSync(resolved, "utf8");
+      let after = before.replace(/hello/g, "goodbye");
+      if (lowerPrompt.includes("alpha") && lowerPrompt.includes("beta")) {
+        after = after.replace(/alpha/g, "beta");
+      }
+      writeFileSync(resolved, after);
+    } catch {
+      // ignore
+    }
+  }
+
   private async applyToolSideEffects(
     toolName: string,
     toolInput: Record<string, unknown>,
     prompt: string,
   ): Promise<void> {
-    const lower = prompt.toLowerCase();
     const createFileMatch =
       /create a file named\s+"([^"]+)"\s+with the content\s+"([^"]*)"/i.exec(prompt) ??
       /create a file named\s+"([^"]+)"\s+with the content\s+'([^']*)'/i.exec(prompt);
 
     if (toolName === "Read" || toolName === "read_file") {
-      const p = typeof toolInput.path === "string" ? toolInput.path : "/etc/hosts";
-      try {
-        readFileSync(p, "utf8");
-      } catch {
-        // ignore - tests only assert tool call presence
-      }
+      await this.applyReadToolSideEffect(toolInput);
       return;
     }
 
     if (toolName === "Bash" || toolName === "shell") {
-      const command = typeof toolInput.command === "string" ? toolInput.command : "";
-
-      // Deterministic file-create behavior for permission prompt tests:
-      // Prompt: Create a file named "X" with the content "Y"
-      if (createFileMatch) {
-        const fileName = createFileMatch[1] ?? "test.txt";
-        const content = createFileMatch[2] ?? "";
-        const dest = path.join(this.config.cwd ?? process.cwd(), fileName);
-        writeFileSync(dest, content);
-        return;
-      }
-
-      if (lower.includes("rm -f permission.txt") || command.includes("rm -f permission.txt")) {
-        const dest = path.join(this.config.cwd ?? process.cwd(), "permission.txt");
-        try {
-          rmSync(dest, { force: true });
-        } catch {
-          // ignore
-        }
-        return;
-      }
-
-      if (lower.includes("rm -f mcp-smoke.txt") || command.includes("rm -f mcp-smoke.txt")) {
-        const dest = path.join(this.config.cwd ?? process.cwd(), "mcp-smoke.txt");
-        try {
-          rmSync(dest, { force: true });
-        } catch {
-          // ignore
-        }
-        return;
-      }
-
-      if (lower.includes("printf") && lower.includes("permission.txt")) {
-        const dest = path.join(this.config.cwd ?? process.cwd(), "permission.txt");
-        writeFileSync(dest, "ok");
-        return;
-      }
-
-      if (command.includes("sleep")) {
-        // Simulate a long-running operation that can be interrupted.
-        // Keep the duration small so tests stay fast.
-        const interrupt = this.interruptSignal.promise.then(() => "interrupted" as const);
-        const completed = new Promise<"completed">((resolve) =>
-          setTimeout(() => resolve("completed"), 250),
-        );
-        const outcome = await Promise.race([interrupt, completed]);
-        if (outcome === "interrupted") {
-          return;
-        }
-        // Continue after "sleep" completes.
-      }
-
-      if (lower.includes("abort-test-file.txt")) {
-        const dest = path.join(this.config.cwd ?? process.cwd(), "abort-test-file.txt");
-        // Simulate a delayed write that should be prevented by interrupt().
-        let interrupted = false;
-        const interrupt = this.interruptSignal.promise.then(() => {
-          interrupted = true;
-        });
-        await Promise.race([interrupt, new Promise((r) => setTimeout(r, 500))]);
-        if (!interrupted) {
-          writeFileSync(dest, "ok");
-        }
-        return;
-      }
-
-      if (lower.includes("printf") && lower.includes(">") && lower.includes(".txt")) {
-        const destMatch = />\s*([^\s`]+)\s*$/i.exec(command) ?? />\s*([^\s`]+)/i.exec(lower);
-        const fileName = destMatch?.[1];
-        if (fileName) {
-          const dest = path.join(this.config.cwd ?? process.cwd(), fileName);
-          writeFileSync(dest, "ok");
-          return;
-        }
-      }
-
+      await this.applyBashSideEffect(toolInput, prompt, createFileMatch);
       return;
     }
 
     if (toolName === "Edit" || toolName === "apply_patch") {
-      const lowerPrompt = prompt.toLowerCase();
-      const match = /edit the file\s+([^\s]+)\s+and change/i.exec(prompt);
-      const filePath =
-        match?.[1] ?? (lowerPrompt.includes("tool-create.txt") ? "tool-create.txt" : null);
-      if (filePath) {
-        try {
-          const resolved = path.isAbsolute(filePath)
-            ? filePath
-            : path.join(this.config.cwd ?? process.cwd(), filePath);
-          const before = readFileSync(resolved, "utf8");
-          let after = before.replace(/hello/g, "goodbye");
-          if (lowerPrompt.includes("alpha") && lowerPrompt.includes("beta")) {
-            after = after.replace(/alpha/g, "beta");
-          }
-          writeFileSync(resolved, after);
-        } catch {
-          // ignore
-        }
-      }
-      return;
+      await this.applyEditSideEffect(prompt);
     }
   }
 
   private needsPermissionForTool(toolName: string, toolInput: Record<string, unknown>): boolean {
     const mode = (this.config.modeId ?? "").toLowerCase();
-    const policy = (this.config.approvalPolicy ?? "").toLowerCase();
+    const policy =
+      typeof this.config.providerOptions?.approval_policy === "string"
+        ? this.config.providerOptions.approval_policy.toLowerCase()
+        : "";
 
     if (policy === "never" || mode.includes("bypass") || mode.includes("full")) {
       return false;
@@ -868,14 +1187,28 @@ class FakeAgentSession implements AgentSession {
 }
 
 class FakeAgentClient implements AgentClient {
-  readonly capabilities = TEST_CAPABILITIES;
-  constructor(public readonly provider: string) {}
+  readonly capabilities: AgentCapabilityFlags;
+  constructor(
+    public readonly provider: string,
+    private readonly options: TestAgentClientOptions,
+  ) {
+    this.capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsMcpServers: options.supportsMcpServers === true,
+    };
+  }
 
   async createSession(
     config: AgentSessionConfig,
     _launchContext?: AgentLaunchContext,
   ): Promise<AgentSession> {
-    return new FakeAgentSession(this.provider, { ...config });
+    return new FakeAgentSession({
+      providerName: this.provider,
+      config: { ...config },
+      supportsMcpServers: this.options.supportsMcpServers,
+      closeSession: this.options.closeSession,
+      onStartTurn: this.options.onStartTurn,
+    });
   }
 
   async resumeSession(
@@ -892,32 +1225,46 @@ class FakeAgentClient implements AgentClient {
       (handle.metadata as Record<string, unknown> | undefined)?.marker ??
       (handle.metadata as Record<string, unknown> | undefined)?.conversationId ??
       null;
-    return new FakeAgentSession(
-      this.provider,
-      cfg,
-      handle.sessionId,
-      typeof marker === "string" ? marker : null,
-    );
+    return new FakeAgentSession({
+      providerName: this.provider,
+      config: cfg,
+      supportsMcpServers: this.options.supportsMcpServers,
+      sessionId: handle.sessionId,
+      memoryMarker: typeof marker === "string" ? marker : null,
+      closeSession: this.options.closeSession,
+      onStartTurn: this.options.onStartTurn,
+    });
   }
 
-  async listModels(_options?: ListModelsOptions): Promise<AgentModelDefinition[]> {
+  async fetchCatalog(
+    _options: FetchCatalogOptions,
+  ): Promise<{ models: AgentModelDefinition[]; modes: AgentMode[] }> {
     if (this.provider === "claude") {
-      return [
-        { provider: this.provider, id: "haiku", label: "Haiku", isDefault: true },
-        { provider: this.provider, id: "sonnet", label: "Sonnet", isDefault: false },
-      ];
+      return {
+        models: [
+          { provider: this.provider, id: "haiku", label: "Haiku", isDefault: true },
+          { provider: this.provider, id: "sonnet", label: "Sonnet", isDefault: false },
+        ],
+        modes: TEST_MODES,
+      };
     }
     if (this.provider === "codex") {
-      return [
-        {
-          provider: this.provider,
-          id: "gpt-5.1-codex-mini",
-          label: "gpt-5.1-codex-mini",
-          isDefault: true,
-        },
-      ];
+      return {
+        models: [
+          {
+            provider: this.provider,
+            id: "gpt-5.4-mini",
+            label: "gpt-5.4-mini",
+            isDefault: true,
+          },
+        ],
+        modes: TEST_MODES,
+      };
     }
-    return [{ provider: this.provider, id: "test-model", label: "Test Model", isDefault: true }];
+    return {
+      models: [{ provider: this.provider, id: "test-model", label: "Test Model", isDefault: true }],
+      modes: TEST_MODES,
+    };
   }
 
   async isAvailable(): Promise<boolean> {
@@ -925,10 +1272,12 @@ class FakeAgentClient implements AgentClient {
   }
 }
 
-export function createTestAgentClients(): Record<string, AgentClient> {
+export function createTestAgentClients(
+  options: TestAgentClientOptions = {},
+): Record<string, AgentClient> {
   return {
-    claude: new FakeAgentClient("claude"),
-    codex: new FakeAgentClient("codex"),
-    opencode: new FakeAgentClient("opencode"),
+    claude: new FakeAgentClient("claude", options),
+    codex: new FakeAgentClient("codex", options),
+    opencode: new FakeAgentClient("opencode", options),
   };
 }

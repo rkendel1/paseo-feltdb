@@ -4,22 +4,32 @@ import { extname, join } from "path";
 /**
  * Icon file patterns to search for, in priority order.
  * Patterns starting with '*' are glob patterns (e.g., icon-*.png).
+ *
+ * SVG and PNG outrank ICO across all known names: every client renders them
+ * and they scale better. ICO is the final fallback because native clients
+ * cannot decode containers whose frames use the legacy bitmap format.
  */
 export const ICON_PATTERNS = [
-  "favicon.ico",
-  "favicon.png",
   "favicon.svg",
-  "favico.ico",
-  "favico.png",
+  "favicon.png",
+  "favicon-*.svg",
+  "favicon-*.png",
   "favico.svg",
-  "icon.png",
+  "favico.png",
   "icon.svg",
-  "app-icon.png",
+  "icon.png",
   "app-icon.svg",
+  "app-icon.png",
   "apple-touch-icon.png",
+  "apple-touch-icon-*.png",
   "icon-*.png",
-  "logo.png",
+  "android-chrome-*.png",
+  "safari-pinned-tab.svg",
+  "mstile-*.png",
   "logo.svg",
+  "logo.png",
+  "favicon.ico",
+  "favico.ico",
 ];
 
 /**
@@ -60,7 +70,7 @@ export interface ProjectIcon {
 
 const MAX_ICON_SIZE = 32 * 1024; // 32KB max
 
-interface ImageDimensions {
+export interface ImageDimensions {
   width: number;
   height: number;
 }
@@ -136,7 +146,7 @@ function getWebpDimensions(buffer: Buffer): ImageDimensions | null {
   return null;
 }
 
-function getImageDimensions(buffer: Buffer, mimeType: string): ImageDimensions | null {
+export function getImageDimensions(buffer: Buffer, mimeType: string): ImageDimensions | null {
   switch (mimeType) {
     case "image/png":
       return getPngDimensions(buffer);
@@ -161,6 +171,76 @@ function isSquareImage(buffer: Buffer, mimeType: string): boolean {
   const dimensions = getImageDimensions(buffer, mimeType);
   if (!dimensions) return false;
   return dimensions.width === dimensions.height;
+}
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/**
+ * Detect the mime type from the file's magic bytes. Extensions lie: a large
+ * share of real-world favicon.ico files are PNG data renamed, which browsers
+ * render regardless — but native clients key off the reported mime type, so
+ * mislabelling them image/x-icon needlessly drops the icon there.
+ */
+function sniffMimeType(buffer: Buffer): string | null {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    return "image/png";
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (buffer.length >= 6 && buffer.toString("ascii", 0, 3) === "GIF") {
+    return "image/gif";
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.toString("ascii", 0, 4) === "RIFF" &&
+    buffer.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  if (
+    buffer.length >= 6 &&
+    buffer.readUInt16LE(0) === 0 &&
+    buffer.readUInt16LE(2) === 1 &&
+    buffer.readUInt16LE(4) > 0
+  ) {
+    return "image/x-icon";
+  }
+  return null;
+}
+
+/**
+ * ICO is a container; modern favicons usually carry a PNG-encoded frame for the
+ * larger sizes. Native <Image> can't decode ICO but decodes PNG fine, so when a
+ * PNG frame exists, serve the largest one as image/png instead of the container.
+ */
+export function extractIcoPngFrame(buffer: Buffer): Buffer | null {
+  if (buffer.length < 6 || buffer.readUInt16LE(0) !== 0 || buffer.readUInt16LE(2) !== 1) {
+    return null;
+  }
+  const frameCount = buffer.readUInt16LE(4);
+  let best: Buffer | null = null;
+  let bestWidth = -1;
+  for (let index = 0; index < frameCount; index += 1) {
+    const entryOffset = 6 + index * 16;
+    if (entryOffset + 16 > buffer.length) {
+      break;
+    }
+    // Directory entry: width(1) height(1) colors(1) reserved(1) planes(2)
+    // bpp(2) dataSize(4 LE) dataOffset(4 LE). Width byte 0 means 256.
+    const width = buffer[entryOffset] === 0 ? 256 : (buffer[entryOffset] ?? 0);
+    const dataSize = buffer.readUInt32LE(entryOffset + 8);
+    const dataOffset = buffer.readUInt32LE(entryOffset + 12);
+    if (dataOffset + dataSize > buffer.length) {
+      continue;
+    }
+    const frame = buffer.subarray(dataOffset, dataOffset + dataSize);
+    if (frame.length >= 8 && frame.subarray(0, 8).equals(PNG_SIGNATURE) && width > bestWidth) {
+      best = frame;
+      bestWidth = width;
+    }
+  }
+  return best;
 }
 
 function getMimeType(filename: string): string {
@@ -193,6 +273,24 @@ function matchesPattern(filename: string, pattern: string): boolean {
   return filename === pattern;
 }
 
+async function isExistingFile(fullPath: string): Promise<boolean> {
+  try {
+    const stats = await stat(fullPath);
+    return stats.isFile();
+  } catch {
+    return false;
+  }
+}
+
+async function isExistingDirectory(fullPath: string): Promise<boolean> {
+  try {
+    const stats = await stat(fullPath);
+    return stats.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 async function findIconInDir(dir: string, patterns: string[]): Promise<string | null> {
   let entries: string[];
   try {
@@ -201,24 +299,38 @@ async function findIconInDir(dir: string, patterns: string[]): Promise<string | 
     return null;
   }
 
-  // Check each pattern in order of priority
+  // Collect candidate paths in priority order (pattern, then entry)
+  const candidatePaths: string[] = [];
   for (const pattern of patterns) {
     for (const entry of entries) {
       if (matchesPattern(entry, pattern)) {
-        const fullPath = join(dir, entry);
-        try {
-          const stats = await stat(fullPath);
-          if (stats.isFile()) {
-            return fullPath;
-          }
-        } catch {
-          // File may have been deleted, continue
-        }
+        candidatePaths.push(join(dir, entry));
       }
     }
   }
 
-  return null;
+  const existsResults = await Promise.all(candidatePaths.map((p) => isExistingFile(p)));
+  const foundIndex = existsResults.findIndex((exists) => exists);
+  return foundIndex === -1 ? null : (candidatePaths[foundIndex] ?? null);
+}
+
+async function searchPriorityDirs(
+  basePath: string,
+  ignoredDirsSet: Set<string>,
+  remainingDepth: number,
+): Promise<string | null> {
+  const priorityPaths = PRIORITY_DIRS.map((priorityDir) => join(basePath, priorityDir));
+  const existenceResults = await Promise.all(
+    priorityPaths.map((priorityPath) => isExistingDirectory(priorityPath)),
+  );
+  const searchResults = await Promise.all(
+    priorityPaths.map((priorityPath, index) =>
+      existenceResults[index]
+        ? searchDirRecursively(priorityPath, ICON_PATTERNS, ignoredDirsSet, remainingDepth)
+        : Promise.resolve(null),
+    ),
+  );
+  return searchResults.find((result): result is string => result !== null) ?? null;
 }
 
 async function searchDirRecursively(
@@ -246,32 +358,20 @@ async function searchDirRecursively(
     return null;
   }
 
-  for (const entry of entries) {
-    if (ignoredDirs.has(entry)) {
-      continue;
-    }
-
-    const fullPath = join(dir, entry);
-    try {
-      const stats = await stat(fullPath);
-      if (stats.isDirectory()) {
-        const result = await searchDirRecursively(
-          fullPath,
-          patterns,
-          ignoredDirs,
-          maxDepth,
-          currentDepth + 1,
-        );
-        if (result) {
-          return result;
-        }
-      }
-    } catch {
-      // Directory may be inaccessible, continue
-    }
-  }
-
-  return null;
+  const candidatePaths = entries
+    .filter((entry) => !ignoredDirs.has(entry))
+    .map((entry) => join(dir, entry));
+  const isDirResults = await Promise.all(
+    candidatePaths.map((fullPath) => isExistingDirectory(fullPath)),
+  );
+  const recursionResults = await Promise.all(
+    candidatePaths.map((fullPath, index) =>
+      isDirResults[index]
+        ? searchDirRecursively(fullPath, patterns, ignoredDirs, maxDepth, currentDepth + 1)
+        : Promise.resolve(null),
+    ),
+  );
+  return recursionResults.find((result): result is string => result !== null) ?? null;
 }
 
 /**
@@ -289,72 +389,48 @@ export async function findProjectIcon(
   const ignoredDirsSet = new Set(IGNORED_DIRS);
 
   // First search priority directories
-  for (const priorityDir of PRIORITY_DIRS) {
-    const priorityPath = join(projectDir, priorityDir);
-    try {
-      const stats = await stat(priorityPath);
-      if (stats.isDirectory()) {
-        const result = await searchDirRecursively(
-          priorityPath,
-          ICON_PATTERNS,
-          ignoredDirsSet,
-          maxDepth - 1,
-        );
-        if (result) {
-          return result;
-        }
-      }
-    } catch {
-      // Directory doesn't exist, continue
-    }
+  const priorityResult = await searchPriorityDirs(projectDir, ignoredDirsSet, maxDepth - 1);
+  if (priorityResult) {
+    return priorityResult;
   }
 
   // Then search monorepo package directories (packages/*, apps/*)
-  for (const monoDir of MONOREPO_PACKAGE_DIRS) {
-    const monoPath = join(projectDir, monoDir);
-    let packageEntries: string[];
-    try {
-      packageEntries = await readdir(monoPath);
-    } catch {
-      continue;
-    }
-
-    for (const packageName of packageEntries) {
-      const packagePath = join(monoPath, packageName);
+  const monoPaths = MONOREPO_PACKAGE_DIRS.map((monoDir) => join(projectDir, monoDir));
+  const monoEntries = await Promise.all(
+    monoPaths.map(async (monoPath): Promise<string[] | null> => {
       try {
-        const packageStats = await stat(packagePath);
-        if (!packageStats.isDirectory()) continue;
+        return await readdir(monoPath);
       } catch {
-        continue;
+        return null;
       }
-
-      // Search priority dirs within the package
-      for (const priorityDir of PRIORITY_DIRS) {
-        const priorityPath = join(packagePath, priorityDir);
-        try {
-          const priorityStats = await stat(priorityPath);
-          if (priorityStats.isDirectory()) {
-            const result = await searchDirRecursively(
-              priorityPath,
-              ICON_PATTERNS,
-              ignoredDirsSet,
-              maxDepth - 1,
-            );
-            if (result) {
-              return result;
-            }
-          }
-        } catch {
-          // Directory doesn't exist, continue
-        }
-      }
-
-      // Search package root
-      const found = await findIconInDir(packagePath, ICON_PATTERNS);
-      if (found) {
-        return found;
-      }
-    }
+    }),
+  );
+  const monoResults = await Promise.all(
+    monoPaths.map(async (monoPath, monoIdx): Promise<string | null> => {
+      const packageEntries = monoEntries[monoIdx];
+      if (!packageEntries) return null;
+      const packagePaths = packageEntries.map((packageName) => join(monoPath, packageName));
+      const isDirResults = await Promise.all(
+        packagePaths.map((packagePath) => isExistingDirectory(packagePath)),
+      );
+      const packageResults = await Promise.all(
+        packagePaths.map(async (packagePath, idx): Promise<string | null> => {
+          if (!isDirResults[idx]) return null;
+          const packagePriorityResult = await searchPriorityDirs(
+            packagePath,
+            ignoredDirsSet,
+            maxDepth - 1,
+          );
+          if (packagePriorityResult) return packagePriorityResult;
+          return await findIconInDir(packagePath, ICON_PATTERNS);
+        }),
+      );
+      return packageResults.find((result): result is string => result !== null) ?? null;
+    }),
+  );
+  const monoMatch = monoResults.find((result): result is string => result !== null);
+  if (monoMatch) {
+    return monoMatch;
   }
 
   // Then search root and any other non-priority directories
@@ -385,35 +461,31 @@ async function findDirRecursively(
   }
 
   // Don't recurse further from root - we already searched priority dirs
-  if (currentDepth > 0) {
-    let entries: string[];
-    try {
-      entries = await readdir(dir);
-    } catch {
-      return null;
-    }
-
-    for (const entry of entries) {
-      if (ignoredDirsSet.has(entry) || priorityDirsSet.has(entry)) {
-        continue;
-      }
-
-      const fullPath = join(dir, entry);
-      try {
-        const stats = await stat(fullPath);
-        if (stats.isDirectory()) {
-          const result = await findDirRecursively(fullPath, maxDepth, currentDepth + 1);
-          if (result) {
-            return result;
-          }
-        }
-      } catch {
-        // Continue
-      }
-    }
+  if (currentDepth === 0) {
+    return null;
   }
 
-  return null;
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return null;
+  }
+
+  const candidatePaths = entries
+    .filter((entry) => !ignoredDirsSet.has(entry) && !priorityDirsSet.has(entry))
+    .map((entry) => join(dir, entry));
+  const isDirResults = await Promise.all(
+    candidatePaths.map((fullPath) => isExistingDirectory(fullPath)),
+  );
+  const recursionResults = await Promise.all(
+    candidatePaths.map((fullPath, index) =>
+      isDirResults[index]
+        ? findDirRecursively(fullPath, maxDepth, currentDepth + 1)
+        : Promise.resolve(null),
+    ),
+  );
+  return recursionResults.find((result): result is string => result !== null) ?? null;
 }
 
 /**
@@ -435,8 +507,16 @@ export async function getProjectIcon(projectDir: string): Promise<ProjectIcon | 
       return null;
     }
 
-    const buffer = await readFile(iconPath);
-    const mimeType = getMimeType(iconPath);
+    const fileBuffer = await readFile(iconPath);
+    let mimeType = sniffMimeType(fileBuffer) ?? getMimeType(iconPath);
+    let buffer: Buffer = fileBuffer;
+    if (mimeType === "image/x-icon") {
+      const pngFrame = extractIcoPngFrame(fileBuffer);
+      if (pngFrame) {
+        buffer = pngFrame;
+        mimeType = "image/png";
+      }
+    }
 
     // Only return square images
     if (!isSquareImage(buffer, mimeType)) {

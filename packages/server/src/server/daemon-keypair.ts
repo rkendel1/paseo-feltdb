@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type pino from "pino";
@@ -11,6 +11,7 @@ import {
   importSecretKey,
   type KeyPair,
 } from "@getpaseo/relay/e2ee";
+import { ensurePrivateFile, writePrivateFileAtomicSync } from "./private-files.js";
 
 const KeyPairSchema = z.object({
   v: z.literal(2),
@@ -22,10 +23,10 @@ type StoredKeyPair = z.infer<typeof KeyPairSchema>;
 
 const KEYPAIR_FILENAME = "daemon-keypair.json";
 
-export type DaemonKeyPairBundle = {
+export interface DaemonKeyPairBundle {
   keyPair: KeyPair;
   publicKeyB64: string;
-};
+}
 
 export async function loadOrCreateDaemonKeyPair(
   paseoHome: string,
@@ -36,8 +37,9 @@ export async function loadOrCreateDaemonKeyPair(
 
   if (existsSync(filePath)) {
     try {
+      ensurePrivateFile(filePath);
       const raw = readFileSync(filePath, "utf8");
-      const parsed = KeyPairSchema.parse(JSON.parse(raw)) as StoredKeyPair;
+      const parsed = KeyPairSchema.parse(JSON.parse(raw));
 
       const publicKey = importPublicKey(parsed.publicKeyB64);
       const secretKey = importSecretKey(parsed.secretKeyB64);
@@ -60,7 +62,7 @@ export async function loadOrCreateDaemonKeyPair(
     secretKeyB64,
   };
 
-  writeFileSync(filePath, JSON.stringify(payload, null, 2) + "\n", { mode: 0o600 });
+  writePrivateFileAtomicSync(filePath, JSON.stringify(payload, null, 2) + "\n");
   log?.info({ filePath }, "Saved daemon keypair");
 
   return { keyPair, publicKeyB64 };

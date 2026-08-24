@@ -3,8 +3,10 @@ name: Deploy App
 on:
   push:
     tags:
-      - 'v*'
-      - 'app-v*'
+      - "v*"
+      - "!v*-beta.*"
+      - "app-v*"
+      - "!app-v*-beta.*"
   workflow_dispatch:
 
 jobs:
@@ -16,18 +18,17 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
-          cache: 'npm'
-          registry-url: 'https://npm.pkg.github.com'
-          scope: '@boudra'
+          node-version: "22"
+          cache: "npm"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@boudra"
 
       - name: Install dependencies
-        run: npm install --workspace=@getpaseo/app --include-workspace-root
+        run: node scripts/npm-retry.mjs ci
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build highlight dependency
-        run: npm run build --workspace=@getpaseo/highlight
+      - name: Build app dependencies
+        run: npm run build:app-deps
 
       - name: Typecheck
         run: npm run typecheck --workspace=@getpaseo/app

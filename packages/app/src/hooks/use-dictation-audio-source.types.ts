@@ -1,10 +1,11 @@
-export type DictationAudioSourceConfig = {
+export interface DictationAudioSourceConfig {
   onPcmSegment: (pcm16Base64: string) => void;
   onError?: (error: Error) => void;
-};
+  onInterruption?: () => void;
+}
 
-export type DictationAudioSource = {
+export interface DictationAudioSource {
   start: () => Promise<void>;
   stop: () => Promise<void>;
   volume: number;
-};
+}

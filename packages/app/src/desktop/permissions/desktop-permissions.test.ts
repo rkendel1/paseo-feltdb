@@ -1,81 +1,66 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { DesktopHostBridge } from "@/desktop/host";
+import { i18n } from "@/i18n/i18next";
+import {
+  createDesktopPermissions,
+  type DesktopPermissionEnvironment,
+  type NavigatorLike,
+  type NotificationConstructorLike,
+} from "./desktop-permissions";
 
-type MockPlatform = "web" | "ios" | "android";
-
-type GlobalSnapshot = {
-  Notification: unknown;
-  navigatorDescriptor?: PropertyDescriptor;
-  paseoDesktop: unknown;
-};
-
-const originalGlobals: GlobalSnapshot = {
-  Notification: (globalThis as { Notification?: unknown }).Notification,
-  navigatorDescriptor: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
-  paseoDesktop:
-    typeof window === "undefined" ? undefined : (window as { paseoDesktop?: unknown }).paseoDesktop,
-};
-
-function setNavigator(value: unknown): void {
-  Object.defineProperty(globalThis, "navigator", {
-    configurable: true,
-    writable: true,
-    value,
-  });
+interface FakeEnvironmentInput {
+  isWeb?: boolean;
+  desktopHost?: DesktopHostBridge | null;
+  notification?: NotificationConstructorLike | null;
+  navigator?: NavigatorLike | null;
 }
 
-function restoreGlobals(): void {
-  (globalThis as { Notification?: unknown }).Notification = originalGlobals.Notification;
-
-  if (originalGlobals.navigatorDescriptor) {
-    Object.defineProperty(globalThis, "navigator", originalGlobals.navigatorDescriptor);
-  } else {
-    delete (globalThis as { navigator?: unknown }).navigator;
-  }
-
-  if (typeof window !== "undefined") {
-    (window as { paseoDesktop?: unknown }).paseoDesktop = originalGlobals.paseoDesktop;
-  }
-}
-
-async function loadModuleForPlatform(platform: MockPlatform) {
-  vi.resetModules();
-  vi.doMock("react-native", () => ({ Platform: { OS: platform } }));
-  return import("./desktop-permissions");
+function fakeEnvironment(input: FakeEnvironmentInput = {}): DesktopPermissionEnvironment {
+  return {
+    isWeb: input.isWeb ?? true,
+    getDesktopHost: () => input.desktopHost ?? null,
+    getNotification: () => input.notification ?? null,
+    getNavigator: () => input.navigator ?? null,
+  };
 }
 
 describe("desktop-permissions", () => {
-  afterEach(() => {
-    vi.doUnmock("react-native");
-    vi.restoreAllMocks();
-    vi.resetModules();
-    restoreGlobals();
-  });
+  it("shows section only in desktop web runtime", () => {
+    expect(
+      createDesktopPermissions(
+        fakeEnvironment({ isWeb: false }),
+      ).shouldShowDesktopPermissionSection(),
+    ).toBe(false);
 
-  it("shows section only in desktop web runtime", async () => {
-    const { shouldShowDesktopPermissionSection } = await loadModuleForPlatform("web");
+    expect(
+      createDesktopPermissions(
+        fakeEnvironment({ isWeb: true, desktopHost: null }),
+      ).shouldShowDesktopPermissionSection(),
+    ).toBe(false);
 
-    expect(shouldShowDesktopPermissionSection()).toBe(false);
-
-    (window as { paseoDesktop?: unknown }).paseoDesktop = {};
-    expect(shouldShowDesktopPermissionSection()).toBe(true);
+    expect(
+      createDesktopPermissions(
+        fakeEnvironment({ isWeb: true, desktopHost: {} as DesktopHostBridge }),
+      ).shouldShowDesktopPermissionSection(),
+    ).toBe(true);
   });
 
   it("reads notification and microphone status", async () => {
-    class MockNotification {
-      static permission = "default";
-    }
-    (globalThis as { Notification?: unknown }).Notification = MockNotification;
-    setNavigator({
-      permissions: {
-        query: vi.fn(async () => ({ state: "granted" })),
-      },
-      mediaDevices: {
-        getUserMedia: vi.fn(),
-      },
-    });
+    const permissions = createDesktopPermissions(
+      fakeEnvironment({
+        notification: { permission: "default" },
+        navigator: {
+          permissions: {
+            query: vi.fn(async () => ({ state: "granted" })),
+          },
+          mediaDevices: {
+            getUserMedia: vi.fn(),
+          },
+        },
+      }),
+    );
 
-    const { getDesktopPermissionSnapshot } = await loadModuleForPlatform("web");
-    const snapshot = await getDesktopPermissionSnapshot();
+    const snapshot = await permissions.getDesktopPermissionSnapshot();
 
     expect(snapshot.notifications.state).toBe("prompt");
     expect(snapshot.microphone.state).toBe("granted");
@@ -83,42 +68,44 @@ describe("desktop-permissions", () => {
   });
 
   it("queries microphone permission with correct Permissions instance binding", async () => {
-    const permissions = {
+    const permissionsApi = {
       query(this: unknown, _descriptor: { name: string }) {
-        if (this !== permissions) {
+        if (this !== permissionsApi) {
           throw new TypeError("Can only call Permissions.query on instances of Permissions");
         }
         return Promise.resolve({ state: "granted" as const });
       },
     };
 
-    setNavigator({
-      permissions,
-      mediaDevices: {
-        getUserMedia: vi.fn(),
-      },
-    });
+    const permissions = createDesktopPermissions(
+      fakeEnvironment({
+        navigator: {
+          permissions: permissionsApi,
+          mediaDevices: { getUserMedia: vi.fn() },
+        },
+      }),
+    );
 
-    const { getDesktopPermissionSnapshot } = await loadModuleForPlatform("web");
-    const snapshot = await getDesktopPermissionSnapshot();
+    const snapshot = await permissions.getDesktopPermissionSnapshot();
 
     expect(snapshot.microphone.state).toBe("granted");
   });
 
   it("returns a fallback message when runtime blocks Permissions.query", async () => {
-    setNavigator({
-      permissions: {
-        query: vi.fn(async () => {
-          throw new TypeError("Can only call Permissions.query on instances of Permissions");
-        }),
-      },
-      mediaDevices: {
-        getUserMedia: vi.fn(),
-      },
-    });
+    const permissions = createDesktopPermissions(
+      fakeEnvironment({
+        navigator: {
+          permissions: {
+            query: vi.fn(async () => {
+              throw new TypeError("Can only call Permissions.query on instances of Permissions");
+            }),
+          },
+          mediaDevices: { getUserMedia: vi.fn() },
+        },
+      }),
+    );
 
-    const { getDesktopPermissionSnapshot } = await loadModuleForPlatform("web");
-    const snapshot = await getDesktopPermissionSnapshot();
+    const snapshot = await permissions.getDesktopPermissionSnapshot();
 
     expect(snapshot.microphone.state).toBe("unknown");
     expect(snapshot.microphone.detail).toContain(
@@ -127,28 +114,29 @@ describe("desktop-permissions", () => {
   });
 
   it("requests notification permission via the browser Notification API", async () => {
-    class MockNotification {
-      static permission = "default";
-      static requestPermission = vi.fn(async () => "granted");
-    }
-    (globalThis as { Notification?: unknown }).Notification = MockNotification;
+    const fakeNotification: NotificationConstructorLike = {
+      permission: "default",
+      requestPermission: vi.fn(async () => "granted"),
+    };
 
-    const { requestDesktopPermission } = await loadModuleForPlatform("web");
-    const result = await requestDesktopPermission({ kind: "notifications" });
+    const permissions = createDesktopPermissions(
+      fakeEnvironment({ notification: fakeNotification }),
+    );
+    const result = await permissions.requestDesktopPermission({ kind: "notifications" });
 
     expect(result.state).toBe("granted");
-    expect(MockNotification.requestPermission).toHaveBeenCalledTimes(1);
+    expect(fakeNotification.requestPermission).toHaveBeenCalledTimes(1);
   });
 
   it("reads browser Notification permission when available", async () => {
-    class MockNotification {
-      static permission = "denied";
-    }
-    (globalThis as { Notification?: unknown }).Notification = MockNotification;
-    setNavigator({});
+    const permissions = createDesktopPermissions(
+      fakeEnvironment({
+        notification: { permission: "denied" },
+        navigator: {},
+      }),
+    );
 
-    const { getDesktopPermissionSnapshot } = await loadModuleForPlatform("web");
-    const snapshot = await getDesktopPermissionSnapshot();
+    const snapshot = await permissions.getDesktopPermissionSnapshot();
 
     expect(snapshot.notifications.state).toBe("denied");
   });
@@ -158,17 +146,18 @@ describe("desktop-permissions", () => {
     const getUserMedia = vi.fn(async () => ({
       getTracks: () => [{ stop }],
     }));
-    setNavigator({
-      permissions: {
-        query: vi.fn(async () => ({ state: "granted" })),
-      },
-      mediaDevices: {
-        getUserMedia,
-      },
-    });
+    const permissions = createDesktopPermissions(
+      fakeEnvironment({
+        navigator: {
+          permissions: {
+            query: vi.fn(async () => ({ state: "granted" })),
+          },
+          mediaDevices: { getUserMedia },
+        },
+      }),
+    );
 
-    const { requestDesktopPermission } = await loadModuleForPlatform("web");
-    const result = await requestDesktopPermission({ kind: "microphone" });
+    const result = await permissions.requestDesktopPermission({ kind: "microphone" });
 
     expect(result.state).toBe("granted");
     expect(getUserMedia).toHaveBeenCalledWith({ audio: true });
@@ -176,17 +165,44 @@ describe("desktop-permissions", () => {
   });
 
   it("maps microphone request denial to denied status", async () => {
-    setNavigator({
-      mediaDevices: {
-        getUserMedia: vi.fn(async () => {
-          throw { name: "NotAllowedError", message: "denied" };
-        }),
-      },
-    });
+    const permissions = createDesktopPermissions(
+      fakeEnvironment({
+        navigator: {
+          mediaDevices: {
+            getUserMedia: vi.fn(async () => {
+              throw { name: "NotAllowedError", message: "denied" };
+            }),
+          },
+        },
+      }),
+    );
 
-    const { requestDesktopPermission } = await loadModuleForPlatform("web");
-    const result = await requestDesktopPermission({ kind: "microphone" });
+    const result = await permissions.requestDesktopPermission({ kind: "microphone" });
 
     expect(result.state).toBe("denied");
+  });
+
+  it("uses the active app language for local status details", async () => {
+    await i18n.changeLanguage("zh-CN");
+    try {
+      const permissions = createDesktopPermissions(
+        fakeEnvironment({
+          notification: { permission: "granted" },
+          navigator: {
+            permissions: {
+              query: vi.fn(async () => ({ state: "prompt" })),
+            },
+            mediaDevices: { getUserMedia: vi.fn() },
+          },
+        }),
+      );
+
+      const snapshot = await permissions.getDesktopPermissionSnapshot();
+
+      expect(snapshot.notifications.detail).toBe("系统已允许通知。");
+      expect(snapshot.microphone.detail).toBe("麦克风权限尚未授予。");
+    } finally {
+      await i18n.changeLanguage("en");
+    }
   });
 });

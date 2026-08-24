@@ -1,108 +1,151 @@
-import { useEffect, useRef } from "react";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useLocalSearchParams, useRouter, type Href } from "expo-router";
+import { HostRouteBootstrapBoundary } from "@/components/host-route-bootstrap-boundary";
+import { useFetchQuery } from "@/data/query";
+import { resolveAgentRoute, type AgentRouteLookup } from "@/navigation/agent-route-resolution";
+import { AgentRouteResolutionView } from "@/navigation/agent-route-resolution-view";
 import { useSessionStore } from "@/stores/session-store";
-import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
-import { buildHostRootRoute } from "@/utils/host-routes";
-import { prepareWorkspaceTab } from "@/utils/workspace-navigation";
+import { getHostRuntimeStore, useHostRuntimeSnapshot, useHosts } from "@/runtime/host-runtime";
+import { buildHostRootRoute, buildSettingsHostRoute } from "@/utils/host-routes";
+import { toErrorMessage } from "@/utils/error-messages";
+import { navigateToAgent } from "@/utils/navigate-to-agent";
 
 export default function HostAgentReadyRoute() {
+  return (
+    <HostRouteBootstrapBoundary>
+      <HostAgentReadyRouteContent />
+    </HostRouteBootstrapBoundary>
+  );
+}
+
+function HostAgentReadyRouteContent() {
   const router = useRouter();
   const params = useLocalSearchParams<{
     serverId?: string;
     agentId?: string;
   }>();
-  const redirectedRef = useRef(false);
+  const handledNavigationRef = useRef<string | null>(null);
   const serverId = typeof params.serverId === "string" ? params.serverId : "";
   const agentId = typeof params.agentId === "string" ? params.agentId : "";
-  const client = useHostRuntimeClient(serverId);
-  const isConnected = useHostRuntimeIsConnected(serverId);
-  const agentCwd = useSessionStore((state) => {
+  const hosts = useHosts();
+  const runtimeSnapshot = useHostRuntimeSnapshot(serverId);
+  const client = runtimeSnapshot?.client ?? null;
+  const connectionStatus = runtimeSnapshot?.connectionStatus ?? "connecting";
+  const hostName = hosts.find((host) => host.serverId === serverId)?.label ?? serverId;
+  const agentWorkspaceId = useSessionStore((state) => {
     if (!serverId || !agentId) {
       return null;
     }
-    return state.sessions[serverId]?.agents?.get(agentId)?.cwd ?? null;
+    return state.sessions[serverId]?.agents?.get(agentId)?.workspaceId ?? null;
+  });
+  const shouldLookupAgent = Boolean(
+    serverId && agentId && client && connectionStatus === "online" && !agentWorkspaceId,
+  );
+  const lookupQuery = useFetchQuery({
+    queryKey: ["agentRouteResolution", serverId, agentId, runtimeSnapshot?.clientGeneration ?? 0],
+    queryFn: async () => {
+      if (!client) {
+        throw new Error("Target host client is unavailable");
+      }
+      const result = await client.fetchAgent({ agentId });
+      return result?.agent?.workspaceId ?? null;
+    },
+    enabled: shouldLookupAgent,
+    retry: false,
+    dataShape: "value",
+    staleTimeMs: 0,
+  });
+  const lookup = useMemo<AgentRouteLookup>(() => {
+    if (!shouldLookupAgent) {
+      return { kind: "idle" };
+    }
+    if (lookupQuery.isFetching) {
+      return { kind: "fetching" };
+    }
+    if (lookupQuery.isError) {
+      return { kind: "failed", error: toErrorMessage(lookupQuery.error) };
+    }
+    if (lookupQuery.isSuccess) {
+      return { kind: "found", workspaceId: lookupQuery.data };
+    }
+    return { kind: "fetching" };
+  }, [
+    lookupQuery.data,
+    lookupQuery.error,
+    lookupQuery.isError,
+    lookupQuery.isFetching,
+    lookupQuery.isSuccess,
+    shouldLookupAgent,
+  ]);
+  const resolution = resolveAgentRoute({
+    serverId,
+    agentId,
+    cachedWorkspaceId: agentWorkspaceId,
+    connectionStatus,
+    lookup,
   });
 
   useEffect(() => {
-    if (redirectedRef.current) {
+    let navigationKey: string | null = null;
+    if (resolution.kind === "invalid") {
+      navigationKey = "invalid";
+    } else if (resolution.kind === "resolved") {
+      navigationKey = `workspace:${resolution.workspaceId}`;
+    } else if (resolution.kind === "notFound") {
+      navigationKey = "not-found";
+    }
+    if (!navigationKey || handledNavigationRef.current === navigationKey) {
       return;
     }
-    if (!serverId || !agentId) {
-      redirectedRef.current = true;
-      router.replace("/" as any);
-      return;
-    }
+    handledNavigationRef.current = navigationKey;
 
-    const normalizedCwd = agentCwd?.trim();
-    if (normalizedCwd) {
-      redirectedRef.current = true;
-      router.replace(
-        prepareWorkspaceTab({
-          serverId,
-          workspaceId: normalizedCwd,
-          target: { kind: "agent", agentId },
-        }) as any,
-      );
+    if (resolution.kind === "resolved") {
+      navigateToAgent({ serverId, agentId, workspaceId: resolution.workspaceId });
+      return;
     }
-  }, [agentCwd, agentId, router, serverId]);
+    router.replace(resolution.kind === "invalid" ? ("/" as Href) : buildHostRootRoute(serverId));
+  }, [agentId, resolution, router, serverId]);
 
-  useEffect(() => {
-    if (redirectedRef.current) {
+  const handleRetry = useCallback(() => {
+    if (resolution.kind === "lookupError") {
+      void lookupQuery.refetch();
       return;
     }
-    if (!serverId || !agentId) {
+    if (serverId) {
+      void getHostRuntimeStore().runProbeCycleNow(serverId);
+    }
+  }, [lookupQuery, resolution.kind, serverId]);
+  const handleManageHost = useCallback(() => {
+    if (serverId) {
+      router.push(buildSettingsHostRoute(serverId));
+    }
+  }, [router, serverId]);
+  const handleBack = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
       return;
     }
-    if (agentCwd?.trim()) {
-      return;
-    }
-    if (!client || !isConnected) {
-      redirectedRef.current = true;
-      router.replace(buildHostRootRoute(serverId) as any);
-    }
-  }, [agentCwd, agentId, client, isConnected, router, serverId]);
+    router.replace(serverId ? buildHostRootRoute(serverId) : ("/" as Href));
+  }, [router, serverId]);
 
-  useEffect(() => {
-    if (redirectedRef.current) {
-      return;
-    }
-    if (!serverId || !agentId || !client || !isConnected) {
-      return;
-    }
-
-    let cancelled = false;
-    void client
-      .fetchAgent(agentId)
-      .then((result) => {
-        if (cancelled || redirectedRef.current) {
-          return;
-        }
-        const cwd = result?.agent?.cwd?.trim();
-        redirectedRef.current = true;
-        if (cwd) {
-          router.replace(
-            prepareWorkspaceTab({
-              serverId,
-              workspaceId: cwd,
-              target: { kind: "agent", agentId },
-            }) as any,
-          );
-          return;
-        }
-        router.replace(buildHostRootRoute(serverId) as any);
-      })
-      .catch(() => {
-        if (cancelled || redirectedRef.current) {
-          return;
-        }
-        redirectedRef.current = true;
-        router.replace(buildHostRootRoute(serverId) as any);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [agentId, client, isConnected, router, serverId]);
+  if (
+    resolution.kind === "waitingForHost" ||
+    resolution.kind === "fetchingAgent" ||
+    resolution.kind === "lookupError"
+  ) {
+    // Agent URLs intentionally omit workspaceId. Keep this route mounted while the target host
+    // reconnects, then resolve the workspace from the authoritative agent record.
+    return (
+      <AgentRouteResolutionView
+        resolution={resolution}
+        hostName={hostName}
+        lastHostError={runtimeSnapshot?.lastError ?? null}
+        onRetry={handleRetry}
+        onManageHost={handleManageHost}
+        onBack={handleBack}
+      />
+    );
+  }
 
   return null;
 }

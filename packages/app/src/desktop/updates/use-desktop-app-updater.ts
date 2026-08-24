@@ -1,24 +1,27 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import {
   checkDesktopAppUpdate,
   formatVersionWithPrefix,
   installDesktopAppUpdate,
   shouldShowDesktopUpdateSection,
   type DesktopAppUpdateCheckResult,
+  type DesktopAppUpdateCheckIntent,
   type DesktopAppUpdateInstallResult,
 } from "@/desktop/updates/desktop-updates";
+import { useDesktopSettings } from "@/desktop/settings/desktop-settings";
+import { useDesktopIpcErrorReporter } from "@/desktop/hooks/desktop-ipc-error";
+import {
+  PENDING_RECHECK_MS,
+  createDesktopAppUpdater,
+  formatStatusText,
+  type DesktopAppUpdateStatus,
+} from "@/desktop/updates/desktop-app-updater";
+import { formatMessageTimestamp } from "@/utils/time";
 
-export type DesktopAppUpdateStatus =
-  | "idle"
-  | "checking"
-  | "up-to-date"
-  | "available"
-  | "installing"
-  | "installed"
-  | "error";
+export type { DesktopAppUpdateStatus };
 
 export interface UseDesktopAppUpdaterReturn {
-  isDesktop: boolean;
+  isDesktopApp: boolean;
   status: DesktopAppUpdateStatus;
   statusText: string;
   availableUpdate: DesktopAppUpdateCheckResult | null;
@@ -26,157 +29,96 @@ export interface UseDesktopAppUpdaterReturn {
   lastCheckedAt: number | null;
   isChecking: boolean;
   isInstalling: boolean;
-  checkForUpdates: (options?: { silent?: boolean }) => Promise<DesktopAppUpdateCheckResult | null>;
+  checkForUpdates: (options?: {
+    intent?: DesktopAppUpdateCheckIntent;
+    silent?: boolean;
+  }) => Promise<DesktopAppUpdateCheckResult | null>;
   installUpdate: () => Promise<DesktopAppUpdateInstallResult | null>;
 }
 
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error && typeof error.message === "string") {
-    return error.message;
-  }
-  return String(error);
-}
-
-function formatStatusText(input: {
-  status: DesktopAppUpdateStatus;
-  availableUpdate: DesktopAppUpdateCheckResult | null;
-  installMessage: string | null;
-}): string {
-  const { status, availableUpdate, installMessage } = input;
-
-  if (status === "checking") {
-    return "Checking for app updates...";
-  }
-
-  if (status === "installing") {
-    return "Installing app update...";
-  }
-
-  if (status === "up-to-date") {
-    return "App is up to date.";
-  }
-
-  if (status === "available") {
-    if (availableUpdate?.latestVersion) {
-      return `Update available: ${formatVersionWithPrefix(availableUpdate.latestVersion)}`;
-    }
-    return "An app update is available.";
-  }
-
-  if (status === "installed") {
-    return installMessage ?? "App update installed. Restart required.";
-  }
-
-  if (status === "error") {
-    return "Failed to update app.";
-  }
-
-  return "Update status has not been checked yet.";
-}
-
 export function useDesktopAppUpdater(): UseDesktopAppUpdaterReturn {
-  const isDesktop = shouldShowDesktopUpdateSection();
-  const requestVersionRef = useRef(0);
-  const [status, setStatus] = useState<DesktopAppUpdateStatus>("idle");
-  const [availableUpdate, setAvailableUpdate] = useState<DesktopAppUpdateCheckResult | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [installMessage, setInstallMessage] = useState<string | null>(null);
-  const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
+  const isDesktopApp = shouldShowDesktopUpdateSection();
+  const { settings: desktopSettings } = useDesktopSettings();
+  const releaseChannel = desktopSettings.releaseChannel;
+  const reportError = useDesktopIpcErrorReporter();
+
+  const updater = useMemo(
+    () =>
+      createDesktopAppUpdater({
+        port: {
+          checkDesktopAppUpdate,
+          installDesktopAppUpdate,
+        },
+        now: () => Date.now(),
+        reportInstallError: reportError,
+      }),
+    [reportError],
+  );
+
+  const snapshot = useSyncExternalStore(
+    updater.subscribe,
+    updater.getSnapshot,
+    updater.getSnapshot,
+  );
 
   const checkForUpdates = useCallback(
-    async (options: { silent?: boolean } = {}) => {
-      if (!isDesktop) {
+    async (options: { intent?: DesktopAppUpdateCheckIntent; silent?: boolean } = {}) => {
+      if (!isDesktopApp) {
         return null;
       }
-
-      const requestVersion = requestVersionRef.current + 1;
-      requestVersionRef.current = requestVersion;
-
-      if (!options.silent) {
-        setStatus("checking");
-      }
-      setErrorMessage(null);
-
-      try {
-        const result = await checkDesktopAppUpdate();
-        if (requestVersion !== requestVersionRef.current) {
-          return result;
-        }
-
-        setInstallMessage(null);
-        setLastCheckedAt(Date.now());
-
-        if (result.hasUpdate) {
-          setAvailableUpdate(result);
-          setStatus("available");
-        } else {
-          setAvailableUpdate(null);
-          setStatus("up-to-date");
-        }
-
-        return result;
-      } catch (error) {
-        if (requestVersion !== requestVersionRef.current) {
-          return null;
-        }
-
-        const message = getErrorMessage(error);
-        if (options.silent) {
-          console.warn("[DesktopUpdater] Silent update check failed", message);
-        } else {
-          setStatus("error");
-          setErrorMessage(message);
-        }
-        return null;
-      }
+      return updater.checkForUpdates({
+        releaseChannel,
+        intent: options.intent ?? "manual",
+        silent: options.silent,
+      });
     },
-    [isDesktop],
+    [isDesktopApp, releaseChannel, updater],
   );
 
   const installUpdate = useCallback(async () => {
-    if (!isDesktop) {
+    if (!isDesktopApp) {
       return null;
     }
+    return updater.installUpdate({ releaseChannel });
+  }, [isDesktopApp, releaseChannel, updater]);
 
-    setStatus("installing");
-    setErrorMessage(null);
-
-    try {
-      const result = await installDesktopAppUpdate();
-      setLastCheckedAt(Date.now());
-
-      if (result.installed) {
-        setAvailableUpdate(null);
-        setInstallMessage(result.message);
-        setStatus("installed");
-      } else {
-        setAvailableUpdate(null);
-        setInstallMessage(result.message);
-        setStatus("up-to-date");
-      }
-
-      return result;
-    } catch (error) {
-      const message = getErrorMessage(error);
-      setStatus("error");
-      setErrorMessage(message);
-      return null;
+  useEffect(() => {
+    if (!isDesktopApp) {
+      return;
     }
-  }, [isDesktop]);
+    void checkForUpdates({ intent: "automatic", silent: true });
+  }, [checkForUpdates, isDesktopApp]);
+
+  useEffect(() => {
+    if (!isDesktopApp || snapshot.status !== "pending") {
+      return undefined;
+    }
+
+    const intervalId = setInterval(() => {
+      void checkForUpdates({ intent: "automatic", silent: true });
+    }, PENDING_RECHECK_MS);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [checkForUpdates, isDesktopApp, snapshot.status]);
 
   return {
-    isDesktop,
-    status,
+    isDesktopApp,
+    status: snapshot.status,
     statusText: formatStatusText({
-      status,
-      availableUpdate,
-      installMessage,
+      status: snapshot.status,
+      availableUpdate: snapshot.availableUpdate,
+      installMessage: snapshot.installMessage,
+      lastCheckedAt: snapshot.lastCheckedAt,
+      formatVersion: formatVersionWithPrefix,
+      formatLastCheckedAt: (timestamp) => formatMessageTimestamp(new Date(timestamp)),
     }),
-    availableUpdate,
-    errorMessage,
-    lastCheckedAt,
-    isChecking: status === "checking",
-    isInstalling: status === "installing",
+    availableUpdate: snapshot.availableUpdate,
+    errorMessage: snapshot.errorMessage,
+    lastCheckedAt: snapshot.lastCheckedAt,
+    isChecking: snapshot.isChecking,
+    isInstalling: snapshot.isInstalling,
     checkForUpdates,
     installUpdate,
   };

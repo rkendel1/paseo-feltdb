@@ -1,11 +1,12 @@
 import { create } from "zustand";
-import { Platform } from "react-native";
 import { File as FSFile, Paths } from "expo-file-system";
 import * as LegacyFileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import type { HostProfile } from "@/types/host-connection";
 import { buildDaemonWebSocketUrl } from "@/utils/daemon-endpoints";
 import { openExternalUrl } from "@/utils/open-external-url";
+import { isWeb } from "@/constants/platform";
+import { i18n } from "@/i18n/i18next";
 
 interface DownloadProgress {
   percent: number;
@@ -85,22 +86,22 @@ export const useDownloadStore = create<DownloadState>()((set, get) => ({
     try {
       const tokenResponse = await requestFileDownloadToken(path);
       if (tokenResponse.error || !tokenResponse.token) {
-        throw new Error(tokenResponse.error ?? "Failed to request download token.");
+        throw new Error(tokenResponse.error ?? i18n.t("downloads.requestTokenFailed"));
       }
 
       const downloadTarget = resolveDaemonDownloadTarget(daemonProfile);
       if (!downloadTarget.baseUrl) {
-        throw new Error("Download host is unavailable.");
+        throw new Error(i18n.t("downloads.hostUnavailable"));
       }
 
       const resolvedFileName = tokenResponse.fileName ?? fileName;
       const downloadUrl = buildDownloadUrl(
         downloadTarget.baseUrl,
         tokenResponse.token,
-        Platform.OS === "web" ? downloadTarget.authCredentials : null,
+        isWeb ? downloadTarget.authCredentials : null,
       );
 
-      if (Platform.OS === "web") {
+      if (isWeb) {
         triggerBrowserDownload(downloadUrl, resolvedFileName);
         get().completeDownload(id);
         return;
@@ -140,7 +141,7 @@ export const useDownloadStore = create<DownloadState>()((set, get) => ({
 
       const result = await downloadResumable.downloadAsync();
       if (!result) {
-        throw new Error("Download was cancelled.");
+        throw new Error(i18n.t("downloads.cancelled"));
       }
 
       get().completeDownload(id);
@@ -148,12 +149,14 @@ export const useDownloadStore = create<DownloadState>()((set, get) => ({
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(result.uri, {
           mimeType: tokenResponse.mimeType ?? undefined,
-          dialogTitle: resolvedFileName ? `Share ${resolvedFileName}` : "Share file",
+          dialogTitle: resolvedFileName
+            ? i18n.t("downloads.shareFileNamed", { fileName: resolvedFileName })
+            : i18n.t("downloads.shareFile"),
         });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to download file.";
-      if (Platform.OS === "web") {
+      const message = error instanceof Error ? error.message : i18n.t("downloads.failed");
+      if (isWeb) {
         console.warn("[DownloadStore] Download failed:", message);
         get().failDownload(id, message);
         return;
@@ -216,11 +219,10 @@ export const useDownloadStore = create<DownloadState>()((set, get) => ({
           updated.delete(id);
         }
       }
-      const newActiveId = state.activeDownloadId
-        ? updated.has(state.activeDownloadId)
-          ? state.activeDownloadId
-          : findMostRecentDownloadId(updated)
-        : null;
+      let newActiveId: string | null;
+      if (!state.activeDownloadId) newActiveId = null;
+      else if (updated.has(state.activeDownloadId)) newActiveId = state.activeDownloadId;
+      else newActiveId = findMostRecentDownloadId(updated);
       return { downloads: updated, activeDownloadId: newActiveId };
     });
   },
@@ -236,21 +238,23 @@ function findMostRecentDownloadId(downloads: Map<string, Download>): string | nu
   return mostRecent?.id ?? null;
 }
 
-type DownloadTarget = {
+interface DownloadTarget {
   baseUrl: string | null;
   authHeader: string | null;
   authCredentials: { username: string; password: string } | null;
-};
+}
 
 function resolveDaemonDownloadTarget(daemon?: HostProfile): DownloadTarget {
-  const endpoint = daemon?.connections.find((conn) => conn.type === "directTcp")?.endpoint ?? null;
-  if (!endpoint) {
+  const connection = daemon?.connections.find((conn) => conn.type === "directTcp") ?? null;
+  if (!connection) {
     return { baseUrl: null, authHeader: null, authCredentials: null };
   }
 
   let parsed: URL;
   try {
-    parsed = new URL(buildDaemonWebSocketUrl(endpoint));
+    parsed = new URL(
+      buildDaemonWebSocketUrl(connection.endpoint, { useTls: connection.useTls ?? false }),
+    );
   } catch {
     return { baseUrl: null, authHeader: null, authCredentials: null };
   }

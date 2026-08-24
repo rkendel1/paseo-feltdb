@@ -2,8 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { createPortal } from "react-dom";
 import { Animated, Easing, Platform, Text, ToastAndroid, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { StyleSheet, UnistylesRuntime, useUnistyles } from "react-native-unistyles";
-import { AlertTriangle, CheckCircle2 } from "lucide-react-native";
+import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { useTranslation } from "react-i18next";
+import { useIsCompactFormFactor } from "@/constants/layout";
+import { isWeb } from "@/constants/platform";
+import { AlertTriangle, CheckCircle2, Info } from "lucide-react-native";
 import { getOverlayRoot, OVERLAY_Z } from "@/lib/overlay-root";
 import {
   HEADER_INNER_HEIGHT,
@@ -11,31 +14,31 @@ import {
   HEADER_TOP_PADDING_MOBILE,
 } from "@/constants/layout";
 
-export type ToastVariant = "default" | "success" | "error";
+export type ToastVariant = "default" | "info" | "success" | "warning" | "error";
 
-export type ToastShowOptions = {
+export interface ToastShowOptions {
   icon?: ReactNode;
   variant?: ToastVariant;
-  durationMs?: number;
+  durationMs?: number | null;
   nativeAndroid?: boolean;
   testID?: string;
-};
+}
 
-export type ToastState = {
+export interface ToastState {
   id: number;
   content: ReactNode;
   nativeMessage: string | null;
   icon?: ReactNode;
   variant: ToastVariant;
-  durationMs: number;
+  durationMs: number | null;
   testID?: string;
-};
+}
 
-export type ToastApi = {
+export interface ToastApi {
   show: (content: ReactNode, options?: ToastShowOptions) => void;
   copied: (label?: string) => void;
   error: (message: string) => void;
-};
+}
 
 type ToastViewportPlacement = "app-shell" | "panel";
 
@@ -46,6 +49,8 @@ export function useToastHost(): {
   toast: ToastState | null;
   dismiss: () => void;
 } {
+  const { theme } = useUnistyles();
+  const { t } = useTranslation();
   const [toast, setToast] = useState<ToastState | null>(null);
   const idRef = useRef(0);
 
@@ -56,11 +61,12 @@ export function useToastHost(): {
     }
 
     const variant = options?.variant ?? "default";
-    const durationMs = options?.durationMs ?? DEFAULT_DURATION_MS;
+    const durationMs = options?.durationMs === undefined ? DEFAULT_DURATION_MS : options.durationMs;
     const nativeAndroid = options?.nativeAndroid ?? false;
 
     if (Platform.OS === "android" && nativeAndroid && nativeMessage) {
-      const duration = durationMs <= 2500 ? ToastAndroid.SHORT : ToastAndroid.LONG;
+      const duration =
+        durationMs !== null && durationMs <= 2500 ? ToastAndroid.SHORT : ToastAndroid.LONG;
       ToastAndroid.showWithGravity(nativeMessage, duration, ToastAndroid.TOP);
       return;
     }
@@ -81,13 +87,13 @@ export function useToastHost(): {
     () => ({
       show,
       copied: (label?: string) =>
-        show(label ? `Copied ${label}` : "Copied", {
+        show(label ? t("common.states.copiedLabel", { label }) : t("common.states.copied"), {
           variant: "success",
-          icon: <CheckCircle2 size={18} />,
+          icon: <CheckCircle2 size={18} color={theme.colors.foreground} />,
         }),
       error: (message: string) => show(message, { variant: "error", durationMs: 3200 }),
     }),
-    [show],
+    [show, theme.colors.foreground, t],
   );
 
   const dismiss = useCallback(() => {
@@ -108,9 +114,12 @@ export function ToastViewport({
 }) {
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
+  const isMobile = useIsCompactFormFactor();
   const opacity = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(-8)).current;
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dismissDeadlineRef = useRef<number | null>(null);
+  const remainingDurationRef = useRef(0);
 
   const clearTimer = useCallback(() => {
     if (timeoutRef.current) {
@@ -141,9 +150,44 @@ export function ToastViewport({
     });
   }, [clearTimer, onDismiss, opacity, translateY]);
 
+  const scheduleDismiss = useCallback(
+    (durationMs: number | null) => {
+      clearTimer();
+      if (durationMs === null) {
+        remainingDurationRef.current = 0;
+        dismissDeadlineRef.current = null;
+        return;
+      }
+      const nextDurationMs = Math.max(0, durationMs);
+      remainingDurationRef.current = nextDurationMs;
+      dismissDeadlineRef.current = Date.now() + nextDurationMs;
+      timeoutRef.current = setTimeout(() => {
+        animateOut();
+      }, nextDurationMs);
+    },
+    [animateOut, clearTimer],
+  );
+
+  const pauseDismiss = useCallback(() => {
+    if (dismissDeadlineRef.current !== null) {
+      remainingDurationRef.current = Math.max(0, dismissDeadlineRef.current - Date.now());
+    }
+    dismissDeadlineRef.current = null;
+    clearTimer();
+  }, [clearTimer]);
+
+  const resumeDismiss = useCallback(() => {
+    if (!toast || toast.durationMs === null) {
+      return;
+    }
+    scheduleDismiss(remainingDurationRef.current || toast.durationMs);
+  }, [scheduleDismiss, toast]);
+
   useEffect(() => {
     if (!toast) {
       clearTimer();
+      dismissDeadlineRef.current = null;
+      remainingDurationRef.current = 0;
       opacity.setValue(0);
       translateY.setValue(-8);
       return;
@@ -168,20 +212,13 @@ export function ToastViewport({
       }),
     ]).start();
 
-    timeoutRef.current = setTimeout(() => {
-      animateOut();
-    }, toast.durationMs);
+    scheduleDismiss(toast.durationMs);
 
     return () => {
       clearTimer();
     };
-  }, [animateOut, clearTimer, opacity, toast, translateY]);
+  }, [clearTimer, opacity, scheduleDismiss, toast, translateY]);
 
-  if (!toast) {
-    return null;
-  }
-
-  const isMobile = UnistylesRuntime.breakpoint === "xs" || UnistylesRuntime.breakpoint === "sm";
   const headerHeight = isMobile ? HEADER_INNER_HEIGHT_MOBILE : HEADER_INNER_HEIGHT;
   const headerTopPadding = isMobile ? HEADER_TOP_PADDING_MOBILE : 0;
   const topOffset =
@@ -189,37 +226,55 @@ export function ToastViewport({
       ? insets.top + headerTopPadding + headerHeight + theme.spacing[2]
       : theme.spacing[3];
 
-  const icon =
-    toast.icon ??
-    (toast.variant === "success" ? (
-      <CheckCircle2 size={18} color={theme.colors.primary} />
-    ) : toast.variant === "error" ? (
-      <AlertTriangle size={18} color={theme.colors.destructive} />
-    ) : null);
+  const toastVariant = toast?.variant;
+  const toastAnimatedStyle = useMemo(
+    () => [
+      styles.toast,
+      toastVariant === "info" ? styles.toastInfo : null,
+      toastVariant === "success" ? styles.toastSuccess : null,
+      toastVariant === "warning" ? styles.toastWarning : null,
+      toastVariant === "error" ? styles.toastError : null,
+      {
+        marginTop: topOffset,
+        opacity,
+        transform: [{ translateY }],
+      },
+    ],
+    [toastVariant, topOffset, opacity, translateY],
+  );
+  const toastMessageStyle = useMemo(
+    () => [styles.message, toastVariant === "error" ? styles.messageError : null],
+    [toastVariant],
+  );
+
+  if (!toast) {
+    return null;
+  }
+
+  let defaultIcon: ReactNode = null;
+  if (toast.variant === "info") {
+    defaultIcon = <Info size={18} color={theme.colors.palette.blue[300]} />;
+  } else if (toast.variant === "success") {
+    defaultIcon = <CheckCircle2 size={18} color={theme.colors.primary} />;
+  } else if (toast.variant === "warning") {
+    defaultIcon = <AlertTriangle size={18} color={theme.colors.palette.amber[500]} />;
+  } else if (toast.variant === "error") {
+    defaultIcon = <AlertTriangle size={18} color={theme.colors.destructive} />;
+  }
+  const icon = toast.icon ?? defaultIcon;
 
   const content = (
     <View style={styles.container} pointerEvents="box-none">
       <Animated.View
         testID={toast.testID ?? "app-toast"}
-        style={[
-          styles.toast,
-          toast.variant === "success" ? styles.toastSuccess : null,
-          toast.variant === "error" ? styles.toastError : null,
-          {
-            marginTop: topOffset,
-            opacity,
-            transform: [{ translateY }],
-          },
-        ]}
+        onPointerEnter={isWeb ? pauseDismiss : undefined}
+        onPointerLeave={isWeb ? resumeDismiss : undefined}
+        style={toastAnimatedStyle}
         accessibilityRole="alert"
       >
         {icon ? <View style={styles.iconSlot}>{icon}</View> : null}
         {typeof toast.content === "string" ? (
-          <Text
-            testID="app-toast-message"
-            style={[styles.message, toast.variant === "error" ? styles.messageError : null]}
-            numberOfLines={2}
-          >
+          <Text testID="app-toast-message" style={toastMessageStyle}>
             {toast.content}
           </Text>
         ) : (
@@ -231,7 +286,7 @@ export function ToastViewport({
     </View>
   );
 
-  if (placement === "app-shell" && Platform.OS === "web" && typeof document !== "undefined") {
+  if (placement === "app-shell" && isWeb && typeof document !== "undefined") {
     return createPortal(content, getOverlayRoot());
   }
 
@@ -254,19 +309,21 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     gap: theme.spacing[2],
     backgroundColor: theme.colors.surface0,
-    borderRadius: theme.borderRadius.full,
+    borderRadius: theme.borderRadius["2xl"],
     borderWidth: theme.borderWidth[1],
     borderColor: theme.colors.border,
     paddingVertical: theme.spacing[2],
     paddingHorizontal: theme.spacing[3],
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
-    elevation: 8,
+    ...theme.shadow.md,
   },
   toastSuccess: {
     borderColor: theme.colors.border,
+  },
+  toastInfo: {
+    borderColor: theme.colors.palette.blue[300],
+  },
+  toastWarning: {
+    borderColor: theme.colors.palette.amber[500],
   },
   toastError: {
     borderColor: theme.colors.destructive,
@@ -282,7 +339,7 @@ const styles = StyleSheet.create((theme) => ({
   message: {
     flexShrink: 1,
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.normal,
   },
   messageError: {

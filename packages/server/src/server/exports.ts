@@ -4,14 +4,33 @@ export { loadConfig, type CliConfigOverrides } from "./config.js";
 export { resolvePaseoHome } from "./paseo-home.js";
 export { getOrCreateServerId } from "./server-id.js";
 export { createRootLogger, type LogLevel, type LogFormat } from "./logger.js";
-export { loadPersistedConfig, type PersistedConfig } from "./persisted-config.js";
+export {
+  loadPersistedConfig,
+  savePersistedConfig,
+  type PersistedConfig,
+} from "./persisted-config.js";
+export { hashDaemonPassword, isBearerTokenValid } from "./auth.js";
 export { generateLocalPairingOffer, type LocalPairingOffer } from "./pairing-offer.js";
 export {
-  DaemonClient,
-  type DaemonClientConfig,
-  type ConnectionState,
-  type DaemonEvent,
-} from "../client/daemon-client.js";
+  ConnectionOfferSchema,
+  decodeOfferFragmentPayload,
+  parseConnectionOfferFromUrl,
+  type ConnectionOffer,
+} from "@getpaseo/protocol/connection-offer";
+export { buildRelayWebSocketUrl } from "@getpaseo/protocol/daemon-endpoints";
+export {
+  buildDaemonWebSocketUrl,
+  deriveLabelFromEndpoint,
+  normalizeHostPort,
+  parseConnectionUri,
+  shouldUseTlsForDefaultHostedRelay,
+} from "@getpaseo/protocol/daemon-endpoints";
+export { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+export {
+  DirectTcpHostConnectionSchema,
+  type DirectTcpHostConnection,
+  type NormalizedDirectTcpHostConnection,
+} from "@getpaseo/protocol/host-connection-schema";
 export {
   ensureLocalSpeechModels,
   listLocalSpeechModels,
@@ -30,7 +49,19 @@ export {
 } from "./speech/providers/local/sherpa/sherpa-runtime-env.js";
 
 // Provider binary resolution
-export { findExecutable, applyProviderEnv } from "./agent/provider-launch-config.js";
+export {
+  type ProviderOverride,
+  type ProviderProfileModel,
+} from "./agent/provider-launch-config.js";
+export { findExecutable } from "../executable-resolution/executable-resolution.js";
+export { execCommand, spawnProcess } from "../utils/spawn.js";
+
+// Provider manifest (source of truth for provider definitions)
+export {
+  AGENT_PROVIDER_DEFINITIONS,
+  BUILTIN_PROVIDER_IDS,
+  type AgentProviderDefinition,
+} from "@getpaseo/protocol/provider-manifest";
 
 // Agent SDK types for CLI commands
 export type {
@@ -39,6 +70,7 @@ export type {
   AgentCapabilityFlags,
   AgentPermissionRequest,
   AgentTimelineItem,
+  ProviderSnapshotEntry,
 } from "./agent/agent-sdk-types.js";
 
 // Agent activity curator for CLI logs
@@ -63,4 +95,4 @@ export type {
   AgentSnapshotPayload,
   AgentStreamEventPayload,
   AgentStreamMessage,
-} from "../shared/messages.js";
+} from "@getpaseo/protocol/messages";

@@ -14,6 +14,7 @@ const OptionalNonEmptyTrimmedStringSchema = z.preprocess(
 const TaskNotificationEnvelopeSchema = z.object({
   messageId: z.string().nullable(),
   taskId: z.string().nullable(),
+  toolUseId: z.string().nullable(),
   status: z.string().nullable(),
   summary: z.string().nullable(),
   outputFile: z.string().nullable(),
@@ -39,10 +40,12 @@ const TaskNotificationHistoryRecordSchema = z
     uuid: z.string().optional(),
     message_id: z.string().optional(),
     task_id: z.string().optional(),
+    tool_use_id: z.string().optional(),
     status: z.string().optional(),
     summary: z.string().optional(),
     output_file: z.string().optional(),
     content: z.string().optional(),
+    message: z.object({ content: z.unknown().optional() }).passthrough().optional(),
   })
   .passthrough();
 
@@ -65,7 +68,7 @@ type TaskNotificationLifecycle =
   | { status: "failed"; error: unknown }
   | { status: "canceled"; error: null };
 
-export type TaskNotificationSystemMessageLike = {
+export interface TaskNotificationSystemMessageLike {
   type: "system";
   subtype: "task_notification";
   uuid?: string;
@@ -74,17 +77,17 @@ export type TaskNotificationSystemMessageLike = {
   summary?: string;
   output_file?: string;
   content?: string;
-};
+}
 
-type ReadTaskNotificationTagInput = {
+interface ReadTaskNotificationTagInput {
   text: string;
   tagName: string;
-};
+}
 
-type BuildTaskNotificationStatusInput = {
+interface BuildTaskNotificationStatusInput {
   status: string | null;
   summary: string | null;
-};
+}
 
 type TaskNotificationToolCallItem = Extract<AgentTimelineItem, { type: "tool_call" }>;
 
@@ -154,6 +157,9 @@ function parseTaskNotificationFromUserContent(
   return TaskNotificationEnvelopeSchema.parse({
     messageId: toNonEmptyString(parsedInput.data.messageId),
     taskId: readTaskNotificationTagValue({ text: rawText, tagName: "task-id" }),
+    toolUseId:
+      readTaskNotificationTagValue({ text: rawText, tagName: "tool-use-id" }) ??
+      readTaskNotificationTagValue({ text: rawText, tagName: "tool_use_id" }),
     status: readTaskNotificationTagValue({ text: rawText, tagName: "status" }),
     summary: readTaskNotificationTagValue({ text: rawText, tagName: "summary" }),
     outputFile:
@@ -183,6 +189,12 @@ function parseTaskNotificationFromSystemRecord(record: unknown): TaskNotificatio
     taskId:
       toNonEmptyString(systemRecord.task_id) ??
       (rawText ? readTaskNotificationTagValue({ text: rawText, tagName: "task-id" }) : null),
+    toolUseId:
+      toNonEmptyString(systemRecord.tool_use_id) ??
+      (rawText
+        ? (readTaskNotificationTagValue({ text: rawText, tagName: "tool-use-id" }) ??
+          readTaskNotificationTagValue({ text: rawText, tagName: "tool_use_id" }))
+        : null),
     status:
       toNonEmptyString(systemRecord.status) ??
       (rawText ? readTaskNotificationTagValue({ text: rawText, tagName: "status" }) : null),
@@ -333,6 +345,22 @@ export function mapTaskNotificationSystemRecordToToolCall(
   return toTaskNotificationToolCall(parsed);
 }
 
+export function readTaskNotificationToolUseIdFromHistoryRecord(record: unknown): string | null {
+  const parsedRecord = TaskNotificationHistoryRecordSchema.safeParse(record);
+  if (!parsedRecord.success) {
+    return null;
+  }
+  if (parsedRecord.data.type === "user" && parsedRecord.data.message) {
+    return (
+      parseTaskNotificationFromUserContent({
+        content: parsedRecord.data.message.content,
+        messageId: parsedRecord.data.uuid ?? parsedRecord.data.message_id,
+      })?.toolUseId ?? null
+    );
+  }
+  return parseTaskNotificationFromSystemRecord(record)?.toolUseId ?? null;
+}
+
 export function coerceTaskNotificationHistoryRecordToSystemMessage(
   record: unknown,
 ): TaskNotificationSystemMessageLike | null {
@@ -342,12 +370,14 @@ export function coerceTaskNotificationHistoryRecordToSystemMessage(
   }
 
   const normalizedStatus = parsed.status?.toLowerCase() ?? null;
-  const status =
-    normalizedStatus === "failed" || normalizedStatus === "error"
-      ? "failed"
-      : normalizedStatus === "canceled" || normalizedStatus === "cancelled"
-        ? "stopped"
-        : "completed";
+  let status: "failed" | "stopped" | "completed";
+  if (normalizedStatus === "failed" || normalizedStatus === "error") {
+    status = "failed";
+  } else if (normalizedStatus === "canceled" || normalizedStatus === "cancelled") {
+    status = "stopped";
+  } else {
+    status = "completed";
+  }
 
   return {
     type: "system",

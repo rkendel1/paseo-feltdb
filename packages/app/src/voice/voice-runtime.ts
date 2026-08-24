@@ -1,9 +1,8 @@
 import { Buffer } from "buffer";
-import type { AgentStreamEventPayload, SessionOutboundMessage } from "@server/shared/messages";
+import type { AgentStreamEventPayload, SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import { resolveVoiceUnavailableMessage } from "@/utils/server-info-capabilities";
 import type { DaemonServerInfo } from "@/stores/session-store";
 import type { AudioEngine } from "@/voice/audio-engine-types";
-import { REALTIME_VOICE_VAD_CONFIG } from "@/voice/realtime-voice-config";
 import {
   THINKING_TONE_NATIVE_PCM_BASE64,
   THINKING_TONE_NATIVE_PCM_DURATION_MS,
@@ -82,19 +81,17 @@ interface RuntimeState {
   segmentDurationTimer: ReturnType<typeof setInterval> | null;
   lastDisplayVolumePublishMs: number;
   serverSpeechStartedAt: number | null;
-  lastNoServerSpeechLogMs: number;
-  localAboveThresholdActive: boolean;
 }
 
 type AudioOutputPayload = Extract<SessionOutboundMessage, { type: "audio_output" }>["payload"];
 
-type StreamingPlaybackChunk = {
+interface StreamingPlaybackChunk {
   id: string;
   chunkIndex: number;
   source: { arrayBuffer(): Promise<ArrayBuffer>; size: number; type: string };
-};
+}
 
-type StreamingPlaybackGroup = {
+interface StreamingPlaybackGroup {
   groupId: string;
   isVoiceMode: boolean;
   shouldPlay: boolean;
@@ -103,7 +100,7 @@ type StreamingPlaybackGroup = {
   finalChunkIndex: number | null;
   started: boolean;
   ackedChunkIds: Set<string>;
-};
+}
 
 interface RuntimePlaybackState {
   groups: Map<string, StreamingPlaybackGroup>;
@@ -118,19 +115,6 @@ interface CueState {
   token: number;
   timeout: ReturnType<typeof setTimeout> | null;
   playing: boolean;
-}
-
-interface RealtimeBridgeStats {
-  windowStartedAtMs: number;
-  captureEvents: number;
-  captureBytes: number;
-  uplinkEvents: number;
-  uplinkRawBytes: number;
-  uplinkBase64Chars: number;
-  outputEvents: number;
-  outputBytes: number;
-  outputGroups: number;
-  jsLagMaxMs: number;
 }
 
 const INITIAL_SNAPSHOT: VoiceRuntimeSnapshot = {
@@ -210,8 +194,6 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
     segmentDurationTimer: null,
     lastDisplayVolumePublishMs: 0,
     serverSpeechStartedAt: null,
-    lastNoServerSpeechLogMs: 0,
-    localAboveThresholdActive: false,
   };
   const playback: RuntimePlaybackState = {
     groups: new Map(),
@@ -219,18 +201,6 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
     activeGroupId: null,
     processing: false,
     generation: 0,
-  };
-  const bridgeStats: RealtimeBridgeStats = {
-    windowStartedAtMs: Date.now(),
-    captureEvents: 0,
-    captureBytes: 0,
-    uplinkEvents: 0,
-    uplinkRawBytes: 0,
-    uplinkBase64Chars: 0,
-    outputEvents: 0,
-    outputBytes: 0,
-    outputGroups: 0,
-    jsLagMaxMs: 0,
   };
   const cue: CueState = {
     active: false,
@@ -246,41 +216,6 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       return cuePcm16.buffer.slice(cuePcm16.byteOffset, cuePcm16.byteOffset + cuePcm16.byteLength);
     },
   };
-  let lagProbeLastMs = Date.now();
-  const lagProbe = setInterval(() => {
-    const now = Date.now();
-    const lagMs = Math.max(0, now - lagProbeLastMs - 100);
-    lagProbeLastMs = now;
-    if (lagMs > bridgeStats.jsLagMaxMs) {
-      bridgeStats.jsLagMaxMs = lagMs;
-    }
-  }, 100);
-
-  function flushBridgeStats(reason: string): void {
-    const now = Date.now();
-    const elapsedMs = now - bridgeStats.windowStartedAtMs;
-    if (elapsedMs < 1000) {
-      return;
-    }
-    console.log(
-      `[VoiceRuntime#${instanceId}][bridge] ${reason} ` +
-        `capture=${bridgeStats.captureEvents}ev/${bridgeStats.captureBytes}B ` +
-        `uplink=${bridgeStats.uplinkEvents}ev/${bridgeStats.uplinkRawBytes}B/${bridgeStats.uplinkBase64Chars}c ` +
-        `output=${bridgeStats.outputEvents}ev/${bridgeStats.outputBytes}B groups=${bridgeStats.outputGroups} ` +
-        `jsLagMaxMs=${bridgeStats.jsLagMaxMs} windowMs=${elapsedMs}`,
-    );
-    bridgeStats.windowStartedAtMs = now;
-    bridgeStats.captureEvents = 0;
-    bridgeStats.captureBytes = 0;
-    bridgeStats.uplinkEvents = 0;
-    bridgeStats.uplinkRawBytes = 0;
-    bridgeStats.uplinkBase64Chars = 0;
-    bridgeStats.outputEvents = 0;
-    bridgeStats.outputBytes = 0;
-    bridgeStats.outputGroups = 0;
-    bridgeStats.jsLagMaxMs = 0;
-  }
-
   function emit(): void {
     for (const listener of listeners) {
       listener();
@@ -303,7 +238,6 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
     if (snapshotsEqual(next, state.snapshot)) {
       return;
     }
-    const previous = state.snapshot;
     state.snapshot = next;
     emit();
   }
@@ -337,12 +271,10 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
     bytes: Uint8Array,
     format: string,
   ): { arrayBuffer(): Promise<ArrayBuffer>; size: number; type: string } {
-    const mimeType =
-      format === "pcm"
-        ? "audio/pcm;rate=24000;bits=16"
-        : format === "mp3"
-          ? "audio/mpeg"
-          : `audio/${format}`;
+    let mimeType: string;
+    if (format === "pcm") mimeType = "audio/pcm;rate=24000;bits=16";
+    else if (format === "mp3") mimeType = "audio/mpeg";
+    else mimeType = `audio/${format}`;
 
     return {
       size: bytes.byteLength,
@@ -354,22 +286,16 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
   }
 
   function resetPlaybackState(): void {
-    const hadGroups = playback.groups.size;
     playback.generation += 1;
     playback.groups.clear();
     playback.orderedGroupIds = [];
     playback.activeGroupId = null;
     playback.processing = false;
-    if (hadGroups > 0) {
-      console.log(
-        `[VoiceRuntime] resetPlaybackState: cleared ${hadGroups} groups, new gen=${playback.generation}`,
-      );
-    }
   }
 
   function activateNextPlaybackGroup(): void {
     while (playback.orderedGroupIds.length > 0) {
-      const groupId = playback.orderedGroupIds[0]!;
+      const groupId = playback.orderedGroupIds[0];
       if (playback.groups.has(groupId)) {
         playback.activeGroupId = groupId;
         return;
@@ -377,6 +303,23 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       playback.orderedGroupIds.shift();
     }
     playback.activeGroupId = null;
+  }
+
+  function retireFinishedGroup(
+    group: { groupId: string; started: boolean; isVoiceMode: boolean },
+    serverId: string,
+  ): void {
+    playback.groups.delete(group.groupId);
+    if (playback.orderedGroupIds[0] === group.groupId) {
+      playback.orderedGroupIds.shift();
+    } else {
+      playback.orderedGroupIds = playback.orderedGroupIds.filter(
+        (value) => value !== group.groupId,
+      );
+    }
+    if (group.started && group.isVoiceMode) {
+      api.onAssistantAudioFinished(serverId);
+    }
   }
 
   async function acknowledgeChunk(chunkId: string): Promise<void> {
@@ -394,15 +337,9 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
 
     playback.processing = true;
     const generation = playback.generation;
-    console.log(
-      `[VoiceRuntime] processPlaybackQueue start gen=${generation} activeGroup=${playback.activeGroupId}`,
-    );
     try {
       while (playback.activeGroupId) {
         if (generation !== playback.generation) {
-          console.log(
-            `[VoiceRuntime] processPlaybackQueue abort: generation changed ${generation} -> ${playback.generation}`,
-          );
           return;
         }
 
@@ -414,67 +351,35 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
 
         const nextChunk = group.chunks.get(group.nextChunkToPlay);
         if (!nextChunk) {
-          if (group.finalChunkIndex !== null && group.nextChunkToPlay > group.finalChunkIndex) {
-            console.log(
-              `[VoiceRuntime] group=${group.groupId} complete, played=${group.started} chunks=${group.nextChunkToPlay}`,
-            );
-            playback.groups.delete(group.groupId);
-            if (playback.orderedGroupIds[0] === group.groupId) {
-              playback.orderedGroupIds.shift();
-            } else {
-              playback.orderedGroupIds = playback.orderedGroupIds.filter(
-                (value) => value !== group.groupId,
-              );
-            }
-            if (group.started && group.isVoiceMode) {
-              api.onAssistantAudioFinished(serverId);
-            }
-            activateNextPlaybackGroup();
-            continue;
+          const groupIsFinished =
+            group.finalChunkIndex !== null && group.nextChunkToPlay > group.finalChunkIndex;
+          if (!groupIsFinished) {
+            return;
           }
-          console.log(
-            `[VoiceRuntime] group=${group.groupId} waiting for chunk=${group.nextChunkToPlay} (finalChunkIndex=${group.finalChunkIndex})`,
-          );
-          return;
+          retireFinishedGroup(group, serverId);
+          activateNextPlaybackGroup();
+          continue;
         }
 
         group.chunks.delete(group.nextChunkToPlay);
 
         if (group.shouldPlay && !group.started && group.isVoiceMode) {
           group.started = true;
-          console.log(
-            `[VoiceRuntime] group=${group.groupId} first play starting at chunk=${group.nextChunkToPlay}`,
-          );
           api.onAssistantAudioStarted(serverId);
         }
 
-        const playStart = Date.now();
         try {
           if (group.shouldPlay) {
             await deps.engine.play(nextChunk.source);
-            console.log(
-              `[VoiceRuntime] played chunk=${group.nextChunkToPlay} id=${nextChunk.id} took=${Date.now() - playStart}ms`,
-            );
-          } else {
-            console.log(
-              `[VoiceRuntime] SKIPPED chunk=${group.nextChunkToPlay} id=${nextChunk.id} shouldPlay=false`,
-            );
           }
         } catch (error) {
           if (generation !== playback.generation) {
-            console.log(`[VoiceRuntime] play error + generation changed, aborting`);
             return;
           }
-          console.error(
-            `[VoiceRuntime] play error chunk=${group.nextChunkToPlay} took=${Date.now() - playStart}ms:`,
-            error,
-          );
+          console.error(`[VoiceRuntime] play error chunk=${group.nextChunkToPlay}:`, error);
         }
 
         if (generation !== playback.generation) {
-          console.log(
-            `[VoiceRuntime] post-play generation changed ${generation} -> ${playback.generation}`,
-          );
           return;
         }
 
@@ -491,9 +396,6 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       if (generation === playback.generation) {
         playback.processing = false;
       }
-      console.log(
-        `[VoiceRuntime] processPlaybackQueue exit gen=${generation} currentGen=${playback.generation}`,
-      );
     }
   }
 
@@ -540,6 +442,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       clearTimeout(cue.timeout);
       cue.timeout = null;
     }
+    cue.playing = false;
     if (hadActive) {
       deps.engine.stop();
       deps.engine.clearQueue();
@@ -606,12 +509,6 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       }
 
       const base64 = Buffer.from(chunk).toString("base64");
-      bridgeStats.captureEvents += 1;
-      bridgeStats.captureBytes += chunk.byteLength;
-      bridgeStats.uplinkEvents += 1;
-      bridgeStats.uplinkRawBytes += chunk.byteLength;
-      bridgeStats.uplinkBase64Chars += base64.length;
-      flushBridgeStats("uplink");
 
       void activeSession.adapter.sendVoiceAudioChunk(base64, PCM_MIME_TYPE).catch((error) => {
         console.error(`[VoiceRuntime#${instanceId}] Failed to send audio chunk:`, error);
@@ -624,8 +521,6 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
     state.turnInProgress = false;
     state.serverSpeechDetected = false;
     state.lastDisplayVolumePublishMs = 0;
-    state.lastNoServerSpeechLogMs = 0;
-    state.localAboveThresholdActive = false;
     uploader.reset();
     resetCaptureTelemetry();
     patchSnapshot({ ...INITIAL_SNAPSHOT });
@@ -746,11 +641,6 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       if (!state.snapshot.isVoiceMode || state.snapshot.isMuted) {
         return;
       }
-      if (bridgeStats.captureEvents === 0) {
-        console.log(
-          `[VoiceRuntime#${instanceId}] firstCapturePcm bytes=${chunk.byteLength} phase=${state.snapshot.phase} transportReady=${state.transportReady}`,
-        );
-      }
       uploader.pushPcmChunk(chunk);
     },
 
@@ -767,30 +657,6 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
         return;
       }
 
-      const isActive = level > REALTIME_VOICE_VAD_CONFIG.volumeThreshold;
-      if (isActive && !state.localAboveThresholdActive) {
-        state.localAboveThresholdActive = true;
-        console.log(
-          `[VoiceRuntime#${instanceId}] localSpeechActive level=${level.toFixed(3)} threshold=${REALTIME_VOICE_VAD_CONFIG.volumeThreshold.toFixed(3)} phase=${state.snapshot.phase} transportReady=${state.transportReady}`,
-        );
-      }
-      if (!isActive && state.localAboveThresholdActive) {
-        state.localAboveThresholdActive = false;
-        console.log(
-          `[VoiceRuntime#${instanceId}] localSpeechInactive phase=${state.snapshot.phase} serverSpeaking=${state.serverSpeechDetected}`,
-        );
-      }
-      if (
-        isActive &&
-        !state.serverSpeechDetected &&
-        nowMs - state.lastNoServerSpeechLogMs >= 1500
-      ) {
-        state.lastNoServerSpeechLogMs = nowMs;
-        console.log(
-          `[VoiceRuntime#${instanceId}] localSpeechWithoutServerSpeech level=${level.toFixed(3)} phase=${state.snapshot.phase} turnInProgress=${state.turnInProgress} transportReady=${state.transportReady}`,
-        );
-      }
-
       patchTelemetry((prev) => ({
         ...prev,
         isSpeaking: state.serverSpeechDetected,
@@ -805,33 +671,15 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
         !state.snapshot.isVoiceMode ||
         !payload.isVoiceMode
       ) {
-        console.log(
-          `[VoiceRuntime#${instanceId}] audio_output DROPPED: activeServer=${state.snapshot.activeServerId} serverId=${serverId} isVoiceMode=${state.snapshot.isVoiceMode} payloadVoice=${payload.isVoiceMode}`,
-        );
         return;
       }
 
       const groupId = payload.groupId ?? payload.id;
       const chunkIndex = payload.chunkIndex ?? 0;
       const decoded = decodeAudioChunk(payload.audio);
-      bridgeStats.outputEvents += 1;
-      bridgeStats.outputBytes += decoded.byteLength;
-      bridgeStats.outputGroups += playback.groups.has(groupId) ? 0 : 1;
-      console.log(
-        `[VoiceRuntime#${instanceId}] audio_output groupId=${groupId} chunk=${chunkIndex} isLast=${payload.isLastChunk} ` +
-          `base64Chars=${payload.audio.length} decodedBytes=${decoded.byteLength} format=${payload.format} ` +
-          `head=${Array.from(decoded.slice(0, 12))
-            .map((value) => value.toString(16).padStart(2, "0"))
-            .join(" ")}`,
-      );
-      flushBridgeStats("audio_output");
 
       let group = playback.groups.get(groupId);
       if (!group) {
-        const shouldPlay = api.shouldPlayVoiceAudio(serverId);
-        console.log(
-          `[VoiceRuntime] new group=${groupId} shouldPlay=${shouldPlay} phase=${state.snapshot.phase} isSpeaking=${state.telemetry.isSpeaking}`,
-        );
         group = {
           groupId,
           isVoiceMode: payload.isVoiceMode,
@@ -882,6 +730,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       const previousServerId = state.snapshot.activeServerId;
       const previousAgentId = state.snapshot.activeAgentId;
       const generation = state.generation + 1;
+      let enabledCurrentVoiceMode = false;
       state.generation = generation;
       state.transportReady = false;
       patchSnapshot((prev) => ({
@@ -911,6 +760,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
 
         await deps.engine.initialize();
         await session.adapter.setVoiceMode(true, agentId);
+        enabledCurrentVoiceMode = true;
         await deps.engine.startCapture();
         if (state.generation !== generation) {
           return;
@@ -928,6 +778,9 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
           isMuted: deps.engine.isMuted(),
         }));
       } catch (error) {
+        if (enabledCurrentVoiceMode) {
+          await session.adapter.setVoiceMode(false).catch(() => undefined);
+        }
         await performLocalStop();
         throw error;
       }
@@ -965,7 +818,6 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
 
     async destroy() {
       await this.stopVoice().catch(() => undefined);
-      clearInterval(lagProbe);
       await deps.engine.destroy();
       listeners.clear();
       telemetryListeners.clear();
@@ -1025,6 +877,8 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       }
 
       if (state.turnInProgress) {
+        patchSnapshot((prev) => ({ ...prev, phase: "waiting" }));
+        reconcileCue();
         return;
       }
 
@@ -1054,15 +908,18 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
         return;
       }
 
-      console.log(
-        `[VoiceRuntime#${instanceId}] onServerSpeechStateChanged isSpeaking=${isSpeaking} phase=${state.snapshot.phase} volume=${state.telemetry.volume}`,
-      );
       state.serverSpeechDetected = isSpeaking;
       state.serverSpeechStartedAt = isSpeaking ? (state.serverSpeechStartedAt ?? Date.now()) : null;
       if (isSpeaking) {
+        const shouldInterruptPlayback =
+          state.snapshot.phase === "playing" || playback.groups.size > 0;
+        const hadCue = cue.active || cue.timeout !== null || cue.playing;
         resetPlaybackState();
-        deps.engine.stop();
-        deps.engine.clearQueue();
+        stopCue();
+        if (shouldInterruptPlayback && !hadCue) {
+          deps.engine.stop();
+          deps.engine.clearQueue();
+        }
         getActiveSession()?.adapter.setAssistantAudioPlaying(false);
       }
       patchTelemetry((prev) => ({

@@ -1,16 +1,12 @@
 import { StyleSheet } from "react-native-unistyles";
-// import { UnistylesRuntime } from "react-native-unistyles";
-import { lightTheme, darkTheme } from "./theme";
+import { REGISTERED_THEMES } from "./theme";
 
 StyleSheet.configure({
-  themes: {
-    light: lightTheme,
-    dark: darkTheme,
-  },
+  themes: REGISTERED_THEMES,
   breakpoints: {
     xs: 0,
     sm: 576,
-    md: 768,
+    md: 720,
     lg: 992,
     xl: 1200,
   },
@@ -20,22 +16,17 @@ StyleSheet.configure({
 });
 
 // Type augmentation for TypeScript
-type AppThemes = {
-  light: typeof lightTheme;
-  dark: typeof darkTheme;
-};
+type AppThemes = typeof REGISTERED_THEMES;
 
-type AppBreakpoints = {
+interface AppBreakpoints {
   xs: number;
   sm: number;
   md: number;
   lg: number;
   xl: number;
-};
+}
 
 declare module "react-native-unistyles" {
   export interface UnistylesThemes extends AppThemes {}
   export interface UnistylesBreakpoints extends AppBreakpoints {}
 }
-
-// UnistylesRuntime.setRootViewBackgroundColor(lightTheme.colors.background);

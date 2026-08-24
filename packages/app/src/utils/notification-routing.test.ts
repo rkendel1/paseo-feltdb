@@ -13,6 +13,7 @@ describe("resolveNotificationTarget", () => {
       serverId: "server-123",
       agentId: "agent-456",
       workspaceId: null,
+      terminalId: null,
     });
   });
 
@@ -21,30 +22,65 @@ describe("resolveNotificationTarget", () => {
       serverId: null,
       agentId: null,
       workspaceId: null,
+      terminalId: null,
     });
     expect(resolveNotificationTarget(undefined)).toEqual({
       serverId: null,
       agentId: null,
       workspaceId: null,
+      terminalId: null,
+    });
+  });
+
+  it("does not treat cwd as a workspace id alias", () => {
+    expect(
+      resolveNotificationTarget({
+        serverId: "srv-1",
+        agentId: "agent-1",
+        cwd: "/tmp/repo",
+      }),
+    ).toEqual({
+      serverId: "srv-1",
+      agentId: "agent-1",
+      workspaceId: null,
+      terminalId: null,
     });
   });
 });
 
 describe("buildNotificationRoute", () => {
-  it("routes to workspace with one-shot open intent when workspace id is present", () => {
+  it("routes to the agent path when workspace id is present", () => {
     expect(
       buildNotificationRoute({
         serverId: "srv-1",
         agentId: "agent-1",
-        workspaceId: "/tmp/repo",
+        workspaceId: "ws-main",
       }),
-    ).toBe("/h/srv-1/workspace/L3RtcC9yZXBv?open=agent%3Aagent-1");
+    ).toBe("/h/srv-1/workspace/ws-main?open=agent%3Aagent-1");
   });
 
-  it("routes directly to server-scoped agent path when both ids are present", () => {
-    expect(buildNotificationRoute({ serverId: "srv-1", agentId: "agent-1" })).toBe(
-      "/h/srv-1/agent/agent-1",
-    );
+  it("does not treat an incomplete notification as an agent URL", () => {
+    expect(buildNotificationRoute({ serverId: "srv-1", agentId: "agent-1" })).toBe("/h/srv-1");
+  });
+
+  it("routes to the workspace terminal tab when workspace and terminal ids are present", () => {
+    expect(
+      buildNotificationRoute({
+        serverId: "srv-1",
+        workspaceId: "ws-main",
+        terminalId: "term-1",
+      }),
+    ).toBe("/h/srv-1/workspace/ws-main?open=terminal%3Aterm-1");
+  });
+
+  it("falls back to host root for a terminal without a workspace id", () => {
+    expect(
+      buildNotificationRoute({
+        serverId: "srv-1",
+        terminalId: "term-1",
+        cwd: "/tmp/repo",
+      }),
+    ).toBe("/h/srv-1");
   });
 
   it("falls back to host root when only serverId is present", () => {
@@ -60,8 +96,9 @@ describe("buildNotificationRoute", () => {
     expect(
       buildNotificationRoute({
         serverId: "srv/with/slash",
+        workspaceId: "workspace-1",
         agentId: "agent with space",
       }),
-    ).toBe("/h/srv%2Fwith%2Fslash/agent/agent%20with%20space");
+    ).toBe("/h/srv%2Fwith%2Fslash/workspace/workspace-1?open=agent%3Aagent%20with%20space");
   });
 });

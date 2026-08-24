@@ -5,68 +5,79 @@ import type {
   KeyboardShortcutPayload,
   MessageInputKeyboardActionKind,
 } from "@/keyboard/actions";
-import { type KeyCombo, parseChordString } from "@/keyboard/shortcut-string";
+import {
+  chordStringToShortcutKeys,
+  type KeyCombo,
+  parseChordString,
+} from "@/keyboard/shortcut-string";
 
 export type { KeyCombo } from "@/keyboard/shortcut-string";
 
 // --- Public types ---
 
-export type KeyboardShortcutContext = {
+export interface KeyboardShortcutContext {
   isMac: boolean;
   isDesktop: boolean;
   focusScope: KeyboardFocusScope;
   commandCenterOpen: boolean;
-  hasSelectedAgent: boolean;
-};
+}
 
-export type KeyboardShortcutMatch = {
+export interface KeyboardShortcutInput {
+  key: string;
+  code: string;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  repeat: boolean;
+}
+
+export interface KeyboardShortcutMatch {
   action: KeyboardActionId;
   payload: KeyboardShortcutPayload;
   preventDefault: boolean;
   stopPropagation: boolean;
-};
+}
 
-export type KeyboardShortcutHelpRow = {
+export interface KeyboardShortcutHelpRow {
   id: string;
   label: string;
-  keys: ShortcutKey[];
+  labelKey: string;
+  /** The keys that actually fire this action, or `null` when it has none. */
+  chord: ShortcutKey[][] | null;
   note?: string;
-};
+  noteKey?: string;
+}
 
-export type ShortcutSectionId =
-  | "navigation"
-  | "tabs-panes"
-  | "projects"
-  | "panels"
-  | "agent-input";
+export type ShortcutSectionId = "general" | "workspaces" | "tabs-panes" | "layout" | "agent-input";
 
-export type KeyboardShortcutHelpSection = {
+export interface KeyboardShortcutHelpSection {
   id: ShortcutSectionId;
   title: string;
+  titleKey: string;
   rows: KeyboardShortcutHelpRow[];
-};
+}
 
 // --- Binding definition types ---
 
-type KeyboardShortcutPlatformContext = {
+interface KeyboardShortcutPlatformContext {
   isMac: boolean;
   isDesktop: boolean;
-};
-
+}
 
 interface ShortcutWhen {
   /** true = mac only, false = non-mac only */
   mac?: boolean;
   /** true = desktop only, false = web only */
   desktop?: boolean;
+  /** false = disabled when a text-editing surface is focused */
+  editable?: false;
   /** false = disabled when terminal is focused */
   terminal?: false;
   /** false = disabled when command center is open */
   commandCenter?: false;
-  /** true = requires a selected agent */
-  hasSelectedAgent?: true;
-  /** Exact focus scope match */
-  focusScope?: KeyboardFocusScope;
+  /** Allowed focus scope or scopes */
+  focusScope?: KeyboardFocusScope | readonly KeyboardFocusScope[];
 }
 
 type ShortcutPayloadDef =
@@ -78,7 +89,14 @@ interface ShortcutHelp {
   id: string;
   section: ShortcutSectionId;
   label: string;
-  keys: ShortcutKey[];
+  /**
+   * Display keys to show instead of the combo. Set this only when the combo
+   * cannot express what the row means — the `Digit` wildcard, which stands for
+   * any of 1-9, and `Shift+?`, whose Shift is implied by the character itself.
+   * Every other row derives its keys from `combo`, so a rebound shortcut shows
+   * what it now does rather than what it shipped as.
+   */
+  defaultDisplayKeys?: ShortcutKey[];
   note?: string;
 }
 
@@ -106,118 +124,379 @@ export interface ChordState {
 
 // --- Constants ---
 
+// Sections are listed in this order, most-reached-for first.
+const SHORTCUT_HELP_SECTION_ORDER: readonly ShortcutSectionId[] = [
+  "general",
+  "workspaces",
+  "tabs-panes",
+  "layout",
+  "agent-input",
+];
+
 const SHORTCUT_HELP_SECTION_TITLES: Record<ShortcutSectionId, string> = {
-  navigation: "Navigation",
+  general: "General",
+  workspaces: "Projects & Workspaces",
   "tabs-panes": "Tabs & Panes",
-  projects: "Projects",
-  panels: "Panels",
+  layout: "Layout",
   "agent-input": "Agent Input",
+};
+
+const SHORTCUT_HELP_SECTION_LABEL_KEYS: Record<ShortcutSectionId, string> = {
+  general: "settings.shortcuts.sections.general",
+  workspaces: "settings.shortcuts.sections.workspaces",
+  "tabs-panes": "settings.shortcuts.sections.tabsPanes",
+  layout: "settings.shortcuts.sections.layout",
+  "agent-input": "settings.shortcuts.sections.agentInput",
+};
+
+// Rows render in this order rather than in binding-definition order, so the shortcut someone opens
+// this sheet to find sits at the top of its section. Every help id must appear here; the unit test
+// fails when a new shortcut is added without a place, instead of silently sinking to the bottom.
+export const SHORTCUT_HELP_ROW_ORDER: Record<ShortcutSectionId, readonly string[]> = {
+  general: [
+    "toggle-command-center",
+    "search-files",
+    "show-shortcuts",
+    "toggle-settings",
+    "cycle-theme",
+  ],
+  workspaces: [
+    "new-agent",
+    "new-workspace",
+    "workspace-jump-index",
+    "workspace-prev",
+    "workspace-next",
+    "pin-workspace",
+    "archive-workspace",
+  ],
+  "tabs-panes": [
+    "workspace-tab-new",
+    "workspace-tab-target-agent",
+    "workspace-terminal-new",
+    "workspace-tab-target-browser",
+    "workspace-tab-target-changes",
+    "workspace-tab-target-files",
+    "workspace-tab-close-current",
+    "workspace-tab-jump-index",
+    "workspace-tab-prev",
+    "workspace-tab-next",
+    "workspace-pane-split-right",
+    "workspace-pane-split-down",
+    "workspace-pane-focus-left",
+    "workspace-pane-focus-right",
+    "workspace-pane-focus-up",
+    "workspace-pane-focus-down",
+    "workspace-pane-move-tab-left",
+    "workspace-pane-move-tab-right",
+    "workspace-pane-move-tab-up",
+    "workspace-pane-move-tab-down",
+    "workspace-pane-close",
+    "workspace-explorer-maximize",
+  ],
+  layout: ["toggle-left-sidebar", "toggle-right-sidebar", "toggle-both-sidebars", "toggle-focus"],
+  "agent-input": [
+    "focus-message-input",
+    "cycle-agent-mode",
+    "voice-toggle",
+    "dictation-toggle",
+    "agent-interrupt",
+    "voice-mute-toggle",
+  ],
+};
+
+const SHORTCUT_HELP_LABEL_KEYS: Record<string, string> = {
+  "new-agent": "settings.shortcuts.help.openProject",
+  "new-workspace": "settings.shortcuts.help.newWorkspace",
+  "switch-project": "settings.shortcuts.help.switchProject",
+  "archive-workspace": "settings.shortcuts.help.archiveWorkspace",
+  "workspace-tab-new": "settings.shortcuts.help.newTab",
+  "workspace-tab-target-agent": "workspace.tabs.actions.newAgent",
+  "workspace-tab-target-browser": "workspace.tabs.actions.newBrowser",
+  "workspace-tab-target-changes": "workspace.tabs.actions.changes",
+  "workspace-tab-target-files": "workspace.tabs.actions.files",
+  "workspace-tab-close-current": "settings.shortcuts.help.closeCurrentTab",
+  "workspace-jump-index": "settings.shortcuts.help.jumpToWorkspace",
+  "workspace-tab-jump-index": "settings.shortcuts.help.jumpToTab",
+  "workspace-prev": "settings.shortcuts.help.previousWorkspace",
+  "workspace-next": "settings.shortcuts.help.nextWorkspace",
+  "workspace-tab-prev": "settings.shortcuts.help.previousTab",
+  "workspace-tab-next": "settings.shortcuts.help.nextTab",
+  "workspace-pane-split-right": "settings.shortcuts.help.splitPaneRight",
+  "workspace-pane-split-down": "settings.shortcuts.help.splitPaneDown",
+  "workspace-pane-focus-left": "settings.shortcuts.help.focusPaneLeft",
+  "workspace-pane-focus-right": "settings.shortcuts.help.focusPaneRight",
+  "workspace-pane-focus-up": "settings.shortcuts.help.focusPaneUp",
+  "workspace-pane-focus-down": "settings.shortcuts.help.focusPaneDown",
+  "workspace-pane-move-tab-left": "settings.shortcuts.help.moveTabLeft",
+  "workspace-pane-move-tab-right": "settings.shortcuts.help.moveTabRight",
+  "workspace-pane-move-tab-up": "settings.shortcuts.help.moveTabUp",
+  "workspace-pane-move-tab-down": "settings.shortcuts.help.moveTabDown",
+  "workspace-pane-close": "settings.shortcuts.help.closePane",
+  "workspace-explorer-maximize": "settings.shortcuts.help.toggleExplorerPaneMaximization",
+  "workspace-terminal-new": "settings.shortcuts.help.newTerminal",
+  "search-files": "settings.shortcuts.help.searchFiles",
+  "toggle-command-center": "settings.shortcuts.help.toggleCommandCenter",
+  "show-shortcuts": "settings.shortcuts.help.showKeyboardShortcuts",
+  "toggle-left-sidebar": "settings.shortcuts.help.toggleLeftSidebar",
+  "toggle-right-sidebar": "settings.shortcuts.help.toggleRightSidebar",
+  "toggle-both-sidebars": "settings.shortcuts.help.toggleBothSidebars",
+  "toggle-settings": "settings.shortcuts.help.toggleSettings",
+  "toggle-focus": "settings.shortcuts.help.toggleFocusMode",
+  "cycle-theme": "settings.shortcuts.help.cycleTheme",
+  "focus-message-input": "settings.shortcuts.help.focusMessageInput",
+  "cycle-agent-mode": "settings.shortcuts.help.cycleAgentMode",
+  "voice-toggle": "settings.shortcuts.help.toggleVoiceMode",
+  "dictation-toggle": "settings.shortcuts.help.startStopDictation",
+  "agent-interrupt": "settings.shortcuts.help.interruptAgent",
+  "voice-mute-toggle": "settings.shortcuts.help.muteUnmuteVoiceMode",
+};
+
+const SHORTCUT_HELP_NOTE_KEYS: Record<string, string> = {
+  "show-shortcuts": "settings.shortcuts.helpNotes.showKeyboardShortcuts",
 };
 
 // --- Binding definitions ---
 
 const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
-  // --- New agent ---
+  // --- Open project ---
+  // Open project moved from Cmd+Shift+O to Cmd+O. The binding ids intentionally
+  // keep their original "cmd-shift-o" / "ctrl-shift-o" names: user shortcut
+  // overrides are keyed by binding id, so renaming them would silently drop a
+  // user's customized Open project shortcut on upgrade.
   {
     id: "agent-new-cmd-shift-o-mac",
     action: "agent.new",
-    combo: "Cmd+Shift+O",
+    combo: "Cmd+O",
     when: { mac: true },
     help: {
       id: "new-agent",
-      section: "projects",
+      section: "workspaces",
       label: "Open project",
-      keys: ["mod", "shift", "O"],
     },
   },
   {
     id: "agent-new-ctrl-shift-o-non-mac",
     action: "agent.new",
-    combo: "Ctrl+Shift+O",
+    combo: "Ctrl+O",
     when: { mac: false, terminal: false },
     help: {
       id: "new-agent",
-      section: "projects",
+      section: "workspaces",
       label: "Open project",
-      keys: ["mod", "shift", "O"],
     },
   },
 
-  // --- New worktree ---
+  // --- New workspace ---
   {
-    id: "worktree-new-cmd-o-mac",
-    action: "worktree.new",
-    combo: "Cmd+O",
+    id: "workspace-new-cmd-n-mac",
+    action: "workspace.new",
+    combo: "Cmd+N",
     when: { mac: true, commandCenter: false },
     help: {
-      id: "new-worktree",
-      section: "projects",
-      label: "New worktree",
-      keys: ["mod", "O"],
+      id: "new-workspace",
+      section: "workspaces",
+      label: "New workspace",
     },
   },
   {
-    id: "worktree-new-ctrl-o-non-mac",
-    action: "worktree.new",
-    combo: "Ctrl+O",
+    id: "workspace-new-ctrl-n-non-mac",
+    action: "workspace.new",
+    combo: "Ctrl+N",
     when: { mac: false, commandCenter: false, terminal: false },
     help: {
-      id: "new-worktree",
-      section: "projects",
-      label: "New worktree",
-      keys: ["mod", "O"],
+      id: "new-workspace",
+      section: "workspaces",
+      label: "New workspace",
     },
   },
 
-  // --- Archive worktree ---
+  // --- Search files (switch project on the New Workspace screen) ---
   {
+    id: "workspace-project-pick-cmd-p-mac",
+    action: "command-center.files",
+    combo: "Cmd+P",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "search-files",
+      section: "general",
+      label: "Search files",
+    },
+  },
+  {
+    id: "workspace-project-pick-ctrl-p-non-mac",
+    action: "command-center.files",
+    combo: "Ctrl+P",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "search-files",
+      section: "general",
+      label: "Search files",
+    },
+  },
+
+  // --- Archive workspace ---
+  {
+    // COMPAT(workspaceArchiveShortcutOverride): added in v0.1.106; remove after
+    // 2027-01-11 with a stored-override migration. Keeps existing custom chords.
     id: "worktree-archive-cmd-shift-backspace-mac",
-    action: "worktree.archive",
+    action: "workspace.archive",
     combo: "Cmd+Shift+Backspace",
     when: { mac: true, commandCenter: false },
     help: {
-      id: "archive-worktree",
-      section: "projects",
-      label: "Archive worktree",
-      keys: ["mod", "shift", "Backspace"],
+      id: "archive-workspace",
+      section: "workspaces",
+      label: "Archive workspace",
     },
   },
   {
+    // COMPAT(workspaceArchiveShortcutOverride): added in v0.1.106; remove after
+    // 2027-01-11 with a stored-override migration. Keeps existing custom chords.
     id: "worktree-archive-ctrl-shift-backspace-non-mac",
-    action: "worktree.archive",
+    action: "workspace.archive",
     combo: "Ctrl+Shift+Backspace",
     when: { mac: false, commandCenter: false, terminal: false },
     help: {
-      id: "archive-worktree",
-      section: "projects",
-      label: "Archive worktree",
-      keys: ["mod", "shift", "Backspace"],
+      id: "archive-workspace",
+      section: "workspaces",
+      label: "Archive workspace",
+    },
+  },
+
+  // --- Pin workspace ---
+  {
+    id: "workspace-pin-cmd-shift-p-mac",
+    action: "workspace.pin",
+    combo: "Cmd+Shift+P",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "pin-workspace",
+      section: "workspaces",
+      label: "Pin chat",
+    },
+  },
+  {
+    id: "workspace-pin-ctrl-shift-p-non-mac",
+    action: "workspace.pin",
+    combo: "Ctrl+Shift+P",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "pin-workspace",
+      section: "workspaces",
+      label: "Pin chat",
     },
   },
 
   // --- Tab management ---
   {
     id: "workspace-tab-new-cmd-t-mac",
-    action: "workspace.tab.new",
+    action: "workspace.tab.menu.open",
     combo: "Cmd+T",
     when: { mac: true, commandCenter: false },
     help: {
       id: "workspace-tab-new",
       section: "tabs-panes",
-      label: "New agent tab",
-      keys: ["mod", "T"],
+      label: "New tab",
     },
   },
   {
     id: "workspace-tab-new-ctrl-t-non-mac",
-    action: "workspace.tab.new",
+    action: "workspace.tab.menu.open",
     combo: "Ctrl+T",
     when: { mac: false, commandCenter: false, terminal: false },
     help: {
       id: "workspace-tab-new",
       section: "tabs-panes",
-      label: "New agent tab",
-      keys: ["mod", "T"],
+      label: "New tab",
+    },
+  },
+  {
+    id: "workspace-tab-target-agent-cmd-shift-a-mac",
+    action: "workspace.tab.target.agent",
+    combo: "Cmd+Shift+A",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "workspace-tab-target-agent",
+      section: "tabs-panes",
+      label: "New agent",
+    },
+  },
+  {
+    id: "workspace-tab-target-agent-ctrl-shift-a-non-mac",
+    action: "workspace.tab.target.agent",
+    combo: "Ctrl+Shift+A",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "workspace-tab-target-agent",
+      section: "tabs-panes",
+      label: "New agent",
+    },
+  },
+  {
+    id: "workspace-tab-target-browser-cmd-shift-b-mac",
+    action: "workspace.tab.target.browser",
+    combo: "Cmd+Shift+B",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "workspace-tab-target-browser",
+      section: "tabs-panes",
+      label: "New browser",
+    },
+  },
+  {
+    id: "workspace-tab-target-browser-ctrl-shift-b-non-mac",
+    action: "workspace.tab.target.browser",
+    combo: "Ctrl+Shift+B",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "workspace-tab-target-browser",
+      section: "tabs-panes",
+      label: "New browser",
+    },
+  },
+  {
+    // Keep the binding id stable so saved overrides from the former Cmd+Shift+C default survive.
+    id: "workspace-tab-target-changes-cmd-shift-c-mac",
+    action: "workspace.tab.target.changes",
+    combo: "Cmd+Shift+G",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "workspace-tab-target-changes",
+      section: "tabs-panes",
+      label: "Changes",
+    },
+  },
+  {
+    // Keep the binding id stable so saved overrides from the former Ctrl+Shift+C default survive.
+    id: "workspace-tab-target-changes-ctrl-shift-c-non-mac",
+    action: "workspace.tab.target.changes",
+    combo: "Ctrl+Shift+G",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "workspace-tab-target-changes",
+      section: "tabs-panes",
+      label: "Changes",
+    },
+  },
+  {
+    id: "workspace-tab-target-files-cmd-shift-e-mac",
+    action: "workspace.tab.target.files",
+    combo: "Cmd+Shift+E",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "workspace-tab-target-files",
+      section: "tabs-panes",
+      label: "Files",
+    },
+  },
+  {
+    id: "workspace-tab-target-files-ctrl-shift-e-non-mac",
+    action: "workspace.tab.target.files",
+    combo: "Ctrl+Shift+E",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "workspace-tab-target-files",
+      section: "tabs-panes",
+      label: "Files",
     },
   },
   {
@@ -229,7 +508,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "workspace-tab-close-current",
       section: "tabs-panes",
       label: "Close current tab",
-      keys: ["meta", "W"],
     },
   },
   {
@@ -241,7 +519,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "workspace-tab-close-current",
       section: "tabs-panes",
       label: "Close current tab",
-      keys: ["ctrl", "W"],
     },
   },
   {
@@ -253,7 +530,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "workspace-tab-close-current",
       section: "tabs-panes",
       label: "Close current tab",
-      keys: ["alt", "shift", "W"],
     },
   },
 
@@ -266,9 +542,9 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     payload: { type: "index" },
     help: {
       id: "workspace-jump-index",
-      section: "navigation",
+      section: "workspaces",
       label: "Jump to workspace",
-      keys: ["mod", "1-9"],
+      defaultDisplayKeys: ["mod", "1-9"],
     },
   },
   {
@@ -279,9 +555,9 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     payload: { type: "index" },
     help: {
       id: "workspace-jump-index",
-      section: "navigation",
+      section: "workspaces",
       label: "Jump to workspace",
-      keys: ["mod", "1-9"],
+      defaultDisplayKeys: ["mod", "1-9"],
     },
   },
   {
@@ -292,24 +568,37 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     payload: { type: "index" },
     help: {
       id: "workspace-jump-index",
-      section: "navigation",
+      section: "workspaces",
       label: "Jump to workspace",
-      keys: ["alt", "1-9"],
+      defaultDisplayKeys: ["alt", "1-9"],
     },
   },
 
   // --- Tab index jump ---
   {
-    id: "workspace-tab-navigate-index-alt-digit-desktop",
+    id: "workspace-tab-navigate-index-cmd-alt-digit-mac-desktop",
     action: "workspace.tab.navigate.index",
-    combo: "Alt+Digit",
-    when: { desktop: true, commandCenter: false },
+    combo: "Cmd+Alt+Digit",
+    when: { mac: true, desktop: true, commandCenter: false },
     payload: { type: "index" },
     help: {
       id: "workspace-tab-jump-index",
-      section: "navigation",
+      section: "tabs-panes",
       label: "Jump to tab",
-      keys: ["alt", "1-9"],
+      defaultDisplayKeys: ["mod", "alt", "1-9"],
+    },
+  },
+  {
+    id: "workspace-tab-navigate-index-alt-digit-desktop",
+    action: "workspace.tab.navigate.index",
+    combo: "Alt+Digit",
+    when: { mac: false, desktop: true, commandCenter: false },
+    payload: { type: "index" },
+    help: {
+      id: "workspace-tab-jump-index",
+      section: "tabs-panes",
+      label: "Jump to tab",
+      defaultDisplayKeys: ["alt", "1-9"],
     },
   },
   {
@@ -320,9 +609,9 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     payload: { type: "index" },
     help: {
       id: "workspace-tab-jump-index",
-      section: "navigation",
+      section: "tabs-panes",
       label: "Jump to tab",
-      keys: ["alt", "shift", "1-9"],
+      defaultDisplayKeys: ["alt", "shift", "1-9"],
     },
   },
 
@@ -335,9 +624,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     payload: { type: "delta", delta: -1 },
     help: {
       id: "workspace-prev",
-      section: "navigation",
+      section: "workspaces",
       label: "Previous workspace",
-      keys: ["mod", "["],
     },
   },
   {
@@ -348,9 +636,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     payload: { type: "delta", delta: -1 },
     help: {
       id: "workspace-prev",
-      section: "navigation",
+      section: "workspaces",
       label: "Previous workspace",
-      keys: ["mod", "["],
     },
   },
   {
@@ -361,9 +648,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     payload: { type: "delta", delta: 1 },
     help: {
       id: "workspace-next",
-      section: "navigation",
+      section: "workspaces",
       label: "Next workspace",
-      keys: ["mod", "]"],
     },
   },
   {
@@ -374,9 +660,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     payload: { type: "delta", delta: 1 },
     help: {
       id: "workspace-next",
-      section: "navigation",
+      section: "workspaces",
       label: "Next workspace",
-      keys: ["mod", "]"],
     },
   },
   {
@@ -387,9 +672,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     payload: { type: "delta", delta: -1 },
     help: {
       id: "workspace-prev",
-      section: "navigation",
+      section: "workspaces",
       label: "Previous workspace",
-      keys: ["alt", "["],
     },
   },
   {
@@ -400,9 +684,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     payload: { type: "delta", delta: 1 },
     help: {
       id: "workspace-next",
-      section: "navigation",
+      section: "workspaces",
       label: "Next workspace",
-      keys: ["alt", "]"],
     },
   },
 
@@ -415,9 +698,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     payload: { type: "delta", delta: -1 },
     help: {
       id: "workspace-tab-prev",
-      section: "navigation",
+      section: "tabs-panes",
       label: "Previous tab",
-      keys: ["alt", "shift", "["],
     },
   },
   {
@@ -428,9 +710,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     payload: { type: "delta", delta: 1 },
     help: {
       id: "workspace-tab-next",
-      section: "navigation",
+      section: "tabs-panes",
       label: "Next tab",
-      keys: ["alt", "shift", "]"],
     },
   },
 
@@ -444,7 +725,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "workspace-pane-split-right",
       section: "tabs-panes",
       label: "Split pane right",
-      keys: ["mod", "\\"],
     },
   },
   {
@@ -456,55 +736,50 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "workspace-pane-split-down",
       section: "tabs-panes",
       label: "Split pane down",
-      keys: ["mod", "shift", "\\"],
     },
   },
   {
     id: "workspace-pane-focus-left-cmd-shift-left",
     action: "workspace.pane.focus.left",
     combo: "Cmd+Shift+ArrowLeft",
-    when: { mac: true, commandCenter: false },
+    when: { mac: true, commandCenter: false, editable: false },
     help: {
       id: "workspace-pane-focus-left",
       section: "tabs-panes",
       label: "Focus pane left",
-      keys: ["mod", "shift", "Left"],
     },
   },
   {
     id: "workspace-pane-focus-right-cmd-shift-right",
     action: "workspace.pane.focus.right",
     combo: "Cmd+Shift+ArrowRight",
-    when: { mac: true, commandCenter: false },
+    when: { mac: true, commandCenter: false, editable: false },
     help: {
       id: "workspace-pane-focus-right",
       section: "tabs-panes",
       label: "Focus pane right",
-      keys: ["mod", "shift", "Right"],
     },
   },
   {
     id: "workspace-pane-focus-up-cmd-shift-up",
     action: "workspace.pane.focus.up",
     combo: "Cmd+Shift+ArrowUp",
-    when: { mac: true, commandCenter: false },
+    when: { mac: true, commandCenter: false, editable: false },
     help: {
       id: "workspace-pane-focus-up",
       section: "tabs-panes",
       label: "Focus pane up",
-      keys: ["mod", "shift", "Up"],
     },
   },
   {
     id: "workspace-pane-focus-down-cmd-shift-down",
     action: "workspace.pane.focus.down",
     combo: "Cmd+Shift+ArrowDown",
-    when: { mac: true, commandCenter: false },
+    when: { mac: true, commandCenter: false, editable: false },
     help: {
       id: "workspace-pane-focus-down",
       section: "tabs-panes",
       label: "Focus pane down",
-      keys: ["mod", "shift", "Down"],
     },
   },
   {
@@ -516,7 +791,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "workspace-pane-move-tab-left",
       section: "tabs-panes",
       label: "Move tab left",
-      keys: ["mod", "shift", "alt", "Left"],
     },
   },
   {
@@ -528,7 +802,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "workspace-pane-move-tab-right",
       section: "tabs-panes",
       label: "Move tab right",
-      keys: ["mod", "shift", "alt", "Right"],
     },
   },
   {
@@ -540,7 +813,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "workspace-pane-move-tab-up",
       section: "tabs-panes",
       label: "Move tab up",
-      keys: ["mod", "shift", "alt", "Up"],
     },
   },
   {
@@ -552,7 +824,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "workspace-pane-move-tab-down",
       section: "tabs-panes",
       label: "Move tab down",
-      keys: ["mod", "shift", "alt", "Down"],
     },
   },
   {
@@ -564,7 +835,28 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "workspace-pane-close",
       section: "tabs-panes",
       label: "Close pane",
-      keys: ["mod", "shift", "W"],
+    },
+  },
+  {
+    id: "workspace-explorer-maximize-cmd-shift-m-mac",
+    action: "workspace.explorer.maximize.toggle",
+    combo: "Cmd+Shift+M",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "workspace-explorer-maximize",
+      section: "tabs-panes",
+      label: "Toggle Explorer pane maximization",
+    },
+  },
+  {
+    id: "workspace-explorer-maximize-ctrl-shift-m-non-mac",
+    action: "workspace.explorer.maximize.toggle",
+    combo: "Ctrl+Shift+M",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "workspace-explorer-maximize",
+      section: "tabs-panes",
+      label: "Toggle Explorer pane maximization",
     },
   },
 
@@ -576,9 +868,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     when: { mac: true, commandCenter: false },
     help: {
       id: "workspace-terminal-new",
-      section: "panels",
+      section: "tabs-panes",
       label: "New terminal",
-      keys: ["mod", "shift", "T"],
     },
   },
   {
@@ -588,9 +879,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     when: { mac: false, commandCenter: false, terminal: false },
     help: {
       id: "workspace-terminal-new",
-      section: "panels",
+      section: "tabs-panes",
       label: "New terminal",
-      keys: ["mod", "shift", "T"],
     },
   },
 
@@ -602,9 +892,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     when: { mac: true },
     help: {
       id: "toggle-command-center",
-      section: "panels",
+      section: "general",
       label: "Toggle command center",
-      keys: ["mod", "K"],
     },
   },
   {
@@ -614,9 +903,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     when: { mac: false, terminal: false },
     help: {
       id: "toggle-command-center",
-      section: "panels",
+      section: "general",
       label: "Toggle command center",
-      keys: ["mod", "K"],
     },
   },
 
@@ -629,9 +917,9 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     when: { focusScope: "other" },
     help: {
       id: "show-shortcuts",
-      section: "panels",
+      section: "general",
       label: "Show keyboard shortcuts",
-      keys: ["?"],
+      defaultDisplayKeys: ["?"],
       note: "Available when focus is not in a text field or terminal.",
     },
   },
@@ -644,9 +932,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     when: { mac: true },
     help: {
       id: "toggle-left-sidebar",
-      section: "panels",
+      section: "layout",
       label: "Toggle left sidebar",
-      keys: ["mod", "B"],
     },
   },
   {
@@ -656,40 +943,37 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     when: { mac: false, commandCenter: false, terminal: false },
     help: {
       id: "toggle-left-sidebar",
-      section: "panels",
+      section: "layout",
       label: "Toggle left sidebar",
-      keys: ["mod", "B"],
     },
   },
   {
     id: "sidebar-toggle-right-cmd-e-mac",
     action: "sidebar.toggle.right",
     combo: "Cmd+E",
-    when: { mac: true, hasSelectedAgent: true, commandCenter: false },
+    when: { mac: true, commandCenter: false },
     help: {
       id: "toggle-right-sidebar",
-      section: "panels",
-      label: "Toggle right sidebar",
-      keys: ["mod", "E"],
+      section: "layout",
+      label: "Toggle side panel",
     },
   },
   {
     id: "sidebar-toggle-right-ctrl-e-non-mac",
     action: "sidebar.toggle.right",
     combo: "Ctrl+E",
-    when: { mac: false, hasSelectedAgent: true, commandCenter: false, terminal: false },
+    when: { mac: false, commandCenter: false, terminal: false },
     help: {
       id: "toggle-right-sidebar",
-      section: "panels",
-      label: "Toggle right sidebar",
-      keys: ["mod", "E"],
+      section: "layout",
+      label: "Toggle side panel",
     },
   },
   {
     id: "sidebar-toggle-right-ctrl-backquote",
     action: "sidebar.toggle.right",
     combo: "Ctrl+`",
-    when: { hasSelectedAgent: true, commandCenter: false },
+    when: { commandCenter: false },
   },
 
   // --- Toggle both sidebars ---
@@ -700,9 +984,8 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     when: { mac: true, commandCenter: false },
     help: {
       id: "toggle-both-sidebars",
-      section: "panels",
+      section: "layout",
       label: "Toggle both sidebars",
-      keys: ["mod", "."],
     },
   },
   {
@@ -712,9 +995,32 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     when: { mac: false, commandCenter: false, terminal: false },
     help: {
       id: "toggle-both-sidebars",
-      section: "panels",
+      section: "layout",
       label: "Toggle both sidebars",
-      keys: ["mod", "."],
+    },
+  },
+
+  // --- Settings toggle ---
+  {
+    id: "settings-toggle-cmd-comma-mac",
+    action: "settings.toggle",
+    combo: "Cmd+,",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "toggle-settings",
+      section: "general",
+      label: "Toggle settings",
+    },
+  },
+  {
+    id: "settings-toggle-ctrl-comma-non-mac",
+    action: "settings.toggle",
+    combo: "Ctrl+,",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "toggle-settings",
+      section: "general",
+      label: "Toggle settings",
     },
   },
 
@@ -723,28 +1029,87 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     id: "view-toggle-focus-cmd-shift-f-mac",
     action: "view.toggle.focus",
     combo: "Cmd+Shift+F",
-    when: { mac: true, hasSelectedAgent: true, commandCenter: false },
+    when: { mac: true, commandCenter: false },
     help: {
       id: "toggle-focus",
-      section: "panels",
+      section: "layout",
       label: "Toggle focus mode",
-      keys: ["mod", "shift", "F"],
     },
   },
   {
     id: "view-toggle-focus-ctrl-shift-f-non-mac",
     action: "view.toggle.focus",
     combo: "Ctrl+Shift+F",
-    when: { mac: false, hasSelectedAgent: true, commandCenter: false, terminal: false },
+    when: { mac: false, commandCenter: false, terminal: false },
     help: {
       id: "toggle-focus",
-      section: "panels",
+      section: "layout",
       label: "Toggle focus mode",
-      keys: ["mod", "shift", "F"],
+    },
+  },
+
+  // --- Theme cycling ---
+  {
+    id: "theme-cycle-cmd-shift-t-mac",
+    action: "theme.cycle",
+    combo: "Cmd+Alt+T",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "cycle-theme",
+      section: "general",
+      label: "Cycle theme",
+    },
+  },
+  {
+    id: "theme-cycle-ctrl-alt-t-non-mac",
+    action: "theme.cycle",
+    combo: "Ctrl+Alt+T",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "cycle-theme",
+      section: "general",
+      label: "Cycle theme",
     },
   },
 
   // --- Message input ---
+  {
+    id: "message-input-focus-cmd-l-mac",
+    action: "message-input.action",
+    combo: "Cmd+L",
+    when: { mac: true, commandCenter: false },
+    payload: { type: "message-input", kind: "focus" },
+    help: {
+      id: "focus-message-input",
+      section: "agent-input",
+      label: "Focus message input",
+    },
+  },
+  {
+    id: "message-input-focus-ctrl-l-non-mac",
+    action: "message-input.action",
+    combo: "Ctrl+L",
+    when: { mac: false, commandCenter: false, terminal: false },
+    payload: { type: "message-input", kind: "focus" },
+    help: {
+      id: "focus-message-input",
+      section: "agent-input",
+      label: "Focus message input",
+    },
+  },
+  {
+    id: "message-input-mode-cycle-shift-tab",
+    action: "message-input.action",
+    combo: "Shift+Tab",
+    repeat: false,
+    when: { commandCenter: false, focusScope: "message-input" },
+    payload: { type: "message-input", kind: "mode-cycle" },
+    help: {
+      id: "cycle-agent-mode",
+      section: "agent-input",
+      label: "Cycle agent mode",
+    },
+  },
   {
     id: "message-input-voice-toggle-cmd-shift-d-mac",
     action: "message-input.action",
@@ -756,7 +1121,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "voice-toggle",
       section: "agent-input",
       label: "Toggle voice mode",
-      keys: ["mod", "shift", "D"],
     },
   },
   {
@@ -770,7 +1134,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "voice-toggle",
       section: "agent-input",
       label: "Toggle voice mode",
-      keys: ["mod", "shift", "D"],
     },
   },
   {
@@ -783,7 +1146,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "dictation-toggle",
       section: "agent-input",
       label: "Start/stop dictation",
-      keys: ["mod", "D"],
     },
   },
   {
@@ -796,68 +1158,27 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "dictation-toggle",
       section: "agent-input",
       label: "Start/stop dictation",
-      keys: ["mod", "D"],
     },
   },
   {
-    id: "message-input-dictation-cancel",
-    action: "message-input.action",
+    id: "agent-interrupt",
+    action: "agent.interrupt",
     combo: "Escape",
-    when: { commandCenter: false, terminal: false },
-    payload: { type: "message-input", kind: "dictation-cancel" },
+    when: { commandCenter: false, focusScope: ["message-input", "other"] },
     preventDefault: false,
     stopPropagation: false,
     help: {
-      id: "dictation-cancel",
+      id: "agent-interrupt",
       section: "agent-input",
-      label: "Cancel dictation",
-      keys: ["Esc"],
+      label: "Interrupt agent",
     },
   },
   {
-    id: "message-input-send-enter",
+    id: "message-input-dictation-confirm-enter",
     action: "message-input.action",
     combo: "Enter",
-    when: { focusScope: "message-input", commandCenter: false },
-    payload: { type: "message-input", kind: "send" },
-    preventDefault: false,
-    stopPropagation: false,
-    help: {
-      id: "message-input-send",
-      section: "agent-input",
-      label: "Send message",
-      keys: ["Enter"],
-    },
-  },
-  {
-    id: "message-input-queue-cmd-enter-mac",
-    action: "message-input.action",
-    combo: "Cmd+Enter",
-    when: { mac: true, focusScope: "message-input", commandCenter: false },
-    payload: { type: "message-input", kind: "queue" },
-    preventDefault: false,
-    stopPropagation: false,
-    help: {
-      id: "message-input-queue",
-      section: "agent-input",
-      label: "Queue message",
-      keys: ["mod", "Enter"],
-    },
-  },
-  {
-    id: "message-input-queue-ctrl-enter-non-mac",
-    action: "message-input.action",
-    combo: "Ctrl+Enter",
-    when: { mac: false, focusScope: "message-input", commandCenter: false },
-    payload: { type: "message-input", kind: "queue" },
-    preventDefault: false,
-    stopPropagation: false,
-    help: {
-      id: "message-input-queue",
-      section: "agent-input",
-      label: "Queue message",
-      keys: ["mod", "Enter"],
-    },
+    when: { commandCenter: false, terminal: false },
+    payload: { type: "message-input", kind: "dictation-confirm" },
   },
 
   {
@@ -871,15 +1192,36 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "voice-mute-toggle",
       section: "agent-input",
       label: "Mute/unmute voice mode",
-      keys: ["Space"],
     },
   },
 ];
 
 // --- Parse bindings at module load ---
 
+/**
+ * The stored value meaning "the user deliberately unassigned this shortcut".
+ * Distinct from a missing key, which means "no override, use the default".
+ */
+export const UNASSIGNED_COMBO = null;
+
+/**
+ * Parse a binding's combo string into a chord.
+ *
+ * An empty combo yields an empty chord, which never matches any event — the
+ * matcher skips bindings whose first combo is missing. That is how both a
+ * user-unassigned shortcut and a binding authored without a default combo are
+ * represented: one state, not two. Authors who want a default-less binding
+ * write `combo: ""` and nothing else.
+ */
+export function parseBindingChord(combo: string): KeyCombo[] {
+  if (combo === "") {
+    return [];
+  }
+  return parseChordString(combo);
+}
+
 function parseBinding(binding: ShortcutBinding): ParsedShortcutBinding {
-  const parsedChord = parseChordString(binding.combo);
+  const parsedChord = parseBindingChord(binding.combo);
   const lastCombo = parsedChord.at(-1);
   if (binding.repeat === false && lastCombo) {
     lastCombo.repeat = false;
@@ -890,17 +1232,21 @@ function parseBinding(binding: ShortcutBinding): ParsedShortcutBinding {
 export const DEFAULT_BINDINGS: readonly ParsedShortcutBinding[] =
   SHORTCUT_BINDINGS.map(parseBinding);
 
-export function buildEffectiveBindings(
-  overrides: Record<string, string>,
-): ParsedShortcutBinding[] {
+export type ShortcutOverrides = Record<string, string | null>;
+
+export function buildEffectiveBindings(overrides: ShortcutOverrides): ParsedShortcutBinding[] {
   return DEFAULT_BINDINGS.map(function (binding) {
     const override = overrides[binding.id];
-    if (override === undefined) {
+    if (override === UNASSIGNED_COMBO) {
+      return { ...binding, combo: "", parsedChord: [] };
+    }
+    // Storage is unvalidated JSON, so anything can turn up here.
+    if (typeof override !== "string") {
       return binding;
     }
     let parsedChord: KeyCombo[];
     try {
-      parsedChord = parseChordString(override);
+      parsedChord = parseBindingChord(override);
     } catch {
       return binding;
     }
@@ -908,14 +1254,18 @@ export function buildEffectiveBindings(
     if (binding.repeat === false && lastCombo) {
       lastCombo.repeat = false;
     }
-    return { ...binding, combo: override, parsedChord };
+    if (!binding.help?.defaultDisplayKeys) {
+      return { ...binding, combo: override, parsedChord };
+    }
+    const { defaultDisplayKeys: _defaultDisplayKeys, ...help } = binding.help;
+    return { ...binding, combo: override, parsedChord, help };
   });
 }
 
 // --- Matching engine ---
 
-function parseDigit(event: KeyboardEvent): number | null {
-  const code = event.code ?? "";
+function parseDigit(event: KeyboardShortcutInput): number | null {
+  const code = event.code;
   if (code.startsWith("Digit")) {
     const value = Number(code.slice("Digit".length));
     return Number.isFinite(value) && value >= 1 && value <= 9 ? value : null;
@@ -924,14 +1274,32 @@ function parseDigit(event: KeyboardEvent): number | null {
     const value = Number(code.slice("Numpad".length));
     return Number.isFinite(value) && value >= 1 && value <= 9 ? value : null;
   }
-  const key = event.key ?? "";
+  const key = event.key;
   if (key >= "1" && key <= "9") {
     return Number(key);
   }
   return null;
 }
 
-function matchesCombo(combo: KeyCombo, event: KeyboardEvent, isMac: boolean): boolean {
+function matchesKeyOrCode(combo: KeyCombo, event: KeyboardShortcutInput): boolean {
+  if (combo.key === undefined) {
+    return event.code === combo.code;
+  }
+  const eventKey = event.key.toLowerCase();
+  if (eventKey === combo.key) return true;
+  if (combo.shift === true && combo.shiftedKey !== undefined && eventKey === combo.shiftedKey) {
+    return true;
+  }
+  // macOS rewrites event.key when Option is held (Option+T -> "†",
+  // Option+[ -> "“"), so Alt-bound letter / bracket bindings can only
+  // match by event.code. Stay key-first for non-Alt bindings so Dvorak
+  // keeps its logical-character matching (e.g. Cmd+V on physical Period
+  // must paste, not trigger Cmd+.).
+  if (combo.alt === true && event.code === combo.code) return true;
+  return combo.codeFallback === true && event.code === combo.code;
+}
+
+function matchesCombo(combo: KeyCombo, event: KeyboardShortcutInput, isMac: boolean): boolean {
   if (combo.mod) {
     if (isMac) {
       if (!event.metaKey) return false;
@@ -951,26 +1319,38 @@ function matchesCombo(combo: KeyCombo, event: KeyboardEvent, isMac: boolean): bo
   if (combo.code === "Digit") {
     return parseDigit(event) !== null;
   }
-
-  const codeMatch = event.code === combo.code;
-  const keyMatch = combo.key !== undefined && event.key.toLowerCase() === combo.key.toLowerCase();
-  return codeMatch || keyMatch;
+  return matchesKeyOrCode(combo, event);
 }
 
-function matchesWhen(when: ShortcutWhen | undefined, context: KeyboardShortcutContext): boolean {
+export function matchesKeyboardShortcutContext(
+  when: ShortcutWhen | undefined,
+  context: KeyboardShortcutContext,
+): boolean {
   if (!when) return true;
   if (when.mac !== undefined && when.mac !== context.isMac) return false;
   if (when.desktop !== undefined && when.desktop !== context.isDesktop) return false;
+  if (
+    when.editable === false &&
+    (context.focusScope === "message-input" || context.focusScope === "editable")
+  ) {
+    return false;
+  }
   if (when.terminal === false && context.focusScope === "terminal") return false;
   if (when.commandCenter === false && context.commandCenterOpen) return false;
-  if (when.hasSelectedAgent === true && !context.hasSelectedAgent) return false;
-  if (when.focusScope !== undefined && context.focusScope !== when.focusScope) return false;
+  if (
+    when.focusScope !== undefined &&
+    !(typeof when.focusScope === "string"
+      ? context.focusScope === when.focusScope
+      : when.focusScope.includes(context.focusScope))
+  ) {
+    return false;
+  }
   return true;
 }
 
 function resolvePayload(
   def: ShortcutPayloadDef | undefined,
-  event: KeyboardEvent,
+  event: KeyboardShortcutInput,
 ): KeyboardShortcutPayload {
   if (!def) return null;
   switch (def.type) {
@@ -982,6 +1362,8 @@ function resolvePayload(
       return { delta: def.delta };
     case "message-input":
       return { kind: def.kind };
+    default:
+      throw new Error("unreachable");
   }
 }
 
@@ -1017,78 +1399,84 @@ function helpMatchesPlatform(
 
 // --- Public API ---
 
-export function resolveKeyboardShortcut(input: {
-  event: KeyboardEvent;
+function buildMatchFromBinding(
+  binding: ParsedShortcutBinding,
+  event: KeyboardShortcutInput,
+): KeyboardShortcutMatch {
+  return {
+    action: binding.action,
+    payload: resolvePayload(binding.payload, event),
+    preventDefault: binding.preventDefault ?? true,
+    stopPropagation: binding.stopPropagation ?? true,
+  };
+}
+
+function resolveInitialChordStep(input: {
+  event: KeyboardShortcutInput;
   context: KeyboardShortcutContext;
   chordState: ChordState;
   onChordReset: () => void;
-  bindings?: readonly ParsedShortcutBinding[];
-}): {
-  match: KeyboardShortcutMatch | null;
-  nextChordState: ChordState;
-  preventDefault: boolean;
-};
-export function resolveKeyboardShortcut(input: {
-  event: KeyboardEvent;
-  context: KeyboardShortcutContext;
-  chordState: ChordState;
-  onChordReset: () => void;
-  bindings?: readonly ParsedShortcutBinding[];
+  bindings: readonly ParsedShortcutBinding[];
 }): {
   match: KeyboardShortcutMatch | null;
   nextChordState: ChordState;
   preventDefault: boolean;
 } {
-  const { event, context, chordState, onChordReset, bindings = DEFAULT_BINDINGS } = input;
+  const { event, context, chordState, onChordReset, bindings } = input;
+  const advancingCandidateIndices: number[] = [];
+  let singleComboMatch: KeyboardShortcutMatch | null = null;
 
-  if (chordState.step === 0) {
-    const advancingCandidateIndices: number[] = [];
-    let singleComboMatch: KeyboardShortcutMatch | null = null;
-
-    for (const [index, binding] of bindings.entries()) {
-      const firstCombo = binding.parsedChord[0];
-      if (!firstCombo) {
-        continue;
-      }
-      if (!matchesCombo(firstCombo, event, context.isMac)) {
-        continue;
-      }
-      if (!matchesWhen(binding.when, context)) {
-        continue;
-      }
-      if (binding.parsedChord.length > 1) {
-        advancingCandidateIndices.push(index);
-        continue;
-      }
-      if (!singleComboMatch) {
-        singleComboMatch = {
-          action: binding.action,
-          payload: resolvePayload(binding.payload, event),
-          preventDefault: binding.preventDefault ?? true,
-          stopPropagation: binding.stopPropagation ?? true,
-        };
-      }
+  for (const [index, binding] of bindings.entries()) {
+    const firstCombo = binding.parsedChord[0];
+    if (!firstCombo) {
+      continue;
     }
-
-    if (advancingCandidateIndices.length > 0) {
-      return {
-        match: null,
-        nextChordState: {
-          candidateIndices: advancingCandidateIndices,
-          step: 1,
-          timeoutId: createChordTimeout(onChordReset),
-        },
-        preventDefault: true,
-      };
+    if (!matchesCombo(firstCombo, event, context.isMac)) {
+      continue;
     }
+    if (!matchesKeyboardShortcutContext(binding.when, context)) {
+      continue;
+    }
+    if (binding.parsedChord.length > 1) {
+      advancingCandidateIndices.push(index);
+      continue;
+    }
+    if (!singleComboMatch) {
+      singleComboMatch = buildMatchFromBinding(binding, event);
+    }
+  }
 
+  if (advancingCandidateIndices.length > 0) {
     return {
-      match: singleComboMatch,
-      nextChordState: resetChordState(chordState),
-      preventDefault: false,
+      match: null,
+      nextChordState: {
+        candidateIndices: advancingCandidateIndices,
+        step: 1,
+        timeoutId: createChordTimeout(onChordReset),
+      },
+      preventDefault: true,
     };
   }
 
+  return {
+    match: singleComboMatch,
+    nextChordState: resetChordState(chordState),
+    preventDefault: false,
+  };
+}
+
+function resolveAdvancingChordStep(input: {
+  event: KeyboardShortcutInput;
+  context: KeyboardShortcutContext;
+  chordState: ChordState;
+  onChordReset: () => void;
+  bindings: readonly ParsedShortcutBinding[];
+}): {
+  match: KeyboardShortcutMatch | null;
+  nextChordState: ChordState;
+  preventDefault: boolean;
+} {
+  const { event, context, chordState, onChordReset, bindings } = input;
   const matchingCandidateIndices: number[] = [];
   let completedMatch: KeyboardShortcutMatch | null = null;
 
@@ -1104,16 +1492,11 @@ export function resolveKeyboardShortcut(input: {
     if (!matchesCombo(combo, event, context.isMac)) {
       continue;
     }
-    if (!matchesWhen(binding.when, context)) {
+    if (!matchesKeyboardShortcutContext(binding.when, context)) {
       continue;
     }
     if (chordState.step + 1 === binding.parsedChord.length) {
-      completedMatch = {
-        action: binding.action,
-        payload: resolvePayload(binding.payload, event),
-        preventDefault: binding.preventDefault ?? true,
-        stopPropagation: binding.stopPropagation ?? true,
-      };
+      completedMatch = buildMatchFromBinding(binding, event);
       break;
     }
     matchingCandidateIndices.push(index);
@@ -1147,6 +1530,24 @@ export function resolveKeyboardShortcut(input: {
   };
 }
 
+export function resolveKeyboardShortcut(input: {
+  event: KeyboardShortcutInput;
+  context: KeyboardShortcutContext;
+  chordState: ChordState;
+  onChordReset: () => void;
+  bindings?: readonly ParsedShortcutBinding[];
+}): {
+  match: KeyboardShortcutMatch | null;
+  nextChordState: ChordState;
+  preventDefault: boolean;
+} {
+  const { event, context, chordState, onChordReset, bindings = DEFAULT_BINDINGS } = input;
+  if (chordState.step === 0) {
+    return resolveInitialChordStep({ event, context, chordState, onChordReset, bindings });
+  }
+  return resolveAdvancingChordStep({ event, context, chordState, onChordReset, bindings });
+}
+
 export function getBindingIdForAction(
   actionId: string,
   platform: { isMac: boolean; isDesktop: boolean },
@@ -1163,19 +1564,127 @@ export function getBindingIdForAction(
   return null;
 }
 
+/**
+ * The keys to display for one binding, derived from the combo that actually
+ * fires so a rebound shortcut never advertises the keys it shipped with.
+ *
+ * `help.defaultDisplayKeys` wins where it is set, but only on the shipped
+ * binding. Effective bindings discard it when an override replaces the combo,
+ * so rebound rows still derive the keys that now fire.
+ * `parsedChord` is the single source of truth for "has no keys": it is derived
+ * from `combo`, so it covers both a user-unassigned shortcut and a binding
+ * authored without a default.
+ */
+function displayChordForBinding(binding: ParsedShortcutBinding): ShortcutKey[][] | null {
+  if (binding.parsedChord.length === 0) {
+    return null;
+  }
+  const displayKeys = binding.help?.defaultDisplayKeys;
+  if (displayKeys) {
+    return [displayKeys];
+  }
+  return chordStringToShortcutKeys(binding.combo);
+}
+
 export function getDefaultKeysForAction(
   actionId: string,
   platform: { isMac: boolean; isDesktop: boolean },
-): ShortcutKey[] | null {
-  for (const binding of DEFAULT_BINDINGS) {
+  bindings: readonly ParsedShortcutBinding[] = DEFAULT_BINDINGS,
+): ShortcutKey[][] | null {
+  for (const binding of bindings) {
     if (binding.help?.id !== actionId) {
       continue;
     }
     if (!helpMatchesPlatform(binding.when, platform)) {
       continue;
     }
-    return binding.help.keys;
+    return displayChordForBinding(binding);
   }
+  return null;
+}
+
+/**
+ * The keys to display for a shortcut: the user's override if they set one,
+ * the default otherwise, and `null` when the shortcut has no keys at all —
+ * either the user unassigned it or it ships without a default combo.
+ *
+ * The single resolver behind every display surface (hint badges, the command
+ * palette, and the settings rows). It validates an override the same way
+ * matching does, so what is shown is always what actually fires.
+ */
+export function resolveShortcutKeysForAction(
+  actionId: string,
+  overrides: ShortcutOverrides,
+  platform: { isMac: boolean; isDesktop: boolean },
+): ShortcutKey[][] | null {
+  const bindingId = getBindingIdForAction(actionId, platform);
+  if (bindingId === null) {
+    return null;
+  }
+
+  const defaultChord = getDefaultKeysForAction(actionId, platform);
+
+  const override = overrides[bindingId];
+  if (override === UNASSIGNED_COMBO || override === "") {
+    return null;
+  }
+  // Storage is unvalidated JSON: a missing key and a corrupt value both mean
+  // "fall back to the default".
+  if (typeof override !== "string") {
+    return defaultChord;
+  }
+  try {
+    parseBindingChord(override);
+  } catch {
+    // Matching falls back to the default for an unparseable override, so the
+    // display has to as well or it would advertise keys that do nothing.
+    return defaultChord;
+  }
+  return chordStringToShortcutKeys(override);
+}
+
+/**
+ * The `KeyboardEvent.key` whose hold reveals the sidebar workspace-jump number
+ * badges, or `null` when no badges should appear.
+ *
+ * It must match the modifier of the active `workspace.navigate.index` binding
+ * for this runtime, otherwise the badges appear for a modifier that does not
+ * actually jump. That binding is parameterized — its key is the `Digit`
+ * wildcard, which stands for any of 1-9 — so the badges are only honest when
+ * the effective binding is still a single combo built on that wildcard.
+ * Anything else (unassigned, rebound to one concrete digit, or a multi-step
+ * chord) yields `null`, because the 1-9 badges would be advertising more than
+ * the shortcut delivers.
+ */
+export function getWorkspaceIndexJumpModifierKey(
+  platform: { isMac: boolean; isDesktop: boolean },
+  bindings: readonly ParsedShortcutBinding[] = DEFAULT_BINDINGS,
+): "Alt" | "Meta" | "Control" | null {
+  const binding = bindings.find(function (candidate) {
+    return (
+      candidate.action === "workspace.navigate.index" &&
+      helpMatchesPlatform(candidate.when, platform)
+    );
+  });
+  if (!binding || binding.parsedChord.length !== 1) {
+    return null;
+  }
+
+  const combo = binding.parsedChord[0];
+  if (!combo || combo.code !== "Digit") {
+    return null;
+  }
+  // Exactly one modifier: holding it is what reveals the badges, so a combo
+  // needing a second one would show badges the user cannot act on.
+  const modifiers = [combo.mod, combo.meta, combo.ctrl, combo.alt, combo.shift];
+  if (modifiers.filter(Boolean).length !== 1) {
+    return null;
+  }
+
+  if (combo.mod) return platform.isMac ? "Meta" : "Control";
+  if (combo.meta) return "Meta";
+  if (combo.ctrl) return "Control";
+  if (combo.alt) return "Alt";
   return null;
 }
 
@@ -1184,13 +1693,9 @@ export function buildKeyboardShortcutHelpSections(
   bindings: readonly ParsedShortcutBinding[] = DEFAULT_BINDINGS,
 ): KeyboardShortcutHelpSection[] {
   const seenRows = new Set<string>();
-  const rowsBySection = new Map<ShortcutSectionId, KeyboardShortcutHelpRow[]>([
-    ["navigation", []],
-    ["tabs-panes", []],
-    ["projects", []],
-    ["panels", []],
-    ["agent-input", []],
-  ]);
+  const rowsBySection = new Map<ShortcutSectionId, KeyboardShortcutHelpRow[]>(
+    SHORTCUT_HELP_SECTION_ORDER.map((sectionId) => [sectionId, []]),
+  );
 
   for (const binding of bindings) {
     const help = binding.help;
@@ -1213,22 +1718,29 @@ export function buildKeyboardShortcutHelpSections(
     rows.push({
       id: help.id,
       label: help.label,
-      keys: help.keys,
+      labelKey: SHORTCUT_HELP_LABEL_KEYS[help.id] ?? help.label,
+      chord: displayChordForBinding(binding),
       ...(help.note ? { note: help.note } : {}),
+      ...(SHORTCUT_HELP_NOTE_KEYS[help.id] ? { noteKey: SHORTCUT_HELP_NOTE_KEYS[help.id] } : {}),
     });
   }
 
-  const sectionOrder: ShortcutSectionId[] = ["navigation", "tabs-panes", "projects", "panels", "agent-input"];
-
-  return sectionOrder.flatMap((sectionId) => {
+  return SHORTCUT_HELP_SECTION_ORDER.flatMap((sectionId) => {
     const rows = rowsBySection.get(sectionId) ?? [];
     if (rows.length === 0) {
       return [];
     }
+    const order = SHORTCUT_HELP_ROW_ORDER[sectionId];
+    const rank = (row: KeyboardShortcutHelpRow) => {
+      const index = order.indexOf(row.id);
+      return index === -1 ? order.length : index;
+    };
+    rows.sort((left, right) => rank(left) - rank(right));
     return [
       {
         id: sectionId,
         title: SHORTCUT_HELP_SECTION_TITLES[sectionId],
+        titleKey: SHORTCUT_HELP_SECTION_LABEL_KEYS[sectionId],
         rows,
       },
     ];

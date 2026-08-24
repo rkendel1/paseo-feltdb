@@ -1,9 +1,7 @@
-import { useLocalSearchParams } from "expo-router";
-import { SessionsScreen } from "@/screens/sessions-screen";
+import { Redirect } from "expo-router";
+import { buildSessionsRoute } from "@/utils/host-routes";
 
-export default function HostAgentsRoute() {
-  const params = useLocalSearchParams<{ serverId?: string }>();
-  const serverId = typeof params.serverId === "string" ? params.serverId : "";
-
-  return <SessionsScreen serverId={serverId} />;
+export default function HostSessionsRoute() {
+  // COMPAT(hostSessionsRoute): added 2026-06-11, remove after 2026-12-11.
+  return <Redirect href={buildSessionsRoute()} />;
 }

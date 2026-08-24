@@ -11,6 +11,7 @@ import type {
   Observation,
   Decision,
   Handoff,
+  AuthorityDecision,
   Relationship,
   MigrationMarker,
 } from "./schema.js";
@@ -185,6 +186,27 @@ export interface HandoffRepository {
   listByStatus(status: Handoff["status"]): Promise<Handoff[]>;
   update(id: string, data: Partial<Handoff>): Promise<Handoff>;
   delete(id: string): Promise<void>;
+  accept(id: string): Promise<Handoff>;
+}
+
+// ============================================================================
+// Authority Decision Repository (Phase 4.4)
+// ============================================================================
+
+export interface AuthorityDecisionRepository {
+  create(data: Omit<AuthorityDecision, "id">): Promise<AuthorityDecision>;
+  getById(id: string): Promise<AuthorityDecision | null>;
+  getBySubject(
+    subjectType: "task" | "workspace" | "project",
+    subjectId: string
+  ): Promise<AuthorityDecision | null>;
+  listBySubject(
+    subjectType: "task" | "workspace" | "project",
+    subjectId: string
+  ): Promise<AuthorityDecision[]>;
+  listByHandoff(handoffId: string): Promise<AuthorityDecision[]>;
+  update(id: string, data: Partial<AuthorityDecision>): Promise<AuthorityDecision>;
+  delete(id: string): Promise<void>;
 }
 
 // ============================================================================
@@ -232,6 +254,7 @@ export interface Repositories {
   observations: ObservationRepository;
   decisions: DecisionRepository;
   handoffs: HandoffRepository;
+  authorityDecisions: AuthorityDecisionRepository;
   relationships: RelationshipRepository;
   migrations: MigrationMarkerRepository;
 }
@@ -253,6 +276,7 @@ export function createRepositories(db: any): Repositories {
     observations: createObservationRepository(db),
     decisions: createDecisionRepository(db),
     handoffs: createHandoffRepository(db),
+    authorityDecisions: createAuthorityDecisionRepository(db),
     relationships: createRelationshipRepository(db),
     migrations: createMigrationMarkerRepository(db),
   };
@@ -799,6 +823,64 @@ function createHandoffRepository(db: any): HandoffRepository {
       await collection.updateOne({ id }, data);
       const result = await collection.findOne({ id });
       if (!result) throw new Error(`Handoff ${id} not found after update`);
+      return result;
+    },
+    async delete(id) {
+      await collection.deleteOne({ id });
+    },
+    async accept(id) {
+      // Atomic conditional update: only accept if status is still "pending"
+      // Uses FeltDB 0.5.1+ updateIfVersion for durable compare-and-swap
+      const success = await collection.updateOneConditional(
+        { id, status: "pending" },
+        { status: "accepted", acceptedAt: new Date().toISOString() }
+      );
+
+      if (!success) {
+        throw new Error(`Could not accept handoff ${id}: not in pending state or concurrent update won`);
+      }
+
+      const result = await collection.findOne({ id });
+      if (!result) throw new Error(`Handoff ${id} not found after accept`);
+      return result;
+    },
+  };
+}
+
+function createAuthorityDecisionRepository(db: any): AuthorityDecisionRepository {
+  const collection = db.collection("authority_decisions");
+  return {
+    async create(data) {
+      const decision: AuthorityDecision = {
+        id: randomUUID(),
+        ...data,
+      };
+      await collection.insert(decision);
+      return decision;
+    },
+    async getById(id) {
+      return await collection.findOne({ id });
+    },
+    async getBySubject(subjectType, subjectId) {
+      const results = await collection.find({ subjectType, subjectId });
+      // Return most recent decision for this subject
+      return results[results.length - 1] ?? null;
+    },
+    async listBySubject(subjectType, subjectId) {
+      return await collection.find({ subjectType, subjectId });
+    },
+    async listByHandoff(handoffId) {
+      const results = await collection.find({});
+      return results.filter((d: AuthorityDecision) =>
+        d.competingHandoffIds.includes(handoffId) ||
+        d.winnerId === handoffId ||
+        d.loserIds.includes(handoffId)
+      );
+    },
+    async update(id, data) {
+      await collection.updateOne({ id }, data);
+      const result = await collection.findOne({ id });
+      if (!result) throw new Error(`Authority decision ${id} not found after update`);
       return result;
     },
     async delete(id) {

@@ -69,7 +69,6 @@ export class HandoffService {
           sourceRunId,
           targetAgentId: input.targetAgentId,
           targetRunId: null,
-          requestId,
           requestedAction: input.requestedAction,
           summary: input.summary,
           unresolvedQuestions: input.unresolvedQuestions,

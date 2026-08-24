@@ -21,6 +21,7 @@
 import type { Logger } from "pino";
 import type { PaseoState } from "./paseo-state.js";
 import type { Message } from "./feltdb/schema.js";
+import { createAuthorityGuard } from "./handoff-authority-guard.js";
 
 export interface MessagePersistenceOptions {
   paseoState: PaseoState;
@@ -33,10 +34,12 @@ export interface MessagePersistenceOptions {
 export class MessagePersistence {
   private readonly paseoState: PaseoState;
   private readonly logger: Logger;
+  private readonly authorityGuard: ReturnType<typeof createAuthorityGuard>;
 
   constructor(options: MessagePersistenceOptions) {
     this.paseoState = options.paseoState;
     this.logger = options.logger.child({ module: "message-persistence" });
+    this.authorityGuard = createAuthorityGuard(options.paseoState, this.logger);
   }
 
   /**
@@ -87,7 +90,31 @@ export class MessagePersistence {
       );
     }
 
-    // 3. Perform authorized create
+    // 3. HANDOFF-AWARE AUTHORITY CHECK via AuthorityGuard
+    // Even though conversation owner check passed, verify agent has handoff authority if delegated
+    try {
+      await this.authorityGuard.authorize({
+        agentId: requestingAgentId,
+        operation: "create",
+        entityType: "message",
+        entityId: `message-${conversationId}`,
+        workspaceId: conversation.workspaceId,
+        projectId: conversation.projectId,
+        context: { conversationId },
+      });
+    } catch (err) {
+      this.logger.warn(
+        {
+          agentId: requestingAgentId,
+          conversationId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "Message creation denied by AuthorityGuard (handoff scope mismatch)",
+      );
+      throw err;
+    }
+
+    // 4. Perform authorized create
     // Filter out null values to match schema expectations
     const createData: any = { conversationId };
     for (const [key, value] of Object.entries(data)) {

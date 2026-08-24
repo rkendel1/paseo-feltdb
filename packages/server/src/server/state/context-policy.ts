@@ -133,12 +133,34 @@ export interface BoundedContextSelection {
 // Bounded Context Output
 // ============================================================================
 
+export interface ContextBudget {
+  /**
+   * Maximum characters allowed by policy.
+   */
+  maxCharacters: number;
+
+  /**
+   * Characters used in selected context.
+   */
+  usedCharacters: number;
+
+  /**
+   * Whether character budget was exceeded and items were dropped.
+   */
+  exceeded: boolean;
+}
+
 export interface BoundedAgentContext extends AgentContext {
   /**
    * Selection metadata explaining which items were included and why.
    * Enables "why was this in context?" queries.
    */
   selection: BoundedContextSelection;
+
+  /**
+   * Budget tracking for this bounded context.
+   */
+  budget: ContextBudget;
 }
 
 // ============================================================================
@@ -242,60 +264,55 @@ export class ContextPolicyEngine {
     );
 
     // Enforce character budget by truncating low-relevance items
-    const enforceCharacterBudget = (): void => {
-      let totalChars = 0;
+    const enforceCharacterBudget = (): ContextBudget => {
+      const countChars = (): number => {
+        let total = 0;
+        boundedRuns.forEach((r) => {
+          total += (r.prompt?.length ?? 0) + r.id.length;
+        });
+        boundedMessages.forEach((m) => {
+          total += (m.content?.length ?? 0) + m.id.length;
+        });
+        boundedDecisions.forEach((d) => {
+          total += (d.content?.length ?? 0) + d.id.length;
+        });
+        boundedObservations.forEach((o) => {
+          total += (o.content?.length ?? 0) + o.id.length;
+        });
+        boundedTasks.forEach((t) => {
+          total +=
+            (t.title?.length ?? 0) + (t.description?.length ?? 0) + t.id.length;
+        });
+        return total;
+      };
 
-      // Count characters in selected items
-      boundedRuns.forEach((r) => {
-        totalChars += (r.prompt?.length ?? 0) + r.id.length;
-      });
-      boundedMessages.forEach((m) => {
-        totalChars += (m.content?.length ?? 0) + m.id.length;
-      });
-      boundedDecisions.forEach((d) => {
-        totalChars += (d.content?.length ?? 0) + d.id.length;
-      });
-      boundedObservations.forEach((o) => {
-        totalChars += (o.content?.length ?? 0) + o.id.length;
-      });
-      boundedTasks.forEach((t) => {
-        totalChars +=
-          (t.title?.length ?? 0) + (t.description?.length ?? 0) + t.id.length;
-      });
+      let totalChars = countChars();
+      let exceeded = false;
 
       // If over budget, start dropping low-priority items
       if (totalChars > this.policy.maxCharacters) {
+        exceeded = true;
         // Drop non-current runs first
         boundedRuns = boundedRuns.filter((r) => r.id === context.recentRuns[0]?.id);
 
-        // Recalculate
-        totalChars = 0;
-        boundedRuns.forEach((r) => {
-          totalChars += (r.prompt?.length ?? 0) + r.id.length;
-        });
-        boundedMessages.forEach((m) => {
-          totalChars += (m.content?.length ?? 0) + m.id.length;
-        });
-        boundedDecisions.forEach((d) => {
-          totalChars += (d.content?.length ?? 0) + d.id.length;
-        });
-        boundedObservations.forEach((o) => {
-          totalChars += (o.content?.length ?? 0) + o.id.length;
-        });
-        boundedTasks.forEach((t) => {
-          totalChars +=
-            (t.title?.length ?? 0) + (t.description?.length ?? 0) + t.id.length;
-        });
+        totalChars = countChars();
 
         // Still over? Drop messages and observations
         if (totalChars > this.policy.maxCharacters) {
           boundedMessages = boundedMessages.slice(0, Math.max(1, Math.floor(boundedMessages.length / 2)));
           boundedObservations = boundedObservations.slice(0, Math.max(1, Math.floor(boundedObservations.length / 2)));
+          totalChars = countChars();
         }
       }
+
+      return {
+        maxCharacters: this.policy.maxCharacters,
+        usedCharacters: totalChars,
+        exceeded,
+      };
     };
 
-    enforceCharacterBudget();
+    const budget = enforceCharacterBudget();
 
     return {
       ...context,
@@ -312,6 +329,7 @@ export class ContextPolicyEngine {
         tasks: taskSelection,
         handoffs: handoffSelection,
       },
+      budget,
     };
   }
 

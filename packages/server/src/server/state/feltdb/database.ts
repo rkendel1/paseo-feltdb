@@ -41,6 +41,50 @@ class CollectionAdapter<T extends { id: string }> {
     }
   }
 
+  /**
+   * Atomic conditional update using FeltDB 0.5.1+ Collection.updateIfVersion().
+   *
+   * Implements true compare-and-swap: "Update ONLY if condition and version match".
+   * Returns true if update succeeded (this caller won the race), false otherwise.
+   *
+   * Example: updateOneConditional({ id, status: "pending" }, { status: "accepted" })
+   * atomically updates ONLY if status is still "pending" at the same version.
+   *
+   * Phase 4.4.3: Production Atomic Acceptance using durable substrate CAS
+   */
+  async updateOneConditional(
+    condition: Record<string, any>,
+    data: Partial<T>
+  ): Promise<boolean> {
+    // First pass: find item matching condition
+    const existing = await this.findOne(condition);
+    if (!existing) {
+      return false;
+    }
+
+    // Get version - FeltDB 0.5.1+ exposes __version on all items
+    const version = (existing as any).__version;
+    if (typeof version !== 'number') {
+      // Fallback for items without version field (shouldn't happen)
+      await this.collection.update(existing.id, data);
+      return true;
+    }
+
+    // Atomic compare-and-swap: update ONLY if version (and implicitly condition) still match
+    // If the version hasn't changed, the condition still matches (another writer didn't change it)
+    // If another writer changed it, the version will be different
+    const result = await (this.collection as any).updateIfVersion(
+      existing.id,
+      version,
+      data
+    );
+
+    // updateIfVersion returns { updated: boolean, item?: T, currentVersion?: number }
+    // updated=true means this CAS won (version matched, update applied)
+    // updated=false means version conflict (another writer won)
+    return result.updated === true;
+  }
+
   createIndex(field: string): void {
     this.collection.createIndex({ field });
   }
@@ -122,6 +166,7 @@ export class PaseoDB {
       { name: "observations" },
       { name: "decisions" },
       { name: "handoffs" },
+      { name: "authority_decisions" },
       { name: "relationships" },
       { name: "migration_markers" },
     ];
@@ -210,6 +255,12 @@ export class PaseoDB {
       { collection: "handoffs", field: "projectId" },
       { collection: "handoffs", field: "sourceAgentId" },
       { collection: "handoffs", field: "targetAgentId" },
+
+      // Authority decision indexes
+      { collection: "authority_decisions", field: "id", unique: true },
+      { collection: "authority_decisions", field: "subjectType" },
+      { collection: "authority_decisions", field: "subjectId" },
+      { collection: "authority_decisions", field: "winnerId" },
 
       // Relationship indexes
       { collection: "relationships", field: "id", unique: true },

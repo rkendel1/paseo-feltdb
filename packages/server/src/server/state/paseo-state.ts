@@ -459,7 +459,6 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
         // Ensures concurrent requests with same requestId create exactly one handoff
         return repos.handoffs.createIdempotent(requestId, {
           ...data,
-          requestId,
           status: data.status || "pending",
         });
       },

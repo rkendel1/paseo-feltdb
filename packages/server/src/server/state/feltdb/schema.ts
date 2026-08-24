@@ -299,6 +299,7 @@ export const HandoffSchema = z.object({
       "rejected",
       "cancelled",
       "failed",
+      "revoked",
     ])
     .default("pending"),
   rejectionReason: z.string().optional(), // Why Agent B rejected
@@ -310,6 +311,40 @@ export const HandoffSchema = z.object({
 });
 
 export type Handoff = z.infer<typeof HandoffSchema>;
+
+// ============================================================================
+// Authority Arbitration Entities (Phase 4.4)
+// ============================================================================
+
+/**
+ * AuthorityDecision - Durable record of arbitration when multiple handoffs compete for authority.
+ *
+ * Ensures deterministic, durable answers to "who has authority over this resource?"
+ * Survives restarts by persisting decisions in FeltDB.
+ */
+export const AuthorityDecisionSchema = z.object({
+  id: z.string(),
+  // Subject being controlled (task, workspace, or project)
+  subjectType: z.enum(["task", "workspace", "project"]),
+  subjectId: z.string(),
+  // Handoffs involved in this arbitration
+  competingHandoffIds: z.array(z.string()),
+  winnerId: z.string(), // ID of the winning handoff
+  loserIds: z.array(z.string()).default([]), // IDs of losing handoffs
+  // Reason for the decision (deterministic rule that was applied)
+  arbitrationReason: z.enum([
+    "first_accepted", // No prior authority, this is the first
+    "existing_authority", // Another handoff already holds authority
+    "explicit_supersession", // Winner explicitly supersedes prior holder
+  ]),
+  // Metadata about decision
+  decidedAt: z.string().datetime(),
+  decidedBy: z.enum(["system"]), // Currently always system
+  version: z.number().int().default(1),
+  metadata: z.record(z.any()).optional(),
+});
+
+export type AuthorityDecision = z.infer<typeof AuthorityDecisionSchema>;
 
 // ============================================================================
 // Relationships / Edges
@@ -412,5 +447,6 @@ export type AnyEntity =
   | Observation
   | Decision
   | Handoff
+  | AuthorityDecision
   | Relationship
   | MigrationMarker;

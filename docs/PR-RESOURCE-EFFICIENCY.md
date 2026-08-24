@@ -33,6 +33,67 @@ The first deliverable is a measurable memory/resource baseline.
 
 ---
 
+## Resource Attribution Model
+
+Understanding where memory actually lives is the foundation of any optimization. This diagram shows the measurement boundary:
+
+```
+macOS Host
+│
+├─ Paseo Daemon Process (PID)
+│  ├─ Node.js runtime (V8, libuv)
+│  ├─ Paseo application code
+│  ├─ FeltDB process bindings
+│  ├─ EventLoop handles
+│  └─ Application heap state
+│
+├─ Agent Subprocesses (child PIDs)
+│  ├─ Claude Agent SDK process
+│  ├─ Codex Agent process
+│  └─ OpenCode Agent process
+│
+└─ Container Runtime Layer
+   ├─ Docker Desktop / Apple Containers
+   ├─ Linux VM (if applicable)
+   └─ Paseo service containers
+      ├─ FeltDB server container
+      └─ Build tool containers
+
+What Each Metric Tells You
+═════════════════════════════
+
+Process RSS (resident set size)
+  ✓ Paseo daemon's actual physical memory
+  ✓ Detects leaks in Paseo process itself
+  ✗ Does NOT include container/VM overhead
+  ✗ Does NOT include child process memory
+
+Heap usage (Node.js process.memoryUsage())
+  ✓ JavaScript object allocation
+  ✓ Detects unbounded in-memory graphs (context, timelines)
+  ✗ Does NOT include native code allocations
+  ✗ Does NOT include buffer/file descriptor costs
+
+Container memory (docker stats)
+  ✓ Full resource consumption of a container
+  ✓ Includes FeltDB, agent processes, build tools
+  ✗ May not reflect actual host memory usage
+  ✗ Limits are configured independently of actual usage
+
+Docker Desktop VM (system-level measurement)
+  ✓ Total Linux VM footprint on macOS
+  ✓ Shows if container runtime dominates
+  ✗ Difficult to measure reliably on macOS
+  ✗ Includes all containers, not just Paseo
+
+Event loop handles
+  ✓ Detects resource leaks (unclosed sockets, timers, streams)
+  ✓ Shows if async operations complete and cleanup
+  ✗ Does NOT correlate directly to memory
+  ✗ Can grow without memory leak (many small handles)
+
+---
+
 ## Goals
 
 ### 1. Establish a Reproducible macOS Resource Baseline

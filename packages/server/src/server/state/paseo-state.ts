@@ -9,7 +9,7 @@
 
 import type { Logger } from "pino";
 import type { Repositories } from "./feltdb/repositories.js";
-import type { Project, Workspace, Agent, Task, Conversation, Message, Run, Observation, Decision } from "./feltdb/schema.js";
+import type { Project, Workspace, Agent, Task, Conversation, Message, Run, Observation, Decision, Handoff } from "./feltdb/schema.js";
 
 export interface PaseoState {
   // Project operations
@@ -153,6 +153,31 @@ export interface PaseoState {
     approve(id: string, approvedBy: string): Promise<Decision>;
     reject(id: string): Promise<Decision>;
     update(id: string, data: Partial<Decision>): Promise<Decision>;
+    delete(id: string): Promise<void>;
+  };
+
+  // Handoff operations (Phase 4: Handoff & Orchestration)
+  handoffs: {
+    create(data: Omit<Handoff, "id" | "createdAt">): Promise<Handoff>;
+    createIdempotent(
+      requestId: string,
+      data: Omit<Handoff, "id" | "createdAt" | "requestId">
+    ): Promise<Handoff>;
+    getById(id: string): Promise<Handoff | null>;
+    getByRequestId(requestId: string): Promise<Handoff | null>;
+    listBySourceAgent(sourceAgentId: string): Promise<Handoff[]>;
+    listByTargetAgent(targetAgentId: string): Promise<Handoff[]>;
+    listByProject(projectId: string): Promise<Handoff[]>;
+    listByStatus(status: Handoff["status"]): Promise<Handoff[]>;
+    accept(
+      id: string,
+      targetAgentId: string
+    ): Promise<Handoff>;
+    reject(id: string, reason: string): Promise<Handoff>;
+    updateStatus(id: string, status: Handoff["status"]): Promise<Handoff>;
+    complete(id: string, targetRunId: string): Promise<Handoff>;
+    fail(id: string, reason: string): Promise<Handoff>;
+    update(id: string, data: Partial<Handoff>): Promise<Handoff>;
     delete(id: string): Promise<void>;
   };
 
@@ -419,6 +444,116 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
       },
       async delete(id) {
         return repos.decisions.delete(id);
+      },
+    },
+
+    handoffs: {
+      async create(data) {
+        return repos.handoffs.create({
+          ...data,
+          status: data.status || "pending",
+        });
+      },
+      async createIdempotent(requestId, data) {
+        // Try to find existing handoff with this requestId
+        const existing = await repos.handoffs.getByRequestId(requestId);
+        if (existing) {
+          return existing;
+        }
+        // Create new handoff
+        return repos.handoffs.create({
+          ...data,
+          requestId,
+          status: data.status || "pending",
+        });
+      },
+      async getById(id) {
+        return repos.handoffs.getById(id);
+      },
+      async getByRequestId(requestId) {
+        return repos.handoffs.getByRequestId(requestId);
+      },
+      async listBySourceAgent(sourceAgentId) {
+        return repos.handoffs.listBySourceAgent(sourceAgentId);
+      },
+      async listByTargetAgent(targetAgentId) {
+        return repos.handoffs.listByTargetAgent(targetAgentId);
+      },
+      async listByProject(projectId) {
+        return repos.handoffs.listByProject(projectId);
+      },
+      async listByStatus(status) {
+        return repos.handoffs.listByStatus(status);
+      },
+      async accept(id, targetAgentId) {
+        const handoff = await repos.handoffs.getById(id);
+        if (!handoff) {
+          throw new Error(`Handoff ${id} not found`);
+        }
+        if (handoff.status !== "pending") {
+          throw new Error(
+            `Cannot accept handoff with status ${handoff.status}`
+          );
+        }
+        return repos.handoffs.update(id, {
+          status: "accepted",
+          targetAgentId,
+          acceptedAt: new Date().toISOString(),
+        });
+      },
+      async reject(id, reason) {
+        const handoff = await repos.handoffs.getById(id);
+        if (!handoff) {
+          throw new Error(`Handoff ${id} not found`);
+        }
+        if (handoff.status !== "pending") {
+          throw new Error(
+            `Cannot reject handoff with status ${handoff.status}`
+          );
+        }
+        return repos.handoffs.update(id, {
+          status: "rejected",
+          rejectionReason: reason,
+        });
+      },
+      async updateStatus(id, status) {
+        const handoff = await repos.handoffs.getById(id);
+        if (!handoff) {
+          throw new Error(`Handoff ${id} not found`);
+        }
+        return repos.handoffs.update(id, { status });
+      },
+      async complete(id, targetRunId) {
+        const handoff = await repos.handoffs.getById(id);
+        if (!handoff) {
+          throw new Error(`Handoff ${id} not found`);
+        }
+        if (!["in_progress", "accepted"].includes(handoff.status)) {
+          throw new Error(
+            `Cannot complete handoff with status ${handoff.status}`
+          );
+        }
+        return repos.handoffs.update(id, {
+          status: "completed",
+          targetRunId,
+          completedAt: new Date().toISOString(),
+        });
+      },
+      async fail(id, reason) {
+        const handoff = await repos.handoffs.getById(id);
+        if (!handoff) {
+          throw new Error(`Handoff ${id} not found`);
+        }
+        return repos.handoffs.update(id, {
+          status: "failed",
+          failureReason: reason,
+        });
+      },
+      async update(id, data) {
+        return repos.handoffs.update(id, data);
+      },
+      async delete(id) {
+        return repos.handoffs.delete(id);
       },
     },
 

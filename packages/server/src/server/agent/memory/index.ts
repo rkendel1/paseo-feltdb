@@ -1,8 +1,8 @@
 /**
- * Memory Extraction Module - Phase 3
+ * Memory Extraction Module - Phase 3 & 4
  *
  * Automatic observation and decision capture from agent execution.
- * Closes the write → read → learn loop by persisting durable semantic units.
+ * Closes the write → read → learn → handoff → execute loop.
  */
 
 export type { ExtractionEvent } from "./extraction-events.js";
@@ -24,3 +24,8 @@ export {
   createMemoryExtractionService,
 } from "./memory-extraction-service.js";
 export type { MemoryExtractionOptions } from "./memory-extraction-service.js";
+export { HandoffService, createHandoffService } from "./handoff-service.js";
+export type {
+  HandoffServiceOptions,
+  CreateHandoffInput,
+} from "./handoff-service.js";

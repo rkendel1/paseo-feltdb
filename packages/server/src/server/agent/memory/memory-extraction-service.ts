@@ -74,30 +74,78 @@ export class MemoryExtractionService {
     try {
       // Extract observations from the event
       const candidates = this.observationExtractor.extract(event);
-      if (candidates.length === 0) {
-        return;
+      if (candidates.length > 0) {
+        // Deduplicate within this batch
+        const observations = this.observationExtractor.deduplicateWithinBatch(
+          candidates
+        );
+
+        // Persist each observation
+        for (const obs of observations) {
+          if (obs.confidence < 0.65) {
+            // Skip very low confidence
+            continue;
+          }
+
+          await this.persistObservation(obs, event);
+        }
       }
 
-      // Deduplicate within this batch
-      const observations = this.observationExtractor.deduplicateWithinBatch(
-        candidates
-      );
-
-      // Persist each observation
-      for (const obs of observations) {
-        if (obs.confidence < 0.65) {
-          // Skip very low confidence
-          continue;
-        }
-
-        await this.persistObservation(obs, event);
+      // Also record an agent proposal decision for run completion events
+      // This marks that the agent executed and made progress on its turn
+      if (event.type === "run.completed") {
+        await this.recordTurnDecision(event);
       }
     } catch (err) {
       this.logger.debug(
         {},
-        `Error during observation extraction: ${err instanceof Error ? err.message : String(err)}`
+        `Error during extraction: ${err instanceof Error ? err.message : String(err)}`
       );
       // Never propagate extraction errors
+    }
+  }
+
+  /**
+   * Record a decision for agent turn completion.
+   * Marks that the agent completed a turn and made progress.
+   */
+  private async recordTurnDecision(event: ExtractionEvent): Promise<void> {
+    if (!this.paseoState.decisions) {
+      return;
+    }
+
+    try {
+      const decision = this.decisionRecorder.recordAgentProposal(
+        `Agent turn completed: analyzed task and made progress`,
+        {
+          agentId: this.agentId,
+          runId: event.runId,
+          scope: this.projectId,
+          rationale: "Agent completed a turn and analyzed the task",
+        }
+      );
+
+      await this.paseoState.decisions.create({
+        projectId: this.projectId,
+        workspaceId: this.workspaceId,
+        runId: event.runId,
+        content: decision.content,
+        rationale: decision.rationale,
+        status: decision.status,
+        authorType: decision.authorType,
+        authorId: decision.authorId,
+        taskId: decision.relatedTaskId,
+      });
+
+      this.logger.debug(
+        { runId: event.runId, agentId: this.agentId },
+        "Turn decision recorded"
+      );
+    } catch (err) {
+      this.logger.debug(
+        { runId: event.runId, err },
+        "Failed to record turn decision (non-blocking)"
+      );
     }
   }
 

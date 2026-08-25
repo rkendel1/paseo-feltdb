@@ -169,3 +169,8 @@ export {
   type UpdateTaskInput,
   TaskPersistence,
 } from "./task-persistence.js";
+export {
+  createMemoryExtractionService,
+  type MemoryExtractionOptions,
+  MemoryExtractionService,
+} from "../agent/memory/memory-extraction-service.js";

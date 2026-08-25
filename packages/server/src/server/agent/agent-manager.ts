@@ -80,6 +80,7 @@ export type AgentManagerOptions = {
   contextService?: any; // AgentContextService instance for durable context injection
   executionFeedbackNormalizer?: ExecutionFeedbackNormalizer; // For Phase 3.5.1 normalization
   observationPersistence?: any; // ObservationPersistence instance for Phase 3.5.2 persistence
+  memoryExtractionServiceFactory?: any; // Factory to create MemoryExtractionService for observation extraction
   logger: Logger;
 };
 
@@ -338,6 +339,8 @@ export class AgentManager {
   private readonly contextService?: any; // AgentContextService instance
   private readonly executionFeedbackNormalizer?: ExecutionFeedbackNormalizer; // Phase 3.5.1
   private readonly observationPersistence?: any; // Phase 3.5.2: ObservationPersistence
+  private readonly memoryExtractionServiceFactory?: any; // Factory to create MemoryExtractionService
+  private readonly memoryExtractionServices = new Map<string, any>(); // Per-agent extraction services
   private logger: Logger;
 
   constructor(options: AgentManagerOptions) {
@@ -355,6 +358,7 @@ export class AgentManager {
     this.contextService = options?.contextService;
     this.executionFeedbackNormalizer = options?.executionFeedbackNormalizer;
     this.observationPersistence = options?.observationPersistence;
+    this.memoryExtractionServiceFactory = options?.memoryExtractionServiceFactory;
     this.onAgentAttention = options?.onAgentAttention;
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
     if (options?.clients) {
@@ -372,6 +376,78 @@ export class AgentManager {
 
   setAgentAttentionCallback(callback: AgentAttentionCallback): void {
     this.onAgentAttention = callback;
+  }
+
+  private async getOrCreateExtractionService(agent: ActiveManagedAgent): Promise<any> {
+    if (!this.memoryExtractionServiceFactory || !this.paseoState) {
+      return null;
+    }
+
+    if (this.memoryExtractionServices.has(agent.id)) {
+      return this.memoryExtractionServices.get(agent.id);
+    }
+
+    try {
+      // Get workspace from FeltDB using agent's cwd
+      const workspace = await this.paseoState.workspaces.getByCwd(agent.cwd);
+      if (!workspace) {
+        this.logger.debug({ agentId: agent.id, cwd: agent.cwd }, "Could not find workspace for extraction service");
+        return null;
+      }
+
+      const service = this.memoryExtractionServiceFactory({
+        paseoState: this.paseoState,
+        logger: this.logger,
+        agentId: agent.id,
+        workspaceId: workspace.id,
+        projectId: workspace.projectId ?? undefined,
+      });
+
+      this.memoryExtractionServices.set(agent.id, service);
+      return service;
+    } catch (err) {
+      this.logger.error(
+        { agentId: agent.id, err },
+        "Failed to create memory extraction service"
+      );
+      return null;
+    }
+  }
+
+  private extractMemoryFromTimeline(
+    agent: ActiveManagedAgent,
+    item: AgentTimelineItem,
+    row: AgentTimelineRow
+  ): void {
+    // Fire-and-forget async extraction (never blocks agent)
+    this.doExtractMemoryAsync(agent, item, row).catch((err) => {
+      this.logger.debug(
+        { agentId: agent.id, itemType: item.type, err },
+        "Memory extraction error (non-blocking, ignored)"
+      );
+    });
+  }
+
+  private async doExtractMemoryAsync(
+    agent: ActiveManagedAgent,
+    item: AgentTimelineItem,
+    row: AgentTimelineRow
+  ): Promise<void> {
+    const extractionService = await this.getOrCreateExtractionService(agent);
+    if (!extractionService) {
+      return;
+    }
+
+    // Convert timeline item to extraction event
+    const extractionEvent = {
+      type: item.type,
+      runId: agent.activeForegroundTurnId ?? "unknown",
+      timestamp: row.timestamp,
+      item: item,
+    };
+
+    // Process event (service handles fire-and-forget internally)
+    extractionService.processEvent(extractionEvent);
   }
 
   public getMetricsSnapshot(): AgentMetricsSnapshot {
@@ -2499,6 +2575,12 @@ export class AgentManager {
           }
         }
         timelineRow = this.recordTimeline(agent, event.item);
+
+        // Trigger async memory extraction (observations) for this timeline event
+        if (!options?.fromHistory && timelineRow) {
+          this.extractMemoryFromTimeline(agent as ActiveManagedAgent, event.item, timelineRow);
+        }
+
         if (!options?.fromHistory && event.item.type === "user_message") {
           agent.lastUserMessageAt = new Date();
           this.emitState(agent);

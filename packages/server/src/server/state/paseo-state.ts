@@ -9,7 +9,18 @@
 
 import type { Logger } from "pino";
 import type { Repositories } from "./feltdb/repositories.js";
-import type { Project, Workspace, Agent, Task, Conversation, Message, Run, Observation, Decision, Handoff } from "./feltdb/schema.js";
+import type {
+  Project,
+  Workspace,
+  Agent,
+  Task,
+  Conversation,
+  Message,
+  Run,
+  Observation,
+  Decision,
+  Handoff,
+} from "./feltdb/schema.js";
 
 export interface PaseoState {
   // Project operations
@@ -109,7 +120,7 @@ export interface PaseoState {
     getById(id: string): Promise<Message | null>;
     listByConversation(
       conversationId: string,
-      options?: { limit?: number; offset?: number }
+      options?: { limit?: number; offset?: number },
     ): Promise<Message[]>;
     getMaxSequenceInConversation(conversationId: string): Promise<number>;
     update(id: string, data: Partial<Message>): Promise<Message>;
@@ -124,6 +135,7 @@ export interface PaseoState {
       agentId: string;
       taskId?: string;
       provider: "claude" | "codex" | "opencode";
+      model?: string;
       prompt: string;
     }): Promise<Run>;
     getById(id: string): Promise<Run | null>;
@@ -161,7 +173,7 @@ export interface PaseoState {
     create(data: Omit<Handoff, "id" | "createdAt">): Promise<Handoff>;
     createIdempotent(
       requestId: string,
-      data: Omit<Handoff, "id" | "createdAt" | "requestId">
+      data: Omit<Handoff, "id" | "createdAt" | "requestId">,
     ): Promise<Handoff>;
     getById(id: string): Promise<Handoff | null>;
     getByRequestId(requestId: string): Promise<Handoff | null>;
@@ -169,10 +181,7 @@ export interface PaseoState {
     listByTargetAgent(targetAgentId: string): Promise<Handoff[]>;
     listByProject(projectId: string): Promise<Handoff[]>;
     listByStatus(status: Handoff["status"]): Promise<Handoff[]>;
-    accept(
-      id: string,
-      targetAgentId: string
-    ): Promise<Handoff>;
+    accept(id: string, targetAgentId: string): Promise<Handoff>;
     reject(id: string, reason: string): Promise<Handoff>;
     updateStatus(id: string, status: Handoff["status"]): Promise<Handoff>;
     complete(id: string, targetRunId: string): Promise<Handoff>;
@@ -486,9 +495,7 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
           throw new Error(`Handoff ${id} not found`);
         }
         if (handoff.status !== "pending") {
-          throw new Error(
-            `Cannot accept handoff with status ${handoff.status}`
-          );
+          throw new Error(`Cannot accept handoff with status ${handoff.status}`);
         }
         return repos.handoffs.update(id, {
           status: "accepted",
@@ -502,9 +509,7 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
           throw new Error(`Handoff ${id} not found`);
         }
         if (handoff.status !== "pending") {
-          throw new Error(
-            `Cannot reject handoff with status ${handoff.status}`
-          );
+          throw new Error(`Cannot reject handoff with status ${handoff.status}`);
         }
         return repos.handoffs.update(id, {
           status: "rejected",
@@ -524,9 +529,7 @@ export function createPaseoState(repos: Repositories, logger: Logger): PaseoStat
           throw new Error(`Handoff ${id} not found`);
         }
         if (!["in_progress", "accepted"].includes(handoff.status)) {
-          throw new Error(
-            `Cannot complete handoff with status ${handoff.status}`
-          );
+          throw new Error(`Cannot complete handoff with status ${handoff.status}`);
         }
         return repos.handoffs.update(id, {
           status: "completed",

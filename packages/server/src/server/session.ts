@@ -1465,331 +1465,340 @@ export class Session {
       this.peakInflightRequests = this.inflightRequests;
     }
     try {
-    this.sessionLogger.trace({ inbound: msg }, "inbound message");
-    try {
-      switch (msg.type) {
-        case "voice_audio_chunk":
-          await this.handleAudioChunk(msg);
-          break;
+      this.sessionLogger.trace({ inbound: msg }, "inbound message");
+      try {
+        switch (msg.type) {
+          case "voice_audio_chunk":
+            await this.handleAudioChunk(msg);
+            break;
 
-        case "abort_request":
-          await this.handleAbort();
-          break;
+          case "abort_request":
+            await this.handleAbort();
+            break;
 
-        case "audio_played":
-          this.handleAudioPlayed(msg.id);
-          break;
+          case "audio_played":
+            this.handleAudioPlayed(msg.id);
+            break;
 
-        case "fetch_agents_request":
-          await this.handleFetchAgents(msg);
-          break;
+          case "fetch_agents_request":
+            await this.handleFetchAgents(msg);
+            break;
 
-        case "fetch_workspaces_request":
-          await this.handleFetchWorkspacesRequest(msg);
-          break;
+          case "fetch_workspaces_request":
+            await this.handleFetchWorkspacesRequest(msg);
+            break;
 
-        case "fetch_agent_request":
-          await this.handleFetchAgent(msg.agentId, msg.requestId);
-          break;
+          case "fetch_agent_request":
+            await this.handleFetchAgent(msg.agentId, msg.requestId);
+            break;
 
-        case "delete_agent_request":
-          await this.handleDeleteAgentRequest(msg.agentId, msg.requestId);
-          break;
+          case "delete_agent_request":
+            await this.handleDeleteAgentRequest(msg.agentId, msg.requestId);
+            break;
 
-        case "archive_agent_request":
-          await this.handleArchiveAgentRequest(msg.agentId, msg.requestId);
-          break;
+          case "archive_agent_request":
+            await this.handleArchiveAgentRequest(msg.agentId, msg.requestId);
+            break;
 
-        case "update_agent_request":
-          await this.handleUpdateAgentRequest(msg.agentId, msg.name, msg.labels, msg.requestId);
-          break;
+          case "update_agent_request":
+            await this.handleUpdateAgentRequest(msg.agentId, msg.name, msg.labels, msg.requestId);
+            break;
 
-        case "set_voice_mode":
-          await this.handleSetVoiceMode(msg.enabled, msg.agentId, msg.requestId);
-          break;
+          case "set_voice_mode":
+            await this.handleSetVoiceMode(msg.enabled, msg.agentId, msg.requestId);
+            break;
 
-        case "send_agent_message_request":
-          await this.handleSendAgentMessageRequest(msg);
-          break;
+          case "send_agent_message_request":
+            await this.handleSendAgentMessageRequest(msg);
+            break;
 
-        case "wait_for_finish_request":
-          await this.handleWaitForFinish(msg.agentId, msg.requestId, msg.timeoutMs);
-          break;
+          case "wait_for_finish_request":
+            await this.handleWaitForFinish(msg.agentId, msg.requestId, msg.timeoutMs);
+            break;
 
-        case "dictation_stream_start":
-          {
-            const unavailable = this.resolveVoiceFeatureUnavailableContext("dictation");
-            if (unavailable) {
-              this.emit({
-                type: "dictation_stream_error",
-                payload: {
-                  dictationId: msg.dictationId,
-                  error: unavailable.message,
-                  retryable: unavailable.retryable,
-                  reasonCode: unavailable.reasonCode,
-                  missingModelIds: unavailable.missingModelIds,
-                },
-              });
-              break;
+          case "dictation_stream_start":
+            {
+              const unavailable = this.resolveVoiceFeatureUnavailableContext("dictation");
+              if (unavailable) {
+                this.emit({
+                  type: "dictation_stream_error",
+                  payload: {
+                    dictationId: msg.dictationId,
+                    error: unavailable.message,
+                    retryable: unavailable.retryable,
+                    reasonCode: unavailable.reasonCode,
+                    missingModelIds: unavailable.missingModelIds,
+                  },
+                });
+                break;
+              }
             }
+            await this.dictationStreamManager.handleStart(msg.dictationId, msg.format);
+            break;
+
+          case "dictation_stream_chunk":
+            await this.dictationStreamManager.handleChunk({
+              dictationId: msg.dictationId,
+              seq: msg.seq,
+              audioBase64: msg.audio,
+              format: msg.format,
+            });
+            break;
+
+          case "dictation_stream_finish":
+            await this.dictationStreamManager.handleFinish(msg.dictationId, msg.finalSeq);
+            break;
+
+          case "dictation_stream_cancel":
+            this.dictationStreamManager.handleCancel(msg.dictationId);
+            break;
+
+          case "create_agent_request":
+            await this.handleCreateAgentRequest(msg);
+            break;
+
+          case "resume_agent_request":
+            await this.handleResumeAgentRequest(msg);
+            break;
+
+          case "refresh_agent_request":
+            await this.handleRefreshAgentRequest(msg);
+            break;
+
+          case "cancel_agent_request":
+            await this.handleCancelAgentRequest(msg.agentId);
+            break;
+
+          case "restart_server_request":
+            await this.handleRestartServerRequest(msg.requestId, msg.reason);
+            break;
+
+          case "shutdown_server_request":
+            await this.handleShutdownServerRequest(msg.requestId);
+            break;
+
+          case "fetch_agent_timeline_request":
+            await this.handleFetchAgentTimelineRequest(msg);
+            break;
+
+          case "set_agent_mode_request":
+            await this.handleSetAgentModeRequest(msg.agentId, msg.modeId, msg.requestId);
+            break;
+
+          case "set_agent_model_request":
+            await this.handleSetAgentModelRequest(msg.agentId, msg.modelId, msg.requestId);
+            break;
+
+          case "switch_agent_provider_request":
+            await this.handleSwitchAgentProviderRequest(
+              msg.agentId,
+              msg.provider,
+              msg.modelId,
+              msg.requestId,
+            );
+            break;
+
+          case "set_agent_thinking_request":
+            await this.handleSetAgentThinkingRequest(
+              msg.agentId,
+              msg.thinkingOptionId,
+              msg.requestId,
+            );
+            break;
+
+          case "agent_permission_response":
+            await this.handleAgentPermissionResponse(msg.agentId, msg.requestId, msg.response);
+            break;
+
+          case "checkout_status_request":
+            await this.handleCheckoutStatusRequest(msg);
+            break;
+
+          case "validate_branch_request":
+            await this.handleValidateBranchRequest(msg);
+            break;
+
+          case "branch_suggestions_request":
+            await this.handleBranchSuggestionsRequest(msg);
+            break;
+
+          case "directory_suggestions_request":
+            await this.handleDirectorySuggestionsRequest(msg);
+            break;
+
+          case "subscribe_checkout_diff_request":
+            await this.handleSubscribeCheckoutDiffRequest(msg);
+            break;
+
+          case "unsubscribe_checkout_diff_request":
+            this.handleUnsubscribeCheckoutDiffRequest(msg);
+            break;
+
+          case "checkout_commit_request":
+            await this.handleCheckoutCommitRequest(msg);
+            break;
+
+          case "checkout_merge_request":
+            await this.handleCheckoutMergeRequest(msg);
+            break;
+
+          case "checkout_merge_from_base_request":
+            await this.handleCheckoutMergeFromBaseRequest(msg);
+            break;
+
+          case "checkout_push_request":
+            await this.handleCheckoutPushRequest(msg);
+            break;
+
+          case "checkout_pr_create_request":
+            await this.handleCheckoutPrCreateRequest(msg);
+            break;
+
+          case "checkout_pr_status_request":
+            await this.handleCheckoutPrStatusRequest(msg);
+            break;
+
+          case "paseo_worktree_list_request":
+            await this.handlePaseoWorktreeListRequest(msg);
+            break;
+
+          case "paseo_worktree_archive_request":
+            await this.handlePaseoWorktreeArchiveRequest(msg);
+            break;
+
+          case "create_paseo_worktree_request":
+            await this.handleCreatePaseoWorktreeRequest(msg);
+            break;
+
+          case "open_project_request":
+            await this.handleOpenProjectRequest(msg);
+            break;
+
+          case "archive_workspace_request":
+            await this.handleArchiveWorkspaceRequest(msg);
+            break;
+
+          case "file_explorer_request":
+            await this.handleFileExplorerRequest(msg);
+            break;
+
+          case "project_icon_request":
+            await this.handleProjectIconRequest(msg);
+            break;
+
+          case "file_download_token_request":
+            await this.handleFileDownloadTokenRequest(msg);
+            break;
+
+          case "list_provider_models_request":
+            await this.handleListProviderModelsRequest(msg);
+            break;
+
+          case "list_available_providers_request":
+            await this.handleListAvailableProvidersRequest(msg);
+            break;
+
+          case "speech_models_list_request":
+            await this.handleSpeechModelsListRequest(msg);
+            break;
+
+          case "speech_models_download_request":
+            await this.handleSpeechModelsDownloadRequest(msg);
+            break;
+
+          case "clear_agent_attention":
+            await this.handleClearAgentAttention(msg.agentId);
+            break;
+
+          case "client_heartbeat":
+            this.handleClientHeartbeat(msg);
+            break;
+
+          case "ping": {
+            const now = Date.now();
+            this.emit({
+              type: "pong",
+              payload: {
+                requestId: msg.requestId,
+                clientSentAt: msg.clientSentAt,
+                serverReceivedAt: now,
+                serverSentAt: now,
+              },
+            });
+            break;
           }
-          await this.dictationStreamManager.handleStart(msg.dictationId, msg.format);
-          break;
 
-        case "dictation_stream_chunk":
-          await this.dictationStreamManager.handleChunk({
-            dictationId: msg.dictationId,
-            seq: msg.seq,
-            audioBase64: msg.audio,
-            format: msg.format,
-          });
-          break;
+          case "list_commands_request":
+            await this.handleListCommandsRequest(msg);
+            break;
 
-        case "dictation_stream_finish":
-          await this.dictationStreamManager.handleFinish(msg.dictationId, msg.finalSeq);
-          break;
+          case "register_push_token":
+            this.handleRegisterPushToken(msg.token);
+            break;
 
-        case "dictation_stream_cancel":
-          this.dictationStreamManager.handleCancel(msg.dictationId);
-          break;
+          case "subscribe_terminals_request":
+            this.handleSubscribeTerminalsRequest(msg);
+            break;
 
-        case "create_agent_request":
-          await this.handleCreateAgentRequest(msg);
-          break;
+          case "unsubscribe_terminals_request":
+            this.handleUnsubscribeTerminalsRequest(msg);
+            break;
 
-        case "resume_agent_request":
-          await this.handleResumeAgentRequest(msg);
-          break;
+          case "list_terminals_request":
+            await this.handleListTerminalsRequest(msg);
+            break;
 
-        case "refresh_agent_request":
-          await this.handleRefreshAgentRequest(msg);
-          break;
+          case "create_terminal_request":
+            await this.handleCreateTerminalRequest(msg);
+            break;
 
-        case "cancel_agent_request":
-          await this.handleCancelAgentRequest(msg.agentId);
-          break;
+          case "subscribe_terminal_request":
+            await this.handleSubscribeTerminalRequest(msg);
+            break;
 
-        case "restart_server_request":
-          await this.handleRestartServerRequest(msg.requestId, msg.reason);
-          break;
+          case "unsubscribe_terminal_request":
+            this.handleUnsubscribeTerminalRequest(msg);
+            break;
 
-        case "shutdown_server_request":
-          await this.handleShutdownServerRequest(msg.requestId);
-          break;
+          case "terminal_input":
+            this.handleTerminalInput(msg);
+            break;
 
-        case "fetch_agent_timeline_request":
-          await this.handleFetchAgentTimelineRequest(msg);
-          break;
+          case "kill_terminal_request":
+            await this.handleKillTerminalRequest(msg);
+            break;
+        }
+      } catch (error: any) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        this.sessionLogger.error({ err }, "Error handling message");
 
-        case "set_agent_mode_request":
-          await this.handleSetAgentModeRequest(msg.agentId, msg.modeId, msg.requestId);
-          break;
-
-        case "set_agent_model_request":
-          await this.handleSetAgentModelRequest(msg.agentId, msg.modelId, msg.requestId);
-          break;
-
-        case "set_agent_thinking_request":
-          await this.handleSetAgentThinkingRequest(
-            msg.agentId,
-            msg.thinkingOptionId,
-            msg.requestId,
-          );
-          break;
-
-        case "agent_permission_response":
-          await this.handleAgentPermissionResponse(msg.agentId, msg.requestId, msg.response);
-          break;
-
-        case "checkout_status_request":
-          await this.handleCheckoutStatusRequest(msg);
-          break;
-
-        case "validate_branch_request":
-          await this.handleValidateBranchRequest(msg);
-          break;
-
-        case "branch_suggestions_request":
-          await this.handleBranchSuggestionsRequest(msg);
-          break;
-
-        case "directory_suggestions_request":
-          await this.handleDirectorySuggestionsRequest(msg);
-          break;
-
-        case "subscribe_checkout_diff_request":
-          await this.handleSubscribeCheckoutDiffRequest(msg);
-          break;
-
-        case "unsubscribe_checkout_diff_request":
-          this.handleUnsubscribeCheckoutDiffRequest(msg);
-          break;
-
-        case "checkout_commit_request":
-          await this.handleCheckoutCommitRequest(msg);
-          break;
-
-        case "checkout_merge_request":
-          await this.handleCheckoutMergeRequest(msg);
-          break;
-
-        case "checkout_merge_from_base_request":
-          await this.handleCheckoutMergeFromBaseRequest(msg);
-          break;
-
-        case "checkout_push_request":
-          await this.handleCheckoutPushRequest(msg);
-          break;
-
-        case "checkout_pr_create_request":
-          await this.handleCheckoutPrCreateRequest(msg);
-          break;
-
-        case "checkout_pr_status_request":
-          await this.handleCheckoutPrStatusRequest(msg);
-          break;
-
-        case "paseo_worktree_list_request":
-          await this.handlePaseoWorktreeListRequest(msg);
-          break;
-
-        case "paseo_worktree_archive_request":
-          await this.handlePaseoWorktreeArchiveRequest(msg);
-          break;
-
-        case "create_paseo_worktree_request":
-          await this.handleCreatePaseoWorktreeRequest(msg);
-          break;
-
-        case "open_project_request":
-          await this.handleOpenProjectRequest(msg);
-          break;
-
-        case "archive_workspace_request":
-          await this.handleArchiveWorkspaceRequest(msg);
-          break;
-
-        case "file_explorer_request":
-          await this.handleFileExplorerRequest(msg);
-          break;
-
-        case "project_icon_request":
-          await this.handleProjectIconRequest(msg);
-          break;
-
-        case "file_download_token_request":
-          await this.handleFileDownloadTokenRequest(msg);
-          break;
-
-        case "list_provider_models_request":
-          await this.handleListProviderModelsRequest(msg);
-          break;
-
-        case "list_available_providers_request":
-          await this.handleListAvailableProvidersRequest(msg);
-          break;
-
-        case "speech_models_list_request":
-          await this.handleSpeechModelsListRequest(msg);
-          break;
-
-        case "speech_models_download_request":
-          await this.handleSpeechModelsDownloadRequest(msg);
-          break;
-
-        case "clear_agent_attention":
-          await this.handleClearAgentAttention(msg.agentId);
-          break;
-
-        case "client_heartbeat":
-          this.handleClientHeartbeat(msg);
-          break;
-
-        case "ping": {
-          const now = Date.now();
-          this.emit({
-            type: "pong",
-            payload: {
-              requestId: msg.requestId,
-              clientSentAt: msg.clientSentAt,
-              serverReceivedAt: now,
-              serverSentAt: now,
-            },
-          });
-          break;
+        const requestId = (msg as { requestId?: unknown }).requestId;
+        if (typeof requestId === "string") {
+          try {
+            this.emit({
+              type: "rpc_error",
+              payload: {
+                requestId,
+                requestType: msg.type,
+                error: `Request failed: ${err.message}`,
+                code: "handler_error",
+              },
+            });
+          } catch (emitError) {
+            this.sessionLogger.error({ err: emitError }, "Failed to emit rpc_error");
+          }
         }
 
-        case "list_commands_request":
-          await this.handleListCommandsRequest(msg);
-          break;
-
-        case "register_push_token":
-          this.handleRegisterPushToken(msg.token);
-          break;
-
-        case "subscribe_terminals_request":
-          this.handleSubscribeTerminalsRequest(msg);
-          break;
-
-        case "unsubscribe_terminals_request":
-          this.handleUnsubscribeTerminalsRequest(msg);
-          break;
-
-        case "list_terminals_request":
-          await this.handleListTerminalsRequest(msg);
-          break;
-
-        case "create_terminal_request":
-          await this.handleCreateTerminalRequest(msg);
-          break;
-
-        case "subscribe_terminal_request":
-          await this.handleSubscribeTerminalRequest(msg);
-          break;
-
-        case "unsubscribe_terminal_request":
-          this.handleUnsubscribeTerminalRequest(msg);
-          break;
-
-        case "terminal_input":
-          this.handleTerminalInput(msg);
-          break;
-
-        case "kill_terminal_request":
-          await this.handleKillTerminalRequest(msg);
-          break;
+        this.emit({
+          type: "activity_log",
+          payload: {
+            id: uuidv4(),
+            timestamp: new Date(),
+            type: "error",
+            content: `Error: ${err.message}`,
+          },
+        });
       }
-    } catch (error: any) {
-      const err = error instanceof Error ? error : new Error(String(error));
-      this.sessionLogger.error({ err }, "Error handling message");
-
-      const requestId = (msg as { requestId?: unknown }).requestId;
-      if (typeof requestId === "string") {
-        try {
-          this.emit({
-            type: "rpc_error",
-            payload: {
-              requestId,
-              requestType: msg.type,
-              error: `Request failed: ${err.message}`,
-              code: "handler_error",
-            },
-          });
-        } catch (emitError) {
-          this.sessionLogger.error({ err: emitError }, "Failed to emit rpc_error");
-        }
-      }
-
-      this.emit({
-        type: "activity_log",
-        payload: {
-          id: uuidv4(),
-          timestamp: new Date(),
-          type: "error",
-          content: `Error: ${err.message}`,
-        },
-      });
-    }
     } finally {
       this.inflightRequests--;
     }
@@ -3510,6 +3519,35 @@ export class Session {
           accepted: false,
           error: error?.message ? String(error.message) : "Failed to set agent model",
         },
+      });
+    }
+  }
+
+  private async handleSwitchAgentProviderRequest(
+    agentId: string,
+    provider: string,
+    modelId: string | null,
+    requestId: string,
+  ): Promise<void> {
+    this.sessionLogger.info(
+      { agentId, provider, modelId, requestId },
+      "session: switch_agent_provider_request",
+    );
+    try {
+      await this.agentManager.switchAgentProvider(agentId, { provider, modelId });
+      this.emit({
+        type: "switch_agent_provider_response",
+        payload: { requestId, agentId, accepted: true, error: null },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to switch agent provider";
+      this.sessionLogger.error(
+        { err: error, agentId, provider, modelId, requestId },
+        "session: switch_agent_provider_request error",
+      );
+      this.emit({
+        type: "switch_agent_provider_response",
+        payload: { requestId, agentId, accepted: false, error: message },
       });
     }
   }

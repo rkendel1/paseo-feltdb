@@ -667,7 +667,12 @@ describe("AgentManager", () => {
           });
           await this.gate;
           if (this.delayedInterrupted) {
-            this.pushEvent({ type: "turn_canceled", provider: this.provider, reason: "Interrupted", turnId });
+            this.pushEvent({
+              type: "turn_canceled",
+              provider: this.provider,
+              reason: "Interrupted",
+              turnId,
+            });
           } else {
             this.pushEvent({ type: "turn_completed", provider: this.provider, turnId });
           }
@@ -1236,7 +1241,12 @@ describe("AgentManager", () => {
           this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
           if (turnNum === 1) {
             await allowFirstRunToEnd.promise;
-            this.pushEvent({ type: "turn_canceled", provider: this.provider, reason: "interrupted", turnId });
+            this.pushEvent({
+              type: "turn_canceled",
+              provider: this.provider,
+              reason: "interrupted",
+              turnId,
+            });
           } else {
             await allowSecondRunToEnd.promise;
             this.pushEvent({ type: "turn_completed", provider: this.provider, turnId });
@@ -1420,7 +1430,7 @@ describe("AgentManager", () => {
     await secondStartEntered.promise;
 
     const replaceGapSnapshot = manager.getAgent(snapshot.id) as
-      | ({ pendingReplacement: boolean; activeForegroundTurnId: string | null; lifecycle: string })
+      | { pendingReplacement: boolean; activeForegroundTurnId: string | null; lifecycle: string }
       | undefined;
     expect(replaceGapSnapshot?.pendingReplacement).toBe(false);
     // CRITICAL FIX-1: activeForegroundTurnId is set to a temp value BEFORE startTurn to prevent concurrent streamAgent() calls
@@ -1494,14 +1504,22 @@ describe("AgentManager", () => {
 
     // Push autonomous events through the session's subscribe() callbacks
     const autonomousTurnId = "autonomous-turn-1";
-    capturedSession!.pushEvent({ type: "turn_started", provider: "codex", turnId: autonomousTurnId });
+    capturedSession!.pushEvent({
+      type: "turn_started",
+      provider: "codex",
+      turnId: autonomousTurnId,
+    });
     capturedSession!.pushEvent({
       type: "timeline",
       provider: "codex",
       item: { type: "assistant_message", text: "AUTONOMOUS_PUMP_MESSAGE" },
       turnId: autonomousTurnId,
     });
-    capturedSession!.pushEvent({ type: "turn_completed", provider: "codex", turnId: autonomousTurnId });
+    capturedSession!.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: autonomousTurnId,
+    });
     await settled;
 
     const updated = manager.getAgent(snapshot.id);
@@ -1571,7 +1589,11 @@ describe("AgentManager", () => {
         },
         { agentId: snapshot.id, replayState: false },
       );
-      capturedSession.pushEvent({ type: "turn_started", provider: "codex", turnId: "autonomous-cancel-1" });
+      capturedSession.pushEvent({
+        type: "turn_started",
+        provider: "codex",
+        turnId: "autonomous-cancel-1",
+      });
     });
 
     const beforeCancel = manager.getAgent(snapshot.id);
@@ -1614,8 +1636,16 @@ describe("AgentManager", () => {
 
     const autonomousTurnId = "autonomous-wait-1";
     const waitPromise = manager.waitForAgentEvent(snapshot.id, { waitForActive: true });
-    capturedSession!.pushEvent({ type: "turn_started", provider: "codex", turnId: autonomousTurnId });
-    capturedSession!.pushEvent({ type: "turn_completed", provider: "codex", turnId: autonomousTurnId });
+    capturedSession!.pushEvent({
+      type: "turn_started",
+      provider: "codex",
+      turnId: autonomousTurnId,
+    });
+    capturedSession!.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: autonomousTurnId,
+    });
 
     const result = await waitPromise;
     expect(result.status).toBe("idle");
@@ -1676,7 +1706,11 @@ describe("AgentManager", () => {
     await new Promise<void>((resolve) => {
       const unsub = manager.subscribe(
         (event) => {
-          if (event.type === "agent_state" && event.agent.id === snapshot.id && event.agent.lifecycle === "running") {
+          if (
+            event.type === "agent_state" &&
+            event.agent.id === snapshot.id &&
+            event.agent.lifecycle === "running"
+          ) {
             unsub();
             resolve();
           }
@@ -1687,14 +1721,22 @@ describe("AgentManager", () => {
 
     // Push autonomous events while foreground is active
     const autonomousTurnId = "autonomous-during-fg-1";
-    capturedSession!.pushEvent({ type: "turn_started", provider: "codex", turnId: autonomousTurnId });
+    capturedSession!.pushEvent({
+      type: "turn_started",
+      provider: "codex",
+      turnId: autonomousTurnId,
+    });
     capturedSession!.pushEvent({
       type: "timeline",
       provider: "codex",
       item: { type: "assistant_message", text: "AUTONOMOUS_DURING_FOREGROUND" },
       turnId: autonomousTurnId,
     });
-    capturedSession!.pushEvent({ type: "turn_completed", provider: "codex", turnId: autonomousTurnId });
+    capturedSession!.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: autonomousTurnId,
+    });
 
     releaseForeground.resolve();
     const foregroundEvents = await foregroundResults;
@@ -1750,7 +1792,11 @@ describe("AgentManager", () => {
     const settled = new Promise<void>((resolve) => {
       manager.subscribe(
         (event) => {
-          if (event.type === "agent_state" && event.agent.id === snapshot.id && event.agent.lifecycle === "idle") {
+          if (
+            event.type === "agent_state" &&
+            event.agent.id === snapshot.id &&
+            event.agent.lifecycle === "idle"
+          ) {
             resolve();
           }
           if (event.type === "agent_stream" && event.agentId === snapshot.id) {
@@ -1762,14 +1808,22 @@ describe("AgentManager", () => {
     });
 
     const autonomousTurnId = "autonomous-isolation-1";
-    capturedSession!.pushEvent({ type: "turn_started", provider: "codex", turnId: autonomousTurnId });
+    capturedSession!.pushEvent({
+      type: "turn_started",
+      provider: "codex",
+      turnId: autonomousTurnId,
+    });
     capturedSession!.pushEvent({
       type: "timeline",
       provider: "codex",
       item: { type: "assistant_message", text: "EVENT_AFTER_ERROR" },
       turnId: autonomousTurnId,
     });
-    capturedSession!.pushEvent({ type: "turn_completed", provider: "codex", turnId: autonomousTurnId });
+    capturedSession!.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: autonomousTurnId,
+    });
 
     await settled;
 
@@ -1909,7 +1963,9 @@ describe("AgentManager", () => {
 
       subscribe(callback: (event: AgentStreamEvent) => void): () => void {
         this.subs.add(callback);
-        return () => { this.subs.delete(callback); };
+        return () => {
+          this.subs.delete(callback);
+        };
       }
 
       async *streamHistory(): AsyncGenerator<AgentStreamEvent> {}
@@ -2192,7 +2248,12 @@ describe("AgentManager", () => {
         const turnId = `fail-turn-${attempt}`;
         setTimeout(() => {
           this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
-          this.pushEvent({ type: "turn_failed", provider: this.provider, error: `boom-${attempt}`, turnId });
+          this.pushEvent({
+            type: "turn_failed",
+            provider: this.provider,
+            error: `boom-${attempt}`,
+            turnId,
+          });
         }, 0);
         return { turnId };
       }
@@ -2275,7 +2336,12 @@ describe("AgentManager", () => {
         const turnId = "turn-failed-1";
         setTimeout(() => {
           this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
-          this.pushEvent({ type: "turn_failed", provider: this.provider, error: "invalid model id", turnId });
+          this.pushEvent({
+            type: "turn_failed",
+            provider: this.provider,
+            error: "invalid model id",
+            turnId,
+          });
         }, 0);
         return { turnId };
       }
@@ -2527,7 +2593,9 @@ describe("AgentManager", () => {
 
       subscribe(callback: (event: AgentStreamEvent) => void): () => void {
         this.subs.add(callback);
-        return () => { this.subs.delete(callback); };
+        return () => {
+          this.subs.delete(callback);
+        };
       }
 
       async *streamHistory(): AsyncGenerator<AgentStreamEvent> {}
@@ -2658,12 +2726,18 @@ describe("AgentManager", () => {
 
       subscribe(callback: (event: AgentStreamEvent) => void): () => void {
         this.subscribers.add(callback);
-        return () => { this.subscribers.delete(callback); };
+        return () => {
+          this.subscribers.delete(callback);
+        };
       }
 
       private pushEvent(event: AgentStreamEvent): void {
         for (const cb of this.subscribers) {
-          try { cb(event); } catch { /* isolation */ }
+          try {
+            cb(event);
+          } catch {
+            /* isolation */
+          }
         }
       }
 
@@ -3496,4 +3570,108 @@ describe("AgentManager", () => {
     expect(manager.getAgent(snapshot.id)?.lifecycle).toBe("idle");
     expect(manager.getAgent(snapshot.id)?.activeForegroundTurnId).toBeNull();
   }, 10_000);
+  test("switchAgentProvider preserves logical history and replaces native persistence", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-provider-switch-test-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const closedProviders: string[] = [];
+
+    class ProviderSession implements AgentSession {
+      readonly capabilities = TEST_CAPABILITIES;
+      readonly id = randomUUID();
+      constructor(
+        readonly provider: string,
+        private readonly config: AgentSessionConfig,
+      ) {}
+      async run(): Promise<AgentRunResult> {
+        return { sessionId: this.id, finalText: "", timeline: [] };
+      }
+      async startTurn(): Promise<{ turnId: string }> {
+        return { turnId: randomUUID() };
+      }
+      subscribe(): () => void {
+        return () => undefined;
+      }
+      async *streamHistory(): AsyncGenerator<AgentStreamEvent> {}
+      async getRuntimeInfo() {
+        return {
+          provider: this.provider,
+          sessionId: this.id,
+          model: this.config.model ?? null,
+          modeId: this.config.modeId ?? null,
+        };
+      }
+      async getAvailableModes() {
+        return [];
+      }
+      async getCurrentMode() {
+        return this.config.modeId ?? null;
+      }
+      async setMode(): Promise<void> {}
+      getPendingPermissions() {
+        return [];
+      }
+      async respondToPermission(): Promise<void> {}
+      describePersistence() {
+        return { provider: this.provider, sessionId: this.id };
+      }
+      async interrupt(): Promise<void> {}
+      async close(): Promise<void> {
+        closedProviders.push(this.provider);
+      }
+    }
+
+    class ProviderClient implements AgentClient {
+      readonly capabilities = TEST_CAPABILITIES;
+      constructor(readonly provider: string) {}
+      async isAvailable(): Promise<boolean> {
+        return true;
+      }
+      async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+        return new ProviderSession(this.provider, config);
+      }
+      async resumeSession(
+        _handle: AgentPersistenceHandle,
+        config?: Partial<AgentSessionConfig>,
+      ): Promise<AgentSession> {
+        return new ProviderSession(this.provider, {
+          provider: this.provider,
+          cwd: config?.cwd ?? workdir,
+          ...config,
+        });
+      }
+      async listModels() {
+        return [];
+      }
+    }
+
+    const manager = new AgentManager({
+      clients: {
+        codex: new ProviderClient("codex"),
+        opencode: new ProviderClient("opencode"),
+      },
+      registry: storage,
+      logger,
+      idFactory: () => "00000000-0000-4000-8000-000000000600",
+    });
+    const original = await manager.createAgent({
+      provider: "codex",
+      cwd: workdir,
+      model: "gpt-5.2-codex",
+    });
+    manager.recordUserMessage(original.id, "keep this context", { emitState: false });
+    const originalPersistence = manager.getAgent(original.id)?.persistence;
+
+    const switched = await manager.switchAgentProvider(original.id, {
+      provider: "opencode",
+      modelId: "ollama/qwen3-coder:latest",
+    });
+
+    expect(switched.id).toBe(original.id);
+    expect(switched.provider).toBe("opencode");
+    expect(switched.config.model).toBe("ollama/qwen3-coder:latest");
+    expect(switched.timeline).toContainEqual({ type: "user_message", text: "keep this context" });
+    expect(switched.persistence?.provider).toBe("opencode");
+    expect(switched.persistence?.sessionId).not.toBe(originalPersistence?.sessionId);
+    expect(closedProviders).toEqual(["codex"]);
+  });
 });

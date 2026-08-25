@@ -773,6 +773,24 @@ export const SetAgentModelResponseMessageSchema = z.object({
   }),
 });
 
+export const SwitchAgentProviderRequestMessageSchema = z.object({
+  type: z.literal("switch_agent_provider_request"),
+  agentId: z.string(),
+  provider: AgentProviderSchema,
+  modelId: z.string().nullable(),
+  requestId: z.string(),
+});
+
+export const SwitchAgentProviderResponseMessageSchema = z.object({
+  type: z.literal("switch_agent_provider_response"),
+  payload: z.object({
+    requestId: z.string(),
+    agentId: z.string(),
+    accepted: z.boolean(),
+    error: z.string().nullable(),
+  }),
+});
+
 export const SetAgentThinkingRequestMessageSchema = z.object({
   type: z.literal("set_agent_thinking_request"),
   agentId: z.string(),
@@ -1169,6 +1187,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   FetchAgentTimelineRequestMessageSchema,
   SetAgentModeRequestMessageSchema,
   SetAgentModelRequestMessageSchema,
+  SwitchAgentProviderRequestMessageSchema,
   SetAgentThinkingRequestMessageSchema,
   AgentPermissionResponseMessageSchema,
   CheckoutStatusRequestSchema,
@@ -2221,6 +2240,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   SetVoiceModeResponseMessageSchema,
   SetAgentModeResponseMessageSchema,
   SetAgentModelResponseMessageSchema,
+  SwitchAgentProviderResponseMessageSchema,
   SetAgentThinkingResponseMessageSchema,
   UpdateAgentResponseMessageSchema,
   WaitForFinishResponseMessageSchema,

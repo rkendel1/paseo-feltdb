@@ -52,6 +52,7 @@ export class RunManager {
   async createRun(input: {
     agentId: string;
     provider: "claude" | "codex" | "opencode";
+    model?: string;
     cwd: string;
     prompt: string;
   }): Promise<Run | null> {
@@ -72,6 +73,7 @@ export class RunManager {
         workspaceId: workspace.id,
         agentId: input.agentId,
         provider: input.provider,
+        model: input.model,
         prompt: input.prompt,
       });
 
@@ -88,10 +90,7 @@ export class RunManager {
 
       return run;
     } catch (error) {
-      this.logger.error(
-        { agentId: input.agentId, err: error },
-        "Failed to create Run entity",
-      );
+      this.logger.error({ agentId: input.agentId, err: error }, "Failed to create Run entity");
       return null;
     }
   }
@@ -148,10 +147,7 @@ export class RunManager {
         "Context resolution recorded",
       );
     } catch (error) {
-      this.logger.error(
-        { agentId, err: error },
-        "Failed to record context resolution",
-      );
+      this.logger.error({ agentId, err: error }, "Failed to record context resolution");
     }
   }
 
@@ -160,10 +156,7 @@ export class RunManager {
    *
    * Called when agent finishes normally.
    */
-  async markRunCompleted(
-    agentId: string,
-    result?: { text: string; usage?: any },
-  ): Promise<void> {
+  async markRunCompleted(agentId: string, result?: { text: string; usage?: any }): Promise<void> {
     try {
       const tracked = this.activeRuns.get(agentId);
       if (!tracked) {

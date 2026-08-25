@@ -31,7 +31,7 @@ import type {
   PersistedAgentDescriptor,
 } from "./agent-sdk-types.js";
 import type { AgentStorage } from "./agent-storage.js";
-import { AGENT_PROVIDER_IDS } from "./provider-manifest.js";
+import { AGENT_PROVIDER_IDS, getAgentProviderDefinition } from "./provider-manifest.js";
 import type { ExecutionFeedbackNormalizer } from "../state/index.js";
 
 export { AGENT_LIFECYCLE_STATUSES, type AgentLifecycleStatus };
@@ -391,7 +391,10 @@ export class AgentManager {
       // Get workspace from FeltDB using agent's cwd
       const workspace = await this.paseoState.workspaces.getByCwd(agent.cwd);
       if (!workspace) {
-        this.logger.debug({ agentId: agent.id, cwd: agent.cwd }, "Could not find workspace for extraction service");
+        this.logger.debug(
+          { agentId: agent.id, cwd: agent.cwd },
+          "Could not find workspace for extraction service",
+        );
         return null;
       }
 
@@ -406,10 +409,7 @@ export class AgentManager {
       this.memoryExtractionServices.set(agent.id, service);
       return service;
     } catch (err) {
-      this.logger.error(
-        { agentId: agent.id, err },
-        "Failed to create memory extraction service"
-      );
+      this.logger.error({ agentId: agent.id, err }, "Failed to create memory extraction service");
       return null;
     }
   }
@@ -417,13 +417,13 @@ export class AgentManager {
   private extractMemoryFromTimeline(
     agent: ActiveManagedAgent,
     item: AgentTimelineItem,
-    row: AgentTimelineRow
+    row: AgentTimelineRow,
   ): void {
     // Fire-and-forget async extraction (never blocks agent)
     this.doExtractMemoryAsync(agent, item, row).catch((err) => {
       this.logger.debug(
         { agentId: agent.id, itemType: item.type, err },
-        "Memory extraction error (non-blocking, ignored)"
+        "Memory extraction error (non-blocking, ignored)",
       );
     });
   }
@@ -431,7 +431,7 @@ export class AgentManager {
   private async doExtractMemoryAsync(
     agent: ActiveManagedAgent,
     item: AgentTimelineItem,
-    row: AgentTimelineRow
+    row: AgentTimelineRow,
   ): Promise<void> {
     const extractionService = await this.getOrCreateExtractionService(agent);
     if (!extractionService) {
@@ -988,6 +988,114 @@ export class AgentManager {
     this.emitState(agent);
   }
 
+  async switchAgentProvider(
+    agentId: string,
+    selection: { provider: AgentProvider; modelId: string | null },
+  ): Promise<ManagedAgent> {
+    const existing = this.requireAgent(agentId);
+    if (this.hasInFlightRun(agentId)) {
+      throw new Error("Cannot switch providers while an agent turn is active");
+    }
+
+    const normalizedModelId = selection.modelId?.trim() || undefined;
+    if (selection.provider === existing.provider) {
+      await this.setAgentModel(agentId, normalizedModelId ?? null);
+      return { ...this.requireAgent(agentId) };
+    }
+
+    const client = this.requireClient(selection.provider);
+    if (!(await client.isAvailable())) {
+      throw new Error(
+        `Provider '${selection.provider}' is not available. Please ensure the CLI is installed.`,
+      );
+    }
+
+    const providerDefinition = getAgentProviderDefinition(selection.provider);
+    const nextConfig = await this.normalizeConfig({
+      ...existing.config,
+      provider: selection.provider,
+      model: normalizedModelId,
+      modeId: providerDefinition.defaultModeId ?? undefined,
+      thinkingOptionId: undefined,
+    });
+    const nextSession = await client.createSession(nextConfig, this.buildLaunchContext(agentId));
+    const timelineState = this.ensureTimelineState(existing);
+    const previousProvider = existing.provider;
+    const previousModel = existing.runtimeInfo?.model ?? existing.config.model ?? null;
+
+    if (existing.unsubscribeSession) {
+      existing.unsubscribeSession();
+      existing.unsubscribeSession = null;
+    }
+    this.agents.delete(agentId);
+
+    let switched: ManagedAgent;
+    try {
+      switched = await this.registerSession(nextSession, nextConfig, agentId, {
+        labels: existing.labels,
+        createdAt: existing.createdAt,
+        updatedAt: existing.updatedAt,
+        lastUserMessageAt: existing.lastUserMessageAt,
+        timeline: [...existing.timeline],
+        timelineRows: timelineState.rows.map((row) => ({ ...row })),
+        timelineEpoch: timelineState.epoch,
+        timelineNextSeq: timelineState.nextSeq,
+        historyPrimed: true,
+        lastUsage: existing.lastUsage,
+        lastError: existing.lastError,
+        attention: existing.attention,
+        conversationId: existing.conversationId,
+        messageSequence: existing.messageSequence,
+      });
+    } catch (error) {
+      this.agents.delete(agentId);
+      this.agents.set(agentId, existing);
+      this.subscribeToSession(existing);
+      await nextSession.close().catch(() => undefined);
+      throw error;
+    }
+
+    await existing.session.close().catch((error) => {
+      this.logger.warn({ err: error, agentId }, "Failed to close replaced provider session");
+    });
+
+    if (this.paseoState) {
+      const durableAgent = await this.paseoState.agents.getById(agentId);
+      if (durableAgent) {
+        const switchedAt = new Date().toISOString();
+        await this.paseoState.agents.update(agentId, {
+          provider: selection.provider,
+          model: normalizedModelId,
+          persistenceHandle: this.requireAgent(agentId).persistence,
+          config: {
+            title: nextConfig.title ?? null,
+            modeId: nextConfig.modeId ?? null,
+            thinkingOptionId: null,
+            systemPrompt: nextConfig.systemPrompt ?? null,
+            mcpServers: nextConfig.mcpServers ?? null,
+            extra: nextConfig.extra ?? null,
+          },
+          providerHistory: [
+            ...(durableAgent.providerHistory ?? []),
+            {
+              fromProvider: previousProvider,
+              toProvider: selection.provider,
+              fromModel: previousModel,
+              toModel: normalizedModelId ?? null,
+              switchedAt,
+            },
+          ],
+        });
+      }
+    }
+
+    this.logger.info(
+      { agentId, fromProvider: previousProvider, toProvider: selection.provider },
+      "Agent provider switched",
+    );
+    return switched;
+  }
+
   async setAgentThinkingOption(agentId: string, thinkingOptionId: string | null): Promise<void> {
     const agent = this.requireAgent(agentId);
     const normalizedThinkingOptionId =
@@ -1136,14 +1244,18 @@ export class AgentManager {
       this.enqueuePersistMessage(agentId, item, capturedRunId).catch((err) => {
         this.logger.warn(
           { agentId, itemType: item.type, err },
-          "Failed to persist message to FeltDB"
+          "Failed to persist message to FeltDB",
         );
       });
     }
     await this.persistSnapshot(agent);
   }
 
-  private enqueuePersistMessage(agentId: string, item: AgentTimelineItem, runId?: string): Promise<void> {
+  private enqueuePersistMessage(
+    agentId: string,
+    item: AgentTimelineItem,
+    runId?: string,
+  ): Promise<void> {
     const promise = this.persistMessage(agentId, item, runId);
     this.backgroundTasks.add(promise);
     promise.finally(() => {
@@ -1152,9 +1264,15 @@ export class AgentManager {
     return promise;
   }
 
-  private async persistAgentToFeltDB(agent: ManagedAgent, config: AgentSessionConfig): Promise<void> {
+  private async persistAgentToFeltDB(
+    agent: ManagedAgent,
+    config: AgentSessionConfig,
+  ): Promise<void> {
     if (!this.paseoState) {
-      this.logger.debug({ agentId: agent.id }, "persistAgentToFeltDB: paseoState not available, skipping");
+      this.logger.debug(
+        { agentId: agent.id },
+        "persistAgentToFeltDB: paseoState not available, skipping",
+      );
       return;
     }
 
@@ -1164,7 +1282,10 @@ export class AgentManager {
       // Ensure workspace exists for this cwd
       let workspace = await this.paseoState.workspaces.getByCwd(config.cwd);
       if (!workspace) {
-        this.logger.debug({ cwd: config.cwd }, "persistAgentToFeltDB: workspace not found, creating");
+        this.logger.debug(
+          { cwd: config.cwd },
+          "persistAgentToFeltDB: workspace not found, creating",
+        );
         // Need to get or create project first
         const projects = await this.paseoState.projects.listAll();
         let project = projects.length > 0 ? projects[0] : null;
@@ -1188,20 +1309,28 @@ export class AgentManager {
           cwd: config.cwd,
           kind: "directory",
         });
-        this.logger.debug({ agentId: agent.id, workspaceId: workspace.id }, "persistAgentToFeltDB: workspace created");
+        this.logger.debug(
+          { agentId: agent.id, workspaceId: workspace.id },
+          "persistAgentToFeltDB: workspace created",
+        );
       }
 
       // Check if agent already exists in FeltDB
       console.error(`[PERSIST-AGENT] Checking if agent ${agent.id} already exists in FeltDB`);
       const existingAgent = await this.paseoState.agents.getById(agent.id);
       if (existingAgent) {
-        this.logger.debug({ agentId: agent.id }, "persistAgentToFeltDB: agent already exists in FeltDB");
+        this.logger.debug(
+          { agentId: agent.id },
+          "persistAgentToFeltDB: agent already exists in FeltDB",
+        );
         console.error(`[PERSIST-AGENT] Agent ${agent.id} already exists, skipping create`);
         return;
       }
 
       // Create agent in FeltDB - IMPORTANT: pass the agent ID so it matches the in-memory agent
-      console.error(`[PERSIST-AGENT] Creating agent ${agent.id} in FeltDB with workspaceId ${workspace.id}`);
+      console.error(
+        `[PERSIST-AGENT] Creating agent ${agent.id} in FeltDB with workspaceId ${workspace.id}`,
+      );
       await (this.paseoState.agents.create as any)({
         id: agent.id,
         workspaceId: workspace.id,
@@ -1218,16 +1347,20 @@ export class AgentManager {
       });
 
       console.error(`[PERSIST-AGENT] Agent ${agent.id} created successfully in FeltDB`);
-      this.logger.debug({ agentId: agent.id, workspaceId: workspace.id }, "persistAgentToFeltDB: agent created in FeltDB");
-    } catch (err) {
-      this.logger.warn(
-        { agentId: agent.id, err },
-        "Error persisting agent to FeltDB"
+      this.logger.debug(
+        { agentId: agent.id, workspaceId: workspace.id },
+        "persistAgentToFeltDB: agent created in FeltDB",
       );
+    } catch (err) {
+      this.logger.warn({ agentId: agent.id, err }, "Error persisting agent to FeltDB");
     }
   }
 
-  private async persistMessage(agentId: string, item: AgentTimelineItem, runId?: string): Promise<void> {
+  private async persistMessage(
+    agentId: string,
+    item: AgentTimelineItem,
+    runId?: string,
+  ): Promise<void> {
     if (!this.paseoState) {
       this.logger.debug({ agentId }, "persistMessage: paseoState not available, skipping");
       return;
@@ -1245,7 +1378,10 @@ export class AgentManager {
       // Ensure conversation exists for this agent
       let conversationId = agent.conversationId;
       if (!conversationId) {
-        this.logger.debug({ agentId }, "persistMessage: no conversationId, fetching agent from FeltDB");
+        this.logger.debug(
+          { agentId },
+          "persistMessage: no conversationId, fetching agent from FeltDB",
+        );
 
         const feltdbAgent = await this.paseoState.agents.getById(agentId);
         if (!feltdbAgent) {
@@ -1253,8 +1389,10 @@ export class AgentManager {
           return;
         }
 
-        this.logger.debug({ agentId, feltdbAgentId: feltdbAgent.id, workspaceId: feltdbAgent.workspaceId },
-          "persistMessage: found agent in FeltDB");
+        this.logger.debug(
+          { agentId, feltdbAgentId: feltdbAgent.id, workspaceId: feltdbAgent.workspaceId },
+          "persistMessage: found agent in FeltDB",
+        );
 
         // Resolve workspace to get projectId
         const workspace = feltdbAgent.workspaceId
@@ -1262,13 +1400,17 @@ export class AgentManager {
           : null;
 
         if (!workspace || !workspace.projectId) {
-          this.logger.warn({ agentId, workspaceId: feltdbAgent.workspaceId },
-            "Workspace or projectId not found, skipping conversation creation");
+          this.logger.warn(
+            { agentId, workspaceId: feltdbAgent.workspaceId },
+            "Workspace or projectId not found, skipping conversation creation",
+          );
           return;
         }
 
-        this.logger.debug({ agentId, projectId: workspace.projectId, workspaceId: workspace.id },
-          "persistMessage: creating conversation");
+        this.logger.debug(
+          { agentId, projectId: workspace.projectId, workspaceId: workspace.id },
+          "persistMessage: creating conversation",
+        );
 
         // Create conversation on first message
         const conversation = await this.paseoState.conversations.create({
@@ -1282,18 +1424,24 @@ export class AgentManager {
         this.logger.debug({ agentId, conversationId }, "persistMessage: conversation created");
 
         // Initialize sequence from durable storage (crash-safe)
-        agent.messageSequence = await this.paseoState.messages.getMaxSequenceInConversation(conversationId);
+        agent.messageSequence =
+          await this.paseoState.messages.getMaxSequenceInConversation(conversationId);
       }
 
       // Map timeline item to message
       const { authorType, role, content } = this.mapTimelineItemToMessage(item);
       if (!content) {
-        this.logger.debug({ agentId, itemType: item.type }, "persistMessage: no content to persist, skipping");
+        this.logger.debug(
+          { agentId, itemType: item.type },
+          "persistMessage: no content to persist, skipping",
+        );
         return; // Skip items with no content
       }
 
-      this.logger.debug({ agentId, conversationId, authorType, contentLength: content.length },
-        "persistMessage: creating message");
+      this.logger.debug(
+        { agentId, conversationId, authorType, contentLength: content.length },
+        "persistMessage: creating message",
+      );
 
       // CRITICAL FIX-2: Allocate sequence atomically in database layer
       // Instead of incrementing a mutable ManagedAgent field, fetch max sequence
@@ -1309,19 +1457,20 @@ export class AgentManager {
         runId,
       });
 
-      this.logger.debug({ agentId, conversationId, messageId: message.id, sequence: message.sequence },
-        "persistMessage: message created successfully");
-    } catch (err) {
-      this.logger.warn(
-        { agentId, itemType: item.type, err },
-        "Error persisting message to FeltDB"
+      this.logger.debug(
+        { agentId, conversationId, messageId: message.id, sequence: message.sequence },
+        "persistMessage: message created successfully",
       );
+    } catch (err) {
+      this.logger.warn({ agentId, itemType: item.type, err }, "Error persisting message to FeltDB");
     }
   }
 
-  private mapTimelineItemToMessage(
-    item: AgentTimelineItem
-  ): { authorType: "user" | "agent" | "system" | "tool"; role?: string; content: string } {
+  private mapTimelineItemToMessage(item: AgentTimelineItem): {
+    authorType: "user" | "agent" | "system" | "tool";
+    role?: string;
+    content: string;
+  } {
     switch (item.type) {
       case "user_message":
         return {
@@ -1349,7 +1498,8 @@ export class AgentManager {
       case "todo":
         return {
           authorType: "agent",
-          content: item.items?.map((t) => `[${t.completed ? "x" : " "}] ${t.text}`).join("\n") || "",
+          content:
+            item.items?.map((t) => `[${t.completed ? "x" : " "}] ${t.text}`).join("\n") || "",
         };
       case "tool_call":
       case "compaction":
@@ -1432,6 +1582,7 @@ export class AgentManager {
           createdRun = await self.runManager.createRun({
             agentId,
             provider: agent.provider,
+            model: agent.runtimeInfo?.model ?? agent.config.model,
             cwd: agent.cwd,
             prompt: typeof prompt === "string" ? prompt : JSON.stringify(prompt),
           });
@@ -1449,15 +1600,14 @@ export class AgentManager {
           const contextResolution = await Promise.race([
             self.contextService.resolveForTurn(agentId, promptText, createdRun.id),
             new Promise<any>((_, reject) =>
-              setTimeout(() => reject(new Error("Context resolution timeout after 5s")), 5000)
+              setTimeout(() => reject(new Error("Context resolution timeout after 5s")), 5000),
             ),
           ]);
 
           // Record context resolution status in Run
           const resolutionStatus = contextResolution.success ? "resolved" : "fallback";
           const resolutionPolicy = self.contextService.getFailurePolicy();
-          const policyName =
-            resolutionPolicy.toString() === "block" ? "block" : "fallback";
+          const policyName = resolutionPolicy.toString() === "block" ? "block" : "fallback";
 
           if (self.runManager) {
             await self.runManager.recordContextResolution(agentId, {
@@ -1754,10 +1904,7 @@ export class AgentManager {
     }
 
     const pendingRun = this.getPendingForegroundRun(agentId);
-    if (
-      (snapshot.lifecycle === "running" || pendingRun?.started) &&
-      !snapshot.pendingReplacement
-    ) {
+    if ((snapshot.lifecycle === "running" || pendingRun?.started) && !snapshot.pendingReplacement) {
       return;
     }
 
@@ -1834,11 +1981,7 @@ export class AgentManager {
           return true;
         }
 
-        if (
-          !currentPendingRun &&
-          !current.activeForegroundTurnId &&
-          !current.pendingReplacement
-        ) {
+        if (!currentPendingRun && !current.activeForegroundTurnId && !current.pendingReplacement) {
           finishErr(new Error(`Agent ${agentId} run finished before starting`));
           return true;
         }
@@ -1885,8 +2028,7 @@ export class AgentManager {
     const pendingRun = this.getPendingForegroundRun(agentId);
     const foregroundTurnId = agent.activeForegroundTurnId;
     const hasForegroundTurn = Boolean(foregroundTurnId);
-    const isAutonomousRunning =
-      agent.lifecycle === "running" && !hasForegroundTurn && !pendingRun;
+    const isAutonomousRunning = agent.lifecycle === "running" && !hasForegroundTurn && !pendingRun;
 
     if (!hasForegroundTurn && !isAutonomousRunning && !pendingRun) {
       return false;
@@ -2516,9 +2658,7 @@ export class AgentManager {
     },
   ): void {
     const eventTurnId = (event as { turnId?: string }).turnId;
-    const isForegroundEvent = Boolean(
-      eventTurnId && agent.activeForegroundTurnId === eventTurnId,
-    );
+    const isForegroundEvent = Boolean(eventTurnId && agent.activeForegroundTurnId === eventTurnId);
 
     // Only update timestamp for live events, not history replay
     if (!options?.fromHistory) {
@@ -2554,11 +2694,7 @@ export class AgentManager {
         }
         // Suppress user_message echoes for the active foreground turn —
         // these are already recorded by recordUserMessage().
-        if (
-          !options?.fromHistory &&
-          event.item.type === "user_message" &&
-          isForegroundEvent
-        ) {
+        if (!options?.fromHistory && event.item.type === "user_message" && isForegroundEvent) {
           const eventMessageId = normalizeMessageId(event.item.messageId);
           const eventText = event.item.text;
           if (eventMessageId) {
@@ -2935,9 +3071,7 @@ export class AgentManager {
     }
   }
 
-  private async normalizeConfig(
-    config: AgentSessionConfig,
-  ): Promise<AgentSessionConfig> {
+  private async normalizeConfig(config: AgentSessionConfig): Promise<AgentSessionConfig> {
     const normalized: AgentSessionConfig = { ...config };
 
     // Always resolve cwd to absolute path for consistent history file lookup
@@ -2995,5 +3129,4 @@ export class AgentManager {
     }
     return agent;
   }
-
 }

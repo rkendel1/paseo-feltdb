@@ -1525,6 +1525,35 @@ export class DaemonClient {
     }
   }
 
+  async switchAgentProvider(
+    agentId: string,
+    provider: AgentProvider,
+    modelId: string | null = null,
+  ): Promise<void> {
+    const requestId = this.createRequestId();
+    const message = SessionInboundMessageSchema.parse({
+      type: "switch_agent_provider_request",
+      agentId,
+      provider,
+      modelId,
+      requestId,
+    });
+    const payload = await this.sendRequest({
+      requestId,
+      message,
+      timeout: 30000,
+      options: { skipQueue: true },
+      select: (msg) => {
+        if (msg.type !== "switch_agent_provider_response") return null;
+        if (msg.payload.requestId !== requestId) return null;
+        return msg.payload;
+      },
+    });
+    if (!payload.accepted) {
+      throw new Error(payload.error ?? "switchAgentProvider rejected");
+    }
+  }
+
   async setAgentThinkingOption(agentId: string, thinkingOptionId: string | null): Promise<void> {
     const requestId = this.createRequestId();
     const message = SessionInboundMessageSchema.parse({

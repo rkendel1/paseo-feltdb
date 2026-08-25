@@ -24,6 +24,7 @@ import type {
 } from "@server/server/agent/agent-sdk-types";
 import type { AgentProviderDefinition } from "@server/server/agent/provider-manifest";
 import {
+  AGENT_PROVIDER_DEFINITIONS,
   getModeVisuals,
   type AgentModeColorTier,
   type AgentModeIcon,
@@ -616,6 +617,7 @@ export function AgentStatusBar({ agentId, serverId }: AgentStatusBarProps) {
         ? {
             provider: currentAgent.provider,
             cwd: currentAgent.cwd,
+            status: currentAgent.status,
             currentModeId: currentAgent.currentModeId,
             runtimeModelId: currentAgent.runtimeInfo?.model ?? null,
             model: currentAgent.model,
@@ -630,6 +632,18 @@ export function AgentStatusBar({ agentId, serverId }: AgentStatusBarProps) {
     (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b),
   );
   const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
+
+  const availableProvidersQuery = useQuery({
+    queryKey: ["availableProviders", serverId],
+    enabled: Boolean(client),
+    staleTime: 60 * 1000,
+    queryFn: async () => {
+      if (!client) throw new Error("Daemon client unavailable");
+      const payload = await client.listAvailableProviders();
+      if (payload.error) throw new Error(payload.error);
+      return payload.providers.filter((entry) => entry.available).map((entry) => entry.provider);
+    },
+  });
 
   const modelsQuery = useQuery({
     queryKey: [
@@ -684,6 +698,13 @@ export function AgentStatusBar({ agentId, serverId }: AgentStatusBarProps) {
     }));
   }, [modelSelection.thinkingOptions]);
 
+  const providerOptions = useMemo<StatusOption[]>(() => {
+    const available = new Set(availableProvidersQuery.data ?? []);
+    return AGENT_PROVIDER_DEFINITIONS.filter((definition) => available.has(definition.id)).map(
+      (definition) => ({ id: definition.id, label: definition.label }),
+    );
+  }, [availableProvidersQuery.data]);
+
   if (!agent) {
     return null;
   }
@@ -691,8 +712,18 @@ export function AgentStatusBar({ agentId, serverId }: AgentStatusBarProps) {
   return (
     <ControlledStatusBar
       provider={agent.provider}
+      providerOptions={providerOptions}
+      selectedProviderId={agent.provider}
+      onSelectProvider={(provider) => {
+        if (!client || provider === agent.provider) return;
+        void client.switchAgentProvider(agentId, provider, null).catch((error) => {
+          console.warn("[AgentStatusBar] switchAgentProvider failed", error);
+        });
+      }}
       modeOptions={
-        modeOptions.length > 0 ? modeOptions : [{ id: agent.currentModeId ?? "", label: displayMode }]
+        modeOptions.length > 0
+          ? modeOptions
+          : [{ id: agent.currentModeId ?? "", label: displayMode }]
       }
       selectedModeId={agent.currentModeId ?? undefined}
       onSelectMode={(modeId) => {
@@ -724,7 +755,7 @@ export function AgentStatusBar({ agentId, serverId }: AgentStatusBarProps) {
         });
       }}
       isModelLoading={modelsQuery.isPending || modelsQuery.isFetching}
-      disabled={!client}
+      disabled={!client || agent.status === "running"}
     />
   );
 }

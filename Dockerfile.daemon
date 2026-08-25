@@ -10,6 +10,9 @@ COPY . .
 
 # Install and build
 RUN npm ci
+# node-pty's Linux prebuilds target glibc, while Alpine uses musl. Rebuild only
+# this native addon so other dependencies can continue using their prebuilds.
+RUN npm_config_build_from_source=true npm rebuild node-pty
 RUN npm run build:daemon
 
 

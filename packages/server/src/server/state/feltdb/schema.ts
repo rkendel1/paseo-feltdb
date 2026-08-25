@@ -73,6 +73,17 @@ export const AgentSchema = z.object({
   id: z.string(),
   workspaceId: z.string(),
   provider: z.enum(["claude", "codex", "opencode"]),
+  providerHistory: z
+    .array(
+      z.object({
+        fromProvider: z.enum(["claude", "codex", "opencode"]),
+        toProvider: z.enum(["claude", "codex", "opencode"]),
+        fromModel: z.string().nullable(),
+        toModel: z.string().nullable(),
+        switchedAt: z.string().datetime(),
+      }),
+    )
+    .optional(),
   model: z.string().optional(),
   status: z.enum(["running", "closed", "paused", "archived"]).default("closed"),
   config: z
@@ -123,9 +134,7 @@ export const TaskSchema = z.object({
   repositoryId: z.string().optional(),
   title: z.string(),
   description: z.string().optional(),
-  status: z
-    .enum(["open", "in_progress", "blocked", "completed", "cancelled"])
-    .default("open"),
+  status: z.enum(["open", "in_progress", "blocked", "completed", "cancelled"]).default("open"),
   priority: z.enum(["low", "medium", "high", "critical"]).optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),

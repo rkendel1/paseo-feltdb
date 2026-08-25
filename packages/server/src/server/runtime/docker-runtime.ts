@@ -307,7 +307,7 @@ export class DockerRuntime implements IContainerRuntime {
     containerId: string,
     src: string,
     dst: string,
-    readonly = false
+    _readonly = false
   ): Promise<void> {
     // Docker doesn't support dynamic mount after creation
     // This would require recreating the container

@@ -115,9 +115,10 @@ import {
   type VoiceMcpSocketBridgeManager,
 } from "./voice-mcp-bridge.js";
 import { resolveVoiceMcpBridgeFromRuntime } from "./voice-mcp-bridge-command.js";
-import { initializeState, type PaseoState, createAgentContextService } from "./state/index.js";
+import { initializeState, type PaseoState, createAgentContextService, createMemoryExtractionService } from "./state/index.js";
 import { RunManager } from "./state/run-manager.js";
 import { RunRecoveryManager } from "./state/run-recovery.js";
+import { createHandoffOrchestrator, type HandoffOrchestrator } from "./agent/handoff-orchestrator.js";
 
 type AgentMcpTransportMap = Map<string, StreamableHTTPServerTransport>;
 
@@ -194,6 +195,7 @@ export interface PaseoDaemon {
   agentStorage: AgentStorage;
   terminalManager: TerminalManager;
   paseoState: PaseoState;
+  handoffOrchestrator: HandoffOrchestrator;
   start(): Promise<void>;
   stop(): Promise<void>;
   getListenTarget(): ListenTarget | null;
@@ -417,6 +419,14 @@ export async function createPaseoDaemon(
     });
     logger.info("AgentContextService initialized for context injection");
 
+    // Phase 2b: Create HandoffOrchestrator for multi-agent coordination
+    const handoffOrchestrator = createHandoffOrchestrator({
+      paseoState,
+      contextService,
+      logger,
+    });
+    logger.info("HandoffOrchestrator initialized for multi-agent coordination");
+
     const agentManager = new AgentManager({
       clients: {
         ...createAllClients(logger, {
@@ -428,6 +438,7 @@ export async function createPaseoDaemon(
       runManager,
       paseoState,
       contextService,
+      memoryExtractionServiceFactory: createMemoryExtractionService,
       logger,
     });
 
@@ -799,6 +810,7 @@ export async function createPaseoDaemon(
       agentStorage,
       terminalManager,
       paseoState,
+      handoffOrchestrator,
       start,
       stop,
       getListenTarget: () => boundListenTarget,

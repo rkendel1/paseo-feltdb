@@ -14,7 +14,7 @@
  * - GC pause times
  */
 
-import { execSync, spawn } from "node:child_process";
+import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import type { Logger } from "pino";
@@ -87,14 +87,11 @@ export interface ResourceBudget {
  * ResourceMonitor tracks Paseo resource consumption
  */
 export class ResourceMonitor {
-  private logger: Logger;
   private snapshots: ResourceSnapshot[] = [];
-  private gcMetrics: GCMetrics | null = null;
   private baseline: ResourceSnapshot | null = null;
   private budget: ResourceBudget;
 
-  constructor(logger: Logger, budget?: Partial<ResourceBudget>) {
-    this.logger = logger.child({ module: "resource-monitor" });
+  constructor(_logger: Logger, budget?: Partial<ResourceBudget>) {
     this.budget = {
       process: {
         rssMax: (budget?.process?.rssMax ?? 500) * 1024 * 1024, // 500 MB default
@@ -120,18 +117,12 @@ export class ResourceMonitor {
       let gcCount = 0;
       const pauses: number[] = [];
 
-      global.gc = function (...args: any[]) {
+      (global as any).gc = function (...args: any[]): void {
         const start = performance.now();
         originalGc(...args);
         const duration = performance.now() - start;
         gcCount++;
         pauses.push(duration);
-      };
-
-      this.gcMetrics = {
-        gcCount,
-        gcDuration: 0,
-        pauses,
       };
     }
   }
@@ -156,7 +147,7 @@ export class ResourceMonitor {
       uptime: processUptime,
       eventLoop: {
         lag: 0, // Measured separately if needed
-        active: process._getActiveHandles?.().length ?? 0,
+        active: (process as any)._getActiveHandles?.()?.length ?? 0,
       },
     };
 

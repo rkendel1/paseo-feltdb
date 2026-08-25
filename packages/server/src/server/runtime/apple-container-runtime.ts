@@ -25,7 +25,7 @@ import type {
 
 export class AppleContainerRuntime implements IContainerRuntime {
   private logger: Logger;
-  private isAvailable: boolean = false;
+  private checkCache: boolean | null = null;
 
   constructor(logger: Logger) {
     this.logger = logger.child({ module: "apple-container-runtime" });
@@ -36,14 +36,15 @@ export class AppleContainerRuntime implements IContainerRuntime {
   }
 
   async isAvailable(): Promise<boolean> {
-    if (this.isAvailable) return true;
+    if (this.checkCache !== null) return this.checkCache;
 
     try {
       execSync("which container", { stdio: "ignore" });
-      this.isAvailable = true;
+      this.checkCache = true;
       return true;
     } catch {
       this.logger.debug("Apple Container runtime not found");
+      this.checkCache = false;
       return false;
     }
   }
@@ -57,47 +58,46 @@ export class AppleContainerRuntime implements IContainerRuntime {
     }
   }
 
-  async create(name: string, config: ContainerConfig): Promise<string> {
+  async create(_name: string, _config: ContainerConfig): Promise<string> {
     this.logger.warn(
-      { name },
       "AppleContainerRuntime.create() not yet implemented - this is a placeholder for Phase 3"
     );
     throw new Error("AppleContainerRuntime not yet implemented");
   }
 
-  async start(containerId: string): Promise<void> {
+  async start(_containerId: string): Promise<void> {
     throw new Error("AppleContainerRuntime not yet implemented");
   }
 
-  async stop(containerId: string, timeout?: number): Promise<void> {
+  async stop(_containerId: string, _timeout?: number): Promise<void> {
     throw new Error("AppleContainerRuntime not yet implemented");
   }
 
-  async remove(containerId: string, force?: boolean): Promise<void> {
+  async remove(_containerId: string, _force?: boolean): Promise<void> {
     throw new Error("AppleContainerRuntime not yet implemented");
   }
 
   async exec(
-    containerId: string,
-    cmd: string[],
-    options?: { env?: Record<string, string>; workdir?: string }
+    _containerId: string,
+    _cmd: string[],
+    _options?: { env?: Record<string, string>; workdir?: string }
   ): Promise<ExecutionResult> {
     throw new Error("AppleContainerRuntime not yet implemented");
   }
 
-  async stats(containerId: string): Promise<ContainerStats> {
+  async stats(_containerId: string): Promise<ContainerStats> {
     throw new Error("AppleContainerRuntime not yet implemented");
   }
 
   async logs(
-    containerId: string,
-    options?: { tail?: number; follow?: boolean }
+    _containerId: string,
+    _options?: { tail?: number; follow?: boolean }
   ): Promise<string> {
     throw new Error("AppleContainerRuntime not yet implemented");
   }
 
   async health(
-    containerId: string
+    _containerId: string
   ): Promise<"healthy" | "unhealthy" | "starting" | "unknown"> {
     throw new Error("AppleContainerRuntime not yet implemented");
   }
@@ -107,18 +107,18 @@ export class AppleContainerRuntime implements IContainerRuntime {
   }
 
   async mount(
-    containerId: string,
-    src: string,
-    dst: string,
-    readonly?: boolean
+    _containerId: string,
+    _src: string,
+    _dst: string,
+    _readonly?: boolean
   ): Promise<void> {
     throw new Error("AppleContainerRuntime not yet implemented");
   }
 
   async exposePort(
-    containerId: string,
-    hostPort: number,
-    containerPort: number
+    _containerId: string,
+    _hostPort: number,
+    _containerPort: number
   ): Promise<void> {
     throw new Error("AppleContainerRuntime not yet implemented");
   }
